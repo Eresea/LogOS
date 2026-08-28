@@ -1354,11 +1354,24 @@ pub fn heartbeat_tick(ticks: &mut u16) {
 #[cfg(feature = "qemu-proof")]
 #[allow(dead_code)]
 pub fn proof_line(message: &[u8]) {
-    for &byte in message {
-        unsafe { asm!("out dx, al", in("dx") 0xe9u16, in("al") byte) };
+    if message.is_empty() || message.len() > logos_abi::IPC_PAGE_BYTES {
+        return;
     }
-    unsafe { asm!("out dx, al", in("dx") 0xe9u16, in("al") b'\r') };
-    unsafe { asm!("out dx, al", in("dx") 0xe9u16, in("al") b'\n') };
+    unsafe {
+        ptr::copy_nonoverlapping(
+            message.as_ptr(),
+            logos_abi::IPC_STAGING_BASE as *mut u8,
+            message.len(),
+        );
+    }
+    unsafe {
+        asm!(
+            "int 49",
+            in("rax") logos_abi::DEBUG_LINE_SYSCALL,
+            in("rdi") message.len(),
+            options(preserves_flags),
+        );
+    }
 }
 
 #[inline(always)]

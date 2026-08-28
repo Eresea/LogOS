@@ -3,6 +3,7 @@ param(
     [switch]$Headless,
     [switch]$Interactive,
     [switch]$Proof,
+    [switch]$LockScreenProof,
     [switch]$FetchProof,
     [switch]$NoNetwork,
     [switch]$NetworkProof,
@@ -23,6 +24,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ($FetchProof -and -not $Proof) { throw '-FetchProof requires -Proof.' }
+if ($LockScreenProof -and -not $Proof) { throw '-LockScreenProof requires -Proof.' }
+if ($LockScreenProof -and -not $DiskImage) {
+    throw '-LockScreenProof requires a fresh -DiskImage path.'
+}
 if ($Interactive -and ($Headless -or $Proof)) { throw 'Choose exactly one of -Interactive, -Headless, or -Proof.' }
 if ($Network -and $NoNetwork) { throw 'Choose either -Network or -NoNetwork, not both.' }
 if ($NoNetwork -and $NetworkProof) { throw 'Choose either -NoNetwork or -NetworkProof, not both.' }
@@ -33,6 +38,9 @@ $repoRoot = Split-Path $PSScriptRoot -Parent
 $target = Join-Path $repoRoot 'target'
 $disk = if ($DiskImage) { [System.IO.Path]::GetFullPath($DiskImage) } else {
     Join-Path $target 'runtime-storage-v5.raw'
+}
+if ($LockScreenProof -and (Test-Path $disk)) {
+    throw "-LockScreenProof requires a new disk image; already exists: $disk"
 }
 $profile = if ($Release) { 'release' } else { 'debug' }
 $efi = Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-vnext.efi"
@@ -56,6 +64,7 @@ if (-not (Test-Path $disk)) {
 $buildArgs = @('build', '--target', 'x86_64-unknown-uefi')
 if ($Proof) {
     $features = @('qemu-proof')
+    if ($LockScreenProof) { $features += 'lockscreen-proof' }
     if ($FetchProof) { $features += 'fetch-proof' }
     $buildArgs += @('--features', ($features -join ','))
 }
@@ -63,7 +72,7 @@ if ($Release) { $buildArgs += '--release' }
 cargo @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "Kernel build failed with exit code $LASTEXITCODE." }
 
-& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof:$Proof -FetchProof:$FetchProof
+& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof:$Proof -LockScreenProof:$LockScreenProof -FetchProof:$FetchProof
 if ($LASTEXITCODE -ne 0) { throw "Service image build failed with exit code $LASTEXITCODE." }
 
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
@@ -257,11 +266,12 @@ function Send-QmpPointerMotion {
         arguments = @{
             device = 'video0'
             events = @(
-                @{ type = 'rel'; data = @{ axis = 'x'; value = $X } }
+                @{ type = 'rel'; data = @{ axis = 'x'; value = $X } },
                 @{ type = 'rel'; data = @{ axis = 'y'; value = $Y } }
             )
         }
     } | Out-Null
+    Start-Sleep -Milliseconds 150
 }
 
 function Send-QmpPointerButton {
@@ -335,6 +345,21 @@ function Framebuffer-HasLockscreenPanel {
     $bytes = [IO.File]::ReadAllBytes($Path)
     $index = 15 + ((300 * 640 + 300) * 3)
     return $bytes[$index] -eq 24 -and $bytes[$index + 1] -eq 37 -and $bytes[$index + 2] -eq 53
+}
+
+function Framebuffer-HasNativeCursor {
+    param([string]$Path, [int]$X, [int]$Y)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    for ($row = 0; $row -lt 14; $row++) {
+        for ($column = 0; $column -lt 3; $column++) {
+            $index = 15 + (((($Y + $row) * 640) + $X + $column) * 3)
+            if ($bytes[$index] -ne 255 -or $bytes[$index + 1] -ne 255 -or $bytes[$index + 2] -ne 255) {
+                return $false
+            }
+        }
+    }
+    return $true
 }
 
 function Wait-QmpFramebufferStable {
@@ -434,17 +459,18 @@ try {
     if (-not (Wait-ProofMarker 'LogOS vNext: Atrium and LockScreen tasks admitted' $TimeoutSeconds)) {
         throw 'Atrium/LockScreen task startup was not admitted.'
     }
-    if ($interactiveMode) {
+    if (-not $LockScreenProof) {
+        if ($interactiveMode) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
-    }
-    foreach ($key in @('n', 'e', 't', 'dot', 's', 't', 'a', 't', 'u', 's', 'ret')) {
+        }
+        foreach ($key in @('n', 'e', 't', 'dot', 's', 't', 'a', 't', 'u', 's', 'ret')) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
             execute = 'human-monitor-command'
             arguments = @{ 'command-line' = "sendkey $key" }
         } | Out-Null
-    }
-    Start-Sleep -Milliseconds 500
-    if ($interactiveMode) {
+        }
+        Start-Sleep -Milliseconds 500
+        if ($interactiveMode) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofAfter } } | Out-Null
         if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
             throw 'QEMU proof did not capture both framebuffer snapshots.'
@@ -452,34 +478,91 @@ try {
         if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
             throw 'QEMU keyboard injection did not change the rendered framebuffer.'
         }
-    }
-    $resultAfterInput = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
-    if ($resultAfterInput -notmatch 'LogOS vNext: keyboard event wake') {
+        }
+        $resultAfterInput = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
+        if ($resultAfterInput -notmatch 'LogOS vNext: keyboard event wake') {
         throw 'QEMU keyboard input did not wake a blocked Input service.'
-    }
+        }
     # Ensure the known LockScreen surface is live, then exercise PS/2 relative
     # motion and left-button capture/release through QMP.
-    Send-QmpKey $qmp 'ctrl-3'
-    Start-Sleep -Seconds 2
-    $pointerWakeCount = Get-ProofMarkerCount 'LogOS vNext: pointer event wake'
-    if (-not (Wait-QmpFramebufferStable $qmp $pointerBefore $TimeoutSeconds)) {
+        Send-QmpKey $qmp 'ctrl-3'
+        Start-Sleep -Seconds 2
+        $pointerWakeCount = Get-ProofMarkerCount 'LogOS vNext: pointer event wake'
+        if (-not (Wait-QmpFramebufferStable $qmp $pointerBefore $TimeoutSeconds)) {
         throw 'QEMU pointer proof did not observe a rendered framebuffer.'
-    }
+        }
+        if (-not (Framebuffer-HasNativeCursor $pointerBefore 320 200)) {
+        throw 'QEMU pointer proof did not observe the native cursor on LockScreen.'
+        }
     # PS/2 reports positive Y upward; the decoder converts it to screen-down.
-    Send-QmpPointerMotion $qmp 40 -20
-    Send-QmpPointerButton $qmp $true
-    Send-QmpPointerButton $qmp $false
-    if (-not (Wait-ProofMarkerAfter 'LogOS vNext: pointer event wake' $pointerWakeCount $TimeoutSeconds)) {
+        Start-Sleep -Seconds 2
+        Send-QmpPointerMotion $qmp 40 -20
+        Start-Sleep -Milliseconds 250
+        Send-QmpPointerButton $qmp $true
+        Start-Sleep -Milliseconds 100
+        Send-QmpPointerButton $qmp $false
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: pointer event wake' $pointerWakeCount $TimeoutSeconds)) {
         throw 'QEMU pointer input did not wake a blocked Input service.'
-    }
-    if (-not (Wait-QmpFramebufferStable $qmp $pointerAfter $TimeoutSeconds)) {
+        }
+        if (-not (Wait-QmpFramebufferStable $qmp $pointerAfter $TimeoutSeconds)) {
         throw 'QEMU pointer proof did not settle on a rendered framebuffer.'
-    }
-    if (-not (Test-Path $pointerBefore) -or -not (Test-Path $pointerAfter)) {
+        }
+        if (-not (Test-Path $pointerBefore) -or -not (Test-Path $pointerAfter)) {
         throw 'QEMU pointer proof did not capture both framebuffer snapshots.'
-    }
-    if (-not (Framebuffer-HasPixels $pointerAfter)) {
+        }
+        if (-not (Framebuffer-HasPixels $pointerAfter)) {
         throw 'QEMU pointer proof lost the rendered framebuffer after input.'
+        }
+        if (-not (Framebuffer-HasNativeCursor $pointerAfter 40 0)) {
+        throw 'QEMU pointer motion did not move the native cursor to the decoded position.'
+        }
+    }
+    if ($LockScreenProof) {
+        if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen surface ready' $TimeoutSeconds)) {
+            throw 'LockScreen surface did not become ready.'
+        }
+        if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen claim mode ready' $TimeoutSeconds)) {
+            throw 'First-boot Claim mode did not become ready.'
+        }
+        Send-QmpText $qmp 'admin'
+        Send-QmpKey $qmp 'tab'
+        Send-QmpText $qmp 'password'
+        Send-QmpKey $qmp 'tab'
+        Send-QmpText $qmp 'password'
+        Send-QmpKey $qmp 'ret'
+        if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen admin claim PASS' $TimeoutSeconds)) {
+            throw 'Admin claim did not complete.'
+        }
+        if (-not (Wait-ProofMarker 'LogOS vNext: Atrium authenticated' $TimeoutSeconds)) {
+            throw 'Atrium did not receive the claimed admin session.'
+        }
+        if (-not (Wait-ProofMarker 'LogOS vNext: Atrium home surface ready' $TimeoutSeconds)) {
+            throw 'Home surface did not become ready after admin claim.'
+        }
+
+        $bootMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium IPC topology ready'
+        $surfaceMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen surface ready'
+        $homeMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium home surface ready'
+        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'system_reset' } | Out-Null
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium IPC topology ready' $bootMarker $TimeoutSeconds)) {
+            throw 'Second boot did not reach Atrium.'
+        }
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen surface ready' $surfaceMarker $TimeoutSeconds)) {
+            throw 'Second boot did not recreate LockScreen.'
+        }
+        $loginMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen login PASS'
+        Send-QmpText $qmp 'admin'
+        Send-QmpKey $qmp 'tab'
+        Send-QmpText $qmp 'password'
+        Send-QmpKey $qmp 'ret'
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen login PASS' $loginMarker $TimeoutSeconds)) {
+            throw 'Persisted admin login did not complete.'
+        }
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium home surface ready' $homeMarker $TimeoutSeconds)) {
+            throw 'Home surface did not become ready after persisted login.'
+        }
+        Add-Content -LiteralPath $log -Value 'LogOS vNext: LockScreen proof PASS'
+        Write-Host 'LockScreen two-boot proof PASS'
     }
     Write-Host $result
 } finally {

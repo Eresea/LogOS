@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::{MAX_CPUS, SCHEDULER, TaskEntry, TaskHandle, TaskState};
+use logos_abi::ServiceId;
 
 static A_PROGRESS: AtomicU64 = AtomicU64::new(0);
 static B_PROGRESS: AtomicU64 = AtomicU64::new(0);
@@ -311,6 +312,57 @@ pub fn restart_resources_reclaimed() {
     if !RESTART_RESOURCES_RECLAIMED.swap(true, Ordering::AcqRel) {
         crate::arch_proof_line(b"LogOS vNext: restart resources reclaimed");
     }
+}
+
+pub fn service_unhealthy(service: ServiceId) {
+    let marker: &[u8] = match service {
+        ServiceId::Input => b"LogOS vNext: unhealthy input",
+        ServiceId::Display => b"LogOS vNext: unhealthy display",
+        ServiceId::Terminal => b"LogOS vNext: unhealthy terminal",
+        ServiceId::Session => b"LogOS vNext: unhealthy session",
+        ServiceId::Flow => b"LogOS vNext: unhealthy flow",
+        ServiceId::Storage => b"LogOS vNext: unhealthy storage",
+        ServiceId::Network => b"LogOS vNext: unhealthy network",
+        ServiceId::Fetch => b"LogOS vNext: unhealthy fetch",
+        ServiceId::Device => b"LogOS vNext: unhealthy device",
+        ServiceId::User => b"LogOS vNext: unhealthy user",
+        ServiceId::Shell => b"LogOS vNext: unhealthy shell",
+        ServiceId::LockScreen => b"LogOS vNext: unhealthy lockscreen",
+        ServiceId::Atrium => b"LogOS vNext: unhealthy atrium",
+        ServiceId::System => b"LogOS vNext: unhealthy system",
+    };
+    crate::arch_proof_line(marker);
+}
+
+pub fn service_failed(service: ServiceId) {
+    let marker: &[u8] = match service {
+        ServiceId::Input => b"LogOS vNext: failed input",
+        ServiceId::Display => b"LogOS vNext: failed display",
+        ServiceId::Terminal => b"LogOS vNext: failed terminal",
+        ServiceId::Session => b"LogOS vNext: failed session",
+        ServiceId::Flow => b"LogOS vNext: failed flow",
+        ServiceId::Storage => b"LogOS vNext: failed storage",
+        ServiceId::Network => b"LogOS vNext: failed network",
+        ServiceId::Fetch => b"LogOS vNext: failed fetch",
+        ServiceId::Device => b"LogOS vNext: failed device",
+        ServiceId::User => b"LogOS vNext: failed user",
+        ServiceId::Shell => b"LogOS vNext: failed shell",
+        ServiceId::LockScreen => b"LogOS vNext: failed lockscreen",
+        ServiceId::Atrium => b"LogOS vNext: failed atrium",
+        ServiceId::System => b"LogOS vNext: failed system",
+    };
+    crate::arch_proof_line(marker);
+}
+
+pub fn service_faulted(vector: u8) {
+    let marker: &[u8] = match vector {
+        0 => b"LogOS vNext: service fault vector 0",
+        6 => b"LogOS vNext: service fault vector 6",
+        13 => b"LogOS vNext: service fault vector 13",
+        14 => b"LogOS vNext: service fault vector 14",
+        _ => b"LogOS vNext: service fault vector other",
+    };
+    crate::arch_proof_line(marker);
 }
 
 pub fn allocator_quota_proven() {

@@ -148,6 +148,7 @@ pub const SERVICE_HEAP_SHRINK_SYSCALL: usize = 16;
 pub const SERVICE_DIRECTORY_SYSCALL: usize = 17;
 pub const EVENT_SYSCALL: usize = 18;
 pub const CURRENT_TICKS_SYSCALL: usize = 19;
+pub const DEBUG_LINE_SYSCALL: usize = 20;
 pub const MANAGER_SYSCALL: usize = 12;
 pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;

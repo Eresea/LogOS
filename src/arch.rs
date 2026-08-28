@@ -1353,6 +1353,12 @@ pub(crate) fn allocator_proof() -> bool {
 }
 
 #[cfg(feature = "qemu-proof")]
+pub(crate) fn service_debug_line(process: crate::process::ProcessHandle, length: usize) -> bool {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).service_debug_line(process, length) }
+}
+
+#[cfg(feature = "qemu-proof")]
 pub(crate) fn manager_restart_ready(service: logos_abi::ServiceId) -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).manager_restart_ready(service) }

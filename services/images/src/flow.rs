@@ -650,7 +650,7 @@ impl NetworkClient {
     }
 }
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
 fn manager_boot_probe() -> bool {
     let request_id = next_manager_request_id();
     let request = logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
@@ -2464,7 +2464,7 @@ fn network_command(
     }
 }
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
 fn manager_restart_probe() -> bool {
     let Some(record) = manager_record(b"storage").ok().flatten() else {
         return false;
@@ -2483,7 +2483,7 @@ fn manager_restart_probe() -> bool {
         && response.record.state == logos_abi::ManagerState::Stopping
 }
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
 fn network_proof_probe(network: &mut NetworkClient) -> bool {
     for _ in 0..256 {
         let Ok(status) = network.request(NetworkOperation::Status, [0; 4], 0) else {
@@ -2609,7 +2609,7 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
     false
 }
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
 fn manager_restart_network() -> bool {
     let Some(record) = manager_record(b"network").ok().flatten() else {
         return false;
@@ -2627,7 +2627,7 @@ fn manager_restart_network() -> bool {
         && response.status == logos_abi::ManagerStatus::Accepted
 }
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
 fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClient) -> bool {
     let Some(initial_storage) = manager_record(b"storage").ok().flatten() else {
         return false;
@@ -2711,11 +2711,11 @@ pub extern "C" fn _start() -> ! {
     let completion = unsafe { &mut *core::ptr::addr_of_mut!(COMPLETION) };
     let pending_completion = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_COMPLETION) };
     let mut shell_context = GuiSessionContext::EMPTY;
-    #[cfg(feature = "qemu-proof")]
+    #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
     while !manager_boot_probe() {
         common::sleep();
     }
-    #[cfg(feature = "qemu-proof")]
+    #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
     if !manager_command_probe(pending, network) {
         // The storage proof exercises the normal Flow->Storage command path;
         // a failed optional manager/network preflight must not strand Flow

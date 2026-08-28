@@ -5150,6 +5150,22 @@ impl ServiceRuntime {
     }
 
     #[cfg(feature = "qemu-proof")]
+    pub(crate) fn service_debug_line(&self, process: ProcessHandle, length: usize) -> bool {
+        if self.service_slot_for_process(process).is_none()
+            || !(1..=logos_abi::IPC_PAGE_BYTES).contains(&length)
+        {
+            return false;
+        }
+        let Some(staging) = self.staging_frame_for_process(process) else {
+            return false;
+        };
+        let bytes =
+            unsafe { core::slice::from_raw_parts(staging.raw() as usize as *const u8, length) };
+        crate::arch_proof_line(bytes);
+        true
+    }
+
+    #[cfg(feature = "qemu-proof")]
     pub(crate) fn event_proof(&mut self) -> bool {
         let process = match self.launch(ServiceId::Flow) {
             Some((process, _)) => process,
@@ -5852,13 +5868,19 @@ impl ServiceRuntime {
                 continue;
             };
             if crate::SCHEDULER.state(task) == Some(crate::TaskState::Completed) {
-                let process_failed = self
+                let process_state = self
                     .launches
                     .get(index)
                     .copied()
                     .flatten()
                     .and_then(|(process, _)| self.processes.state(process))
-                    .is_none_or(|state| !matches!(state, crate::process::ProcessState::Running));
+                    .unwrap_or(crate::process::ProcessState::Faulted(0xff));
+                let process_failed =
+                    !matches!(process_state, crate::process::ProcessState::Running);
+                #[cfg(feature = "qemu-proof")]
+                if let crate::process::ProcessState::Faulted(vector) = process_state {
+                    crate::proof::service_faulted(vector);
+                }
                 if !crate::SCHEDULER.reclaim_completed(task) {
                     return Err(ServiceRuntimeError::TaskStop);
                 }
@@ -5933,6 +5955,8 @@ impl ServiceRuntime {
                 == Some(crate::runtime_services::ServiceState::Failed))
             .then_some(spec.service())
         }) {
+            #[cfg(feature = "qemu-proof")]
+            crate::proof::service_failed(failed);
             if failed == ServiceId::Network
                 && !self.uses_package_image(ServiceId::Network)
                 && !self.uses_package_image(ServiceId::Fetch)
@@ -5969,6 +5993,8 @@ impl ServiceRuntime {
                 }
                 return Ok(false);
             };
+            #[cfg(feature = "qemu-proof")]
+            crate::proof::service_unhealthy(failed_service);
             if failed_service == ServiceId::Network
                 && !self.uses_package_image(ServiceId::Network)
                 && !self.uses_package_image(ServiceId::Fetch)

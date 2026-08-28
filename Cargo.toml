@@ -49,6 +49,7 @@ logos-storage = { path = "storage" }
 [features]
 default = []
 qemu-proof = []
+lockscreen-proof = []
 package-proof = ["qemu-proof"]
 storage-proof = []
 fetch-proof = []
