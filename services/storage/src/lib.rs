@@ -29,6 +29,7 @@ use logos_storage::{BLOCK_BYTES, Block, BlockError, BlockIndex, BlockStore, Read
 pub const STORAGE_REQUEST_CAPACITY: usize = 8;
 const CACHE_SLOTS: usize = logos_abi::STORAGE_CACHE_PAGES;
 const CACHE_MAP_MAX_PAGES: usize = 16;
+const RESPONSE_POLL_LIMIT: usize = 64;
 
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
@@ -56,6 +57,8 @@ pub trait KernelStorageIpc {
         response: &mut StorageResponse,
         staging: &mut Block,
     ) -> IpcStatus;
+
+    fn wait_for_response(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,7 +137,16 @@ impl<T> IpcBlockStore<T> {
             0,
             request.transaction_id,
         );
-        map_ipc_status(self.transport.receive(self.capability, &mut response, &mut self.staging))?;
+        let mut receive_status = IpcStatus::Empty;
+        for _ in 0..RESPONSE_POLL_LIMIT {
+            receive_status =
+                self.transport.receive(self.capability, &mut response, &mut self.staging);
+            if receive_status != IpcStatus::Empty {
+                break;
+            }
+            self.transport.wait_for_response();
+        }
+        map_ipc_status(receive_status)?;
         if response.reserved != 0
             || response.request_id != request.request_id
             || response.generation != request.generation
@@ -368,6 +380,7 @@ mod tests {
         fault: Option<StorageStatus>,
         fail_read_after: Option<usize>,
         malformed_response: bool,
+        empty_receives: usize,
     }
 
     impl TestKernel {
@@ -379,6 +392,7 @@ mod tests {
                 fault: None,
                 fail_read_after: None,
                 malformed_response: false,
+                empty_receives: 0,
             }
         }
 
@@ -419,6 +433,10 @@ mod tests {
         ) -> IpcStatus {
             if capability != self.expected {
                 return IpcStatus::Unauthorized;
+            }
+            if self.empty_receives != 0 {
+                self.empty_receives -= 1;
+                return IpcStatus::Empty;
             }
             let Some(request) = self.pending.take() else { return IpcStatus::Empty };
             if request.operation == StorageOperation::Read {
@@ -469,6 +487,15 @@ mod tests {
         store.flush().unwrap();
         let kernel = store.into_transport();
         assert_eq!(kernel.pending, None);
+    }
+
+    #[test]
+    fn block_store_waits_for_a_delayed_response() {
+        let mut kernel = TestKernel::new(capability());
+        kernel.empty_receives = 2;
+        let mut store = IpcBlockStore::new(kernel, capability(), 4).unwrap();
+        let mut output = Block::zero();
+        assert_eq!(store.read_block(BlockIndex::new(1), &mut output), Ok(()));
     }
 
     #[test]

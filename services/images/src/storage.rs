@@ -274,6 +274,10 @@ impl KernelStorageIpc for StorageTransport {
         }
         status
     }
+
+    fn wait_for_response(&mut self) {
+        common::wait_on_capability(ipc_capabilities().response);
+    }
 }
 
 fn new_store(

@@ -11,7 +11,8 @@ use core::{
 use core::sync::atomic::AtomicU8;
 
 use logos_storage::{
-    BlockRequestId, PciError, VirtioBlkChain, VirtioBlkHeader, VirtioPciDevice, negotiate_features,
+    BlockRequestId, PciError, VIRTIO_BLK_TYPE_FLUSH, VirtioBlkChain, VirtioBlkHeader,
+    VirtioPciDevice, negotiate_features,
 };
 
 const PCI_CONFIG_ADDRESS: u16 = 0xcf8;
@@ -470,11 +471,11 @@ impl VirtioBlockDevice {
             return Err(DeviceError::InvalidCompletion);
         }
         let available = unsafe { read_volatile(&self.queue.available_index) };
-        if available != 0 && available as usize % QUEUE_SIZE == 0 {
-            if self.requests.iter().any(Option::is_some) {
-                return Err(DeviceError::QueueFull);
-            }
-            self.reset_device()?;
+        if available as usize % QUEUE_SIZE == QUEUE_SIZE - 1
+            && chain.header.request_type != VIRTIO_BLK_TYPE_FLUSH
+            && !self.requests.iter().any(Option::is_some)
+        {
+            self.flush()?;
         }
         let available = unsafe { read_volatile(&self.queue.available_index) };
         let slot = (available as usize) % QUEUE_SIZE;
@@ -591,7 +592,7 @@ impl VirtioBlockDevice {
             0,
         )?;
         let completion = self.wait_for_completion(request_id)?;
-        match completion.status {
+        let result = match completion.status {
             0 => {
                 #[cfg(feature = "storage-proof")]
                 self.record_flush_success();
@@ -600,7 +601,14 @@ impl VirtioBlockDevice {
             1 => Err(DeviceError::Io),
             2 => Err(DeviceError::Unsupported),
             _ => Err(DeviceError::InvalidCompletion),
+        };
+        if result.is_ok()
+            && unsafe { read_volatile(&self.queue.available_index) } as usize % QUEUE_SIZE == 0
+            && !self.requests.iter().any(Option::is_some)
+        {
+            self.reset_device()?;
         }
+        result
     }
 
     fn transfer(
