@@ -13,7 +13,7 @@ use logos_abi::{
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_INPUT,
-    b"atrium",
+    b"input",
     core::mem::size_of::<InputMessage>(),
     logos_abi::IpcRights::Receive,
 );
@@ -135,6 +135,14 @@ fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) 
         let _ = batch.push(command);
     }
 }
+
+#[cfg(feature = "qemu-proof")]
+fn proof_line(message: &[u8]) {
+    common::proof_line(message);
+}
+
+#[cfg(not(feature = "qemu-proof"))]
+fn proof_line(_message: &[u8]) {}
 
 fn push_surface_text(
     batch: &mut GuiDrawBatch,
@@ -362,7 +370,13 @@ fn send_surface_command(
 fn send_lockscreen_section(lockscreen: logos_abi::CapabilityHandle, visible: bool, next: &mut u32) {
     let mut hook = GuiHook::new(GuiHookKind::Section, next_request_id(next));
     hook.deadline = u64::from(visible);
-    let _ = common::ipc_send_handle(lockscreen, &hook);
+    loop {
+        match common::ipc_send_handle(lockscreen, &hook) {
+            IpcStatus::Ok => break,
+            IpcStatus::Full => common::wait_on_capability(lockscreen),
+            _ => break,
+        }
+    }
 }
 
 fn queue_terminal_response(
@@ -938,6 +952,7 @@ pub extern "C" fn _start() -> ! {
         while common::ipc_receive_handle(shell_context, &mut context) == IpcStatus::Ok {
             if context.is_authenticated() {
                 authenticated = true;
+                proof_line(b"LogOS vNext: Atrium authenticated");
                 send_lockscreen_section(lockscreen_control, false, &mut next_request);
                 atrium.authenticate();
                 if !atrium.home_surface().is_valid() && pending_surface.is_none() {
@@ -1071,6 +1086,7 @@ pub extern "C" fn _start() -> ! {
                 }
                 continue;
             }
+            let home_surface = app.is_none();
             let admitted = if let Some(request) = app {
                 match atrium.spawn_surface(request, response.surface) {
                     Ok(surface) if for_client => {
@@ -1121,6 +1137,9 @@ pub extern "C" fn _start() -> ! {
                 false
             };
             if admitted {
+                if home_surface {
+                    proof_line(b"LogOS vNext: Atrium home surface ready");
+                }
                 render(display, atrium, calculator, &mut sequence);
             }
             if authenticated
@@ -1437,6 +1456,8 @@ pub extern "C" fn _start() -> ! {
         let mut wait_count = 0;
         for capability in [
             input,
+            display,
+            display_control,
             display_response,
             shell_context,
             terminal_surface_request,
