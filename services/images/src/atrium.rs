@@ -118,8 +118,6 @@ const LOCKSCREEN_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability
 );
 const MAX_PENDING_SURFACE_COMMANDS: usize = logos_atrium::MAX_ATRIUM_SURFACES * 2;
 const CURSOR_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 400);
-const CURSOR_WIDTH: u32 = 12;
-const CURSOR_HEIGHT: u32 = 18;
 
 #[derive(Clone, Copy)]
 struct ProgramSurfaceCapabilities {
@@ -510,45 +508,13 @@ fn queue_cursor_surface(
     sent.then_some(request)
 }
 
-fn cursor_batch(
-    display: logos_abi::CapabilityHandle,
-    surface: SurfaceHandle,
-    x: i16,
-    y: i16,
-    old: Option<(i16, i16)>,
-    sequence: &mut u32,
-) -> Option<GuiDrawBatch> {
-    let x = i32::from(x);
-    let y = i32::from(y);
-    let current = GuiRect::new(x, y, CURSOR_WIDTH, CURSOR_HEIGHT);
-    let damage = old.map_or(current, |(old_x, old_y)| {
-        let old = GuiRect::new(i32::from(old_x), i32::from(old_y), CURSOR_WIDTH, CURSOR_HEIGHT);
-        let right = old
-            .x
-            .saturating_add(old.width as i32)
-            .max(current.x.saturating_add(current.width as i32));
-        let bottom = old
-            .y
-            .saturating_add(old.height as i32)
-            .max(current.y.saturating_add(current.height as i32));
-        GuiRect::new(
-            old.x.min(current.x),
-            old.y.min(current.y),
-            right.saturating_sub(old.x.min(current.x)) as u32,
-            bottom.saturating_sub(old.y.min(current.y)) as u32,
-        )
-    });
-    let mut batch = GuiDrawBatch::new(surface, next_request_id(sequence), damage);
-    let _ = batch.push(GuiDrawCommand::fill_rect(
-        GuiRect::new(x.saturating_add(2), y.saturating_add(2), 4, 16),
-        0x101820,
-    ));
-    let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(x, y, 3, 14), 0xffffff));
-    let _ = batch.push(GuiDrawCommand::fill_rect(
-        GuiRect::new(x.saturating_add(2), y.saturating_add(10), 8, 3),
-        0xffffff,
-    ));
-    (common::ipc_send_scene_batch(display, &batch, 1) != IpcStatus::Ok).then_some(batch)
+fn cursor_op(surface: SurfaceHandle, x: i16, y: i16, sequence: &mut u32) -> GuiSceneOp {
+    GuiSceneOp::upsert(
+        surface,
+        next_request_id(sequence),
+        1,
+        GuiDrawCommand::fill_rect(GuiRect::new(i32::from(x), i32::from(y), 3, 14), 0xffffff),
+    )
 }
 
 fn discover_program_capability(
@@ -654,7 +620,7 @@ pub extern "C" fn _start() -> ! {
     let mut cursor_x = 320i16;
     let mut cursor_y = 200i16;
     let mut cursor_sequence = 1u32;
-    let mut pending_cursor_draw: Option<GuiDrawBatch> = None;
+    let mut pending_cursor_draw: Option<GuiSceneOp> = None;
     let mut surface_commands = SurfaceCommandQueue::new();
     let mut authenticated = false;
     let mut heartbeat_ticks = 0u16;
@@ -672,7 +638,7 @@ pub extern "C" fn _start() -> ! {
             pending_cursor_surface = queue_cursor_surface(display_control, &mut next_request);
         }
         if let Some(batch) = pending_cursor_draw {
-            match common::ipc_send_scene_batch(display, &batch, 1) {
+            match common::ipc_send_handle(display, &batch) {
                 IpcStatus::Ok => pending_cursor_draw = None,
                 IpcStatus::Full => {}
                 _ => {
@@ -1080,14 +1046,8 @@ pub extern "C" fn _start() -> ! {
                 pending_cursor_surface = None;
                 if response.status == logos_abi::GuiStatus::Ok && response.surface.is_valid() {
                     cursor_surface = response.surface;
-                    pending_cursor_draw = cursor_batch(
-                        display,
-                        cursor_surface,
-                        cursor_x,
-                        cursor_y,
-                        None,
-                        &mut cursor_sequence,
-                    );
+                    pending_cursor_draw =
+                        Some(cursor_op(cursor_surface, cursor_x, cursor_y, &mut cursor_sequence));
                 }
                 continue;
             }
@@ -1246,18 +1206,11 @@ pub extern "C" fn _start() -> ! {
 
         while common::ipc_receive_handle(input, &mut event) == IpcStatus::Ok {
             if let Some(pointer) = event.pointer_event() {
-                let old = (cursor_x, cursor_y);
                 cursor_x = pointer.x.clamp(0, 639);
                 cursor_y = pointer.y.clamp(0, 399);
                 if cursor_surface.is_valid() {
-                    pending_cursor_draw = cursor_batch(
-                        display,
-                        cursor_surface,
-                        cursor_x,
-                        cursor_y,
-                        Some(old),
-                        &mut cursor_sequence,
-                    );
+                    pending_cursor_draw =
+                        Some(cursor_op(cursor_surface, cursor_x, cursor_y, &mut cursor_sequence));
                 }
             }
             if !authenticated || atrium.phase() != logos_atrium::AtriumPhase::Home {

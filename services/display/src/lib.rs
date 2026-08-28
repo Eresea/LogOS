@@ -1074,6 +1074,57 @@ mod tests {
     }
 
     #[test]
+    fn native_pointer_surface_renders_above_lockscreen() {
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
+        display.gui_mut().create(11, root).unwrap();
+
+        let mut lockscreen =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        lockscreen.bounds = root.bounds;
+        lockscreen.z_order = 1;
+        let lockscreen_handle = display.gui_mut().create(12, lockscreen).unwrap().surface;
+        let mut lockscreen_batch =
+            logos_abi::GuiDrawBatch::new(lockscreen_handle, 1, logos_abi::GuiRect::SURFACE);
+        assert!(lockscreen_batch.push(logos_abi::GuiDrawCommand::fill_surface(0x102030)));
+        display.gui_mut().update(12, lockscreen_batch).unwrap();
+
+        let mut cursor =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 3);
+        cursor.bounds = root.bounds;
+        cursor.z_order = 3;
+        let cursor_handle = display.gui_mut().create(13, cursor).unwrap().surface;
+        let commands = [
+            logos_abi::GuiDrawCommand::fill_rect(logos_abi::GuiRect::new(22, 12, 4, 16), 0x101820),
+            logos_abi::GuiDrawCommand::fill_rect(logos_abi::GuiRect::new(20, 10, 3, 14), 0xffffff),
+            logos_abi::GuiDrawCommand::fill_rect(logos_abi::GuiRect::new(22, 20, 8, 3), 0xffffff),
+        ];
+        let mut clear = logos_abi::GuiSceneOp::clear(cursor_handle, 1);
+        clear.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        display.gui_mut().apply_scene_op(13, clear).unwrap();
+        for (index, command) in commands.into_iter().enumerate() {
+            let mut op =
+                logos_abi::GuiSceneOp::upsert(cursor_handle, 1, (index + 1) as u32, command);
+            if index + 1 < commands.len() {
+                op.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+            }
+            display.gui_mut().apply_scene_op(13, op).unwrap();
+        }
+
+        let mut framebuffer = std::vec![0; 64 * 32 * 4];
+        loop {
+            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+            if !display.render_pending() {
+                break;
+            }
+        }
+        let pixel = (10 * 64 + 20) * 4;
+        assert_eq!(&framebuffer[pixel..pixel + 4], &[0xff, 0xff, 0xff, 0]);
+    }
+
+    #[test]
     fn surface_relative_fill_covers_the_actual_framebuffer() {
         let mut display = Display::new(1);
         let mut terminal = RenderMessage::empty(MessageKind::FullRedraw);
