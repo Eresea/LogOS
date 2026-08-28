@@ -11,6 +11,8 @@ use logos_abi::{
 
 static mut PENDING: Option<InputMessage> = None;
 static mut SENT_MASK: u8 = 0;
+static mut PENDING_POINTER: Option<InputMessage> = None;
+static mut POINTER_SENT_MASK: u8 = 0;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -37,11 +39,38 @@ pub extern "C" fn _start() -> ! {
     let pointer = unsafe { &*(INPUT_POINTER_RING_BASE as *const PointerByteRing) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let sent_mask = unsafe { &mut *core::ptr::addr_of_mut!(SENT_MASK) };
+    let pending_pointer = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_POINTER) };
+    let pointer_sent_mask = unsafe { &mut *core::ptr::addr_of_mut!(POINTER_SENT_MASK) };
     let mut decoder = logos_input::InputDecoder::new();
     let mut pointer_decoder = logos_input::PointerDecoder::new();
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        if let Some(message) = *pending_pointer {
+            if *pointer_sent_mask == 0 {
+                match common::ipc_send_handle(atrium_output, &message) {
+                    IpcStatus::Ok
+                    | IpcStatus::Stale
+                    | IpcStatus::Disconnected
+                    | IpcStatus::Unauthorized
+                    | IpcStatus::Malformed
+                    | IpcStatus::Empty => *pointer_sent_mask = 1,
+                    IpcStatus::Full => common::wait_on_capability_or_input(atrium_output),
+                }
+            }
+            if *pointer_sent_mask == 1 {
+                *pending_pointer = None;
+                *pointer_sent_mask = 0;
+            }
+            continue;
+        }
+        if let Some(byte) = pointer.pop() {
+            if let Some(event) = pointer_decoder.feed(byte) {
+                *pending_pointer = Some(event);
+                *pointer_sent_mask = 0;
+            }
+            continue;
+        }
         if let Some(message) = *pending {
             for (index, capability) in [shell_output, atrium_output].into_iter().enumerate() {
                 let bit = 1 << index;
@@ -51,7 +80,7 @@ pub extern "C" fn _start() -> ! {
                 match common::ipc_send_handle(capability, &message) {
                     IpcStatus::Ok => *sent_mask |= bit,
                     IpcStatus::Full => {
-                        common::wait_on_capability(capability);
+                        common::wait_on_capability_or_input(capability);
                         continue;
                     }
                     IpcStatus::Stale
@@ -63,13 +92,6 @@ pub extern "C" fn _start() -> ! {
             }
             if *sent_mask == 0b11 {
                 *pending = None;
-                *sent_mask = 0;
-            }
-            continue;
-        }
-        if let Some(byte) = pointer.pop() {
-            if let Some(event) = pointer_decoder.feed(byte) {
-                *pending = Some(event);
                 *sent_mask = 0;
             }
             continue;

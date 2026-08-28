@@ -1108,6 +1108,33 @@ pub fn wait_on_capability(capability: logos_abi::CapabilityHandle) {
 }
 
 #[allow(dead_code)]
+pub fn wait_on_capability_or_input(capability: logos_abi::CapabilityHandle) {
+    #[cfg(target_os = "none")]
+    {
+        let mut events = [logos_abi::EventHandle::EMPTY; 3];
+        let mut count = 0;
+        if let Ok(event) = discover_event_for_capability(capability) {
+            events[count] = event;
+            count += 1;
+        }
+        for flags in [
+            logos_abi::DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD,
+            logos_abi::DIRECTORY_EVENT_FLAG_HARDWARE_POINTER,
+        ] {
+            if let Ok(event) = discover_hardware_event(flags) {
+                events[count] = event;
+                count += 1;
+            }
+        }
+        if count != 0 {
+            wait_on_event_handles(&events[..count]);
+            return;
+        }
+    }
+    heartbeat();
+}
+
+#[allow(dead_code)]
 pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle]) {
     #[cfg(target_os = "none")]
     {
