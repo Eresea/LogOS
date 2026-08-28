@@ -114,6 +114,7 @@ pub extern "C" fn _start() -> ! {
     let mut pending_flow_context = Some(context);
     let mut pending_atrium_context = Some(context);
     let mut pending_user: Option<IpcBytes> = None;
+    let mut pending_probe: Option<UserRequest> = None;
     let mut pending_lock_request: Option<UserRequest> = None;
     let mut pending_lock_response: Option<UserResponse> = None;
     let mut response = IpcBytes::empty(MessageKind::UserResponse);
@@ -122,6 +123,18 @@ pub extern "C" fn _start() -> ! {
     let mut message =
         InputMessage::key(logos_abi::KeyCode::Unknown, logos_abi::KeyState::Released, 0);
     let mut heartbeat_ticks = 0u16;
+    if let Ok(mut request) = shell.begin_user_request(UserOperation::Login, b"Probe", b"probe") {
+        let request_id = request.request_id;
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&request as *const UserRequest).cast::<u8>(),
+                mem::size_of::<UserRequest>(),
+            )
+        };
+        pending_user = IpcBytes::from_bytes(MessageKind::UserRequest, bytes);
+        pending_probe = Some(UserRequest::new(UserOperation::Login, request_id));
+        logos_shell::Shell::acknowledge_sent(&mut request);
+    }
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
         flush_pending(flow, &mut pending_flow_context);
@@ -146,6 +159,7 @@ pub extern "C" fn _start() -> ! {
         }
         while common::ipc_receive_handle(lockscreen_request, &mut lock_request) == IpcStatus::Ok {
             if pending_user.is_some()
+                || pending_probe.is_some()
                 || pending_lock_request.is_some()
                 || pending_lock_response.is_some()
                 || !lock_request.is_valid()
@@ -184,8 +198,14 @@ pub extern "C" fn _start() -> ! {
                 response.as_bytes().filter(|bytes| bytes.len() == mem::size_of::<UserResponse>())
             {
                 let result: UserResponse = unsafe { ptr::read_unaligned(bytes.as_ptr().cast()) };
+                let probe = pending_probe.filter(|request| result.is_valid_for(*request));
                 let applied = shell.apply_user_response(result);
-                if let Some(request) = pending_lock_request.take() {
+                if let Some(request) = probe {
+                    pending_probe = None;
+                    if applied.is_ok() && result.status == UserStatus::Unclaimed {
+                        pending_lock_response = Some(UserResponse::new(request, result.status));
+                    }
+                } else if let Some(request) = pending_lock_request.take() {
                     let status = if applied.is_ok() { result.status } else { UserStatus::Stale };
                     let mut lock_response = UserResponse::new(request, status);
                     if status == UserStatus::Ok {
