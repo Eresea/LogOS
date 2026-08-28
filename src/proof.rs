@@ -420,9 +420,9 @@ pub fn event_wake_ipi_sent() {
     EVENT_WAKE_IPI_SENT.store(true, Ordering::Release);
 }
 
-pub fn observe(cpu: usize) {
+pub fn observe(_cpu: usize) {
     if PASSED.load(Ordering::Acquire) {
-        if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
+        if !REPORTED.swap(true, Ordering::AcqRel) {
             crate::arch_proof_line(b"LogOS vNext: QEMU proof PASS");
         }
         return;
@@ -492,7 +492,7 @@ pub fn observe(cpu: usize) {
         && wake_cpus_differ;
     if conditions_met {
         PASSED.store(true, Ordering::Release);
-        if cpu == 0 && !REPORTED.swap(true, Ordering::AcqRel) {
+        if !REPORTED.swap(true, Ordering::AcqRel) {
             crate::arch_proof_line(b"LogOS vNext: QEMU proof PASS");
         }
     }

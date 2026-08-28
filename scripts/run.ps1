@@ -89,9 +89,13 @@ $qemuArgs = @(
     '-drive', "format=raw,file=fat:rw:$espPath",
     '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",
     '-device', 'virtio-blk-pci,drive=storage-disk,disable-legacy=on',
-    '-vga', 'std',
     '-display', $display
 )
+if ($Proof) {
+    $qemuArgs += @('-device', 'VGA,id=video0')
+} else {
+    $qemuArgs += @('-vga', 'std')
+}
 if ($networkEnabled) {
     if ($Proof) {
         $networkPeerPort = $QmpPort + 1
@@ -108,7 +112,7 @@ if ($networkEnabled) {
 }
 if ($Proof) {
     Remove-Item $log -Force -ErrorAction SilentlyContinue
-    $qemuArgs += @('-no-reboot', '-debugcon', "file:$log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
+    $qemuArgs += @('-no-reboot', '-debugcon', "file:qemu-proof-$Cpus.log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
 } else {
     $qemuArgs += @('-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9')
 }
@@ -120,6 +124,7 @@ if (-not $Proof) {
 
 $psi = [Diagnostics.ProcessStartInfo]::new()
 $psi.FileName = $qemuPath
+$psi.WorkingDirectory = $target
 $psi.Arguments = ($qemuArgs | ForEach-Object {
         if ($_ -match '[\s"]') { '"' + $_.Replace('"', '\"') + '"' } else { $_ }
     }) -join ' '
@@ -242,6 +247,33 @@ function Send-QmpKey {
     } | Out-Null
 }
 
+function Send-QmpPointerMotion {
+    param([hashtable]$Qmp, [int]$X, [int]$Y)
+    Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{
+        execute = 'input-send-event'
+        arguments = @{
+            device = 'video0'
+            events = @(
+                @{ type = 'rel'; data = @{ axis = 'x'; value = $X } }
+                @{ type = 'rel'; data = @{ axis = 'y'; value = $Y } }
+            )
+        }
+    } | Out-Null
+}
+
+function Send-QmpPointerButton {
+    param([hashtable]$Qmp, [bool]$Down)
+    Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{
+        execute = 'input-send-event'
+        arguments = @{
+            device = 'video0'
+            events = @(
+                @{ type = 'btn'; data = @{ button = 'left'; down = $Down } }
+            )
+        }
+    } | Out-Null
+}
+
 function Wait-ProofMarker {
     param([string]$Marker, [int]$TimeoutSeconds)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -250,6 +282,75 @@ function Wait-ProofMarker {
             return $true
         }
         if ($process.HasExited) { return $false }
+        Start-Sleep -Milliseconds 100
+    }
+    return $false
+}
+
+function Get-ProofMarkerCount {
+    param([string]$Marker)
+    if (-not (Test-Path $log)) { return 0 }
+    return ([regex]::Matches((Get-Content $log -Raw), [regex]::Escape($Marker))).Count
+}
+
+function Wait-ProofMarkerAfter {
+    param([string]$Marker, [int]$MinimumCount, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ((Get-ProofMarkerCount $Marker) -gt $MinimumCount) { return $true }
+        if ($process.HasExited) { return $false }
+        Start-Sleep -Milliseconds 100
+    }
+    return $false
+}
+
+function Framebuffer-HasPixels {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    for ($index = 15; $index -lt $bytes.Length; $index++) {
+        if ($bytes[$index] -ne 0) { return $true }
+    }
+    return $false
+}
+
+function Framebuffer-HasWhitePixels {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    for ($index = 15; $index -lt $bytes.Length; $index += 3) {
+        if ($bytes[$index] -eq 255 -and $bytes[$index + 1] -eq 255 -and $bytes[$index + 2] -eq 255) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Framebuffer-HasLockscreenPanel {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $index = 15 + ((300 * 640 + 300) * 3)
+    return $bytes[$index] -eq 24 -and $bytes[$index + 1] -eq 37 -and $bytes[$index + 2] -eq 53
+}
+
+function Wait-QmpFramebufferStable {
+    param([hashtable]$Qmp, [string]$Path, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $previousHash = $null
+    $stable = 0
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+        if ((Framebuffer-HasWhitePixels $Path) -and (Framebuffer-HasLockscreenPanel $Path)) {
+            $hash = (Get-FileHash $Path).Hash
+            if ($hash -eq $previousHash) {
+                $stable++
+                if ($stable -ge 2) { return $true }
+            } else {
+                $previousHash = $hash
+                $stable = 0
+            }
+        }
         Start-Sleep -Milliseconds 100
     }
     return $false
@@ -291,7 +392,9 @@ function Send-QmpText {
 
 $proofBefore = Join-Path $repoRoot "target\qemu-proof-before-$Cpus.ppm"
 $proofAfter = Join-Path $repoRoot "target\qemu-proof-after-$Cpus.ppm"
-Remove-Item $proofBefore, $proofAfter -Force -ErrorAction SilentlyContinue
+$pointerBefore = Join-Path $repoRoot "target\qemu-proof-pointer-before-$Cpus.ppm"
+$pointerAfter = Join-Path $repoRoot "target\qemu-proof-pointer-after-$Cpus.ppm"
+Remove-Item $proofBefore, $proofAfter, $pointerBefore, $pointerAfter -Force -ErrorAction SilentlyContinue
 $qmp = $null
 try {
     $qmp = Connect-Qmp $QmpPort
@@ -317,6 +420,10 @@ try {
         Add-Content -LiteralPath $log -Value 'LogOS vNext: fetch proof PASS'
         Write-Host 'Fetch persistence proof PASS'
         return
+    }
+    $atriumAdmissionCount = Get-ProofMarkerCount 'LogOS vNext: Atrium and LockScreen tasks admitted'
+    if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium and LockScreen tasks admitted' $atriumAdmissionCount $TimeoutSeconds)) {
+        throw 'Atrium/LockScreen restart admission was not observed.'
     }
     if (-not (Wait-ProofMarker 'LogOS vNext: Atrium IPC topology ready' $TimeoutSeconds)) {
         throw 'Atrium IPC topology was not admitted.'
@@ -346,6 +453,30 @@ try {
     $resultAfterInput = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
     if ($resultAfterInput -notmatch 'LogOS vNext: keyboard event wake') {
         throw 'QEMU keyboard input did not wake a blocked Input service.'
+    }
+    # Ensure the known LockScreen surface is live, then exercise PS/2 relative
+    # motion and left-button capture/release through QMP.
+    Send-QmpKey $qmp 'ctrl-3'
+    Start-Sleep -Seconds 2
+    $pointerWakeCount = Get-ProofMarkerCount 'LogOS vNext: pointer event wake'
+    if (-not (Wait-QmpFramebufferStable $qmp $pointerBefore $TimeoutSeconds)) {
+        throw 'QEMU pointer proof did not observe a rendered framebuffer.'
+    }
+    # PS/2 reports positive Y upward; the decoder converts it to screen-down.
+    Send-QmpPointerMotion $qmp 40 -20
+    Send-QmpPointerButton $qmp $true
+    Send-QmpPointerButton $qmp $false
+    if (-not (Wait-ProofMarkerAfter 'LogOS vNext: pointer event wake' $pointerWakeCount $TimeoutSeconds)) {
+        throw 'QEMU pointer input did not wake a blocked Input service.'
+    }
+    if (-not (Wait-QmpFramebufferStable $qmp $pointerAfter $TimeoutSeconds)) {
+        throw 'QEMU pointer proof did not settle on a rendered framebuffer.'
+    }
+    if (-not (Test-Path $pointerBefore) -or -not (Test-Path $pointerAfter)) {
+        throw 'QEMU pointer proof did not capture both framebuffer snapshots.'
+    }
+    if (-not (Framebuffer-HasPixels $pointerAfter)) {
+        throw 'QEMU pointer proof lost the rendered framebuffer after input.'
     }
     Write-Host $result
 } finally {
