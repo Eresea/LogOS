@@ -27,8 +27,9 @@ pub use journal::{
     VolumeInfo,
 };
 pub use pci::{
-    PCI_CONFIG_BYTES, PciAddress, PciError, VIRTIO_BLOCK_MODERN_DEVICE_ID, VIRTIO_PCI_VENDOR_ID,
-    VirtioPciCapabilities, VirtioPciCapability, VirtioPciDevice,
+    PCI_CONFIG_BYTES, PciAddress, PciError, VIRTIO_BLOCK_MODERN_DEVICE_ID,
+    VIRTIO_GPU_MODERN_DEVICE_ID, VIRTIO_PCI_VENDOR_ID, VirtioPciCapabilities, VirtioPciCapability,
+    VirtioPciDevice,
 };
 pub use request::{
     BlockCompletion, BlockOperation, BlockRequest, BlockRequestError, BlockRequestId,

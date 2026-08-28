@@ -1,5 +1,6 @@
 pub const VIRTIO_PCI_VENDOR_ID: u16 = 0x1af4;
 pub const VIRTIO_BLOCK_MODERN_DEVICE_ID: u16 = 0x1042;
+pub const VIRTIO_GPU_MODERN_DEVICE_ID: u16 = 0x1050;
 pub const PCI_CONFIG_BYTES: usize = 256;
 const PCI_CAP_PTR: usize = 0x34;
 const PCI_CAP_VENDOR_SPECIFIC: u8 = 0x09;
@@ -50,6 +51,7 @@ pub struct VirtioPciCapabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciError {
     NotVirtioBlock,
+    NotRequestedDevice,
     MissingCapability,
     MalformedCapability,
     CapabilityLoop,
@@ -67,10 +69,22 @@ impl VirtioPciDevice {
         address: PciAddress,
         config: &[u8; PCI_CONFIG_BYTES],
     ) -> Result<Self, PciError> {
+        Self::from_config_for_device(address, config, VIRTIO_BLOCK_MODERN_DEVICE_ID).map_err(
+            |error| {
+                if error == PciError::NotRequestedDevice { PciError::NotVirtioBlock } else { error }
+            },
+        )
+    }
+
+    pub fn from_config_for_device(
+        address: PciAddress,
+        config: &[u8; PCI_CONFIG_BYTES],
+        device_id: u16,
+    ) -> Result<Self, PciError> {
         let vendor = u16::from_le_bytes([config[0], config[1]]);
         let device = u16::from_le_bytes([config[2], config[3]]);
-        if vendor != VIRTIO_PCI_VENDOR_ID || device != VIRTIO_BLOCK_MODERN_DEVICE_ID {
-            return Err(PciError::NotVirtioBlock);
+        if vendor != VIRTIO_PCI_VENDOR_ID || device != device_id {
+            return Err(PciError::NotRequestedDevice);
         }
 
         let mut cursor = config[PCI_CAP_PTR] as usize;
@@ -232,5 +246,19 @@ mod tests {
         config[0xc0 + 2] = 16;
         config[0xc0 + 3] = VIRTIO_PCI_CAP_PCI_CFG as u8;
         assert!(VirtioPciDevice::from_config(address, &config).is_ok());
+    }
+
+    #[test]
+    fn parses_the_same_capabilities_for_a_requested_gpu_device() {
+        let address = PciAddress::new(0, 3, 0).unwrap();
+        let mut config = config();
+        config[2..4].copy_from_slice(&VIRTIO_GPU_MODERN_DEVICE_ID.to_le_bytes());
+        assert_eq!(
+            VirtioPciDevice::from_config_for_device(address, &config, VIRTIO_GPU_MODERN_DEVICE_ID,)
+                .unwrap()
+                .capabilities
+                .notify_multiplier,
+            4
+        );
     }
 }
