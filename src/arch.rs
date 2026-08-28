@@ -750,11 +750,12 @@ pub(crate) fn boot_resources() -> Option<BootResources> {
     unsafe { BOOT_RESOURCES }
 }
 
-pub(crate) fn framebuffer_present_sequence() -> Option<u32> {
+pub(crate) fn framebuffer_present_snapshot()
+-> Option<(u32, bool, [logos_abi::GuiRect; logos_abi::MAX_DISPLAY_PRESENT_RECTS])> {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe {
         (*core::ptr::addr_of!(SERVICE_RUNTIME)).framebuffer_present_frame().map(|frame| {
-            (&*(frame.raw() as usize as *const logos_abi::FramebufferPresentState)).sequence()
+            (&*(frame.raw() as usize as *const logos_abi::FramebufferPresentState)).snapshot()
         })
     }
 }

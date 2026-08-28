@@ -87,6 +87,7 @@ pub const CELL_ATTR_UNDERLINE: u16 = 1 << 2;
 pub const MAX_SERVICE_IMAGE_BYTES: usize = 512 * 1024;
 pub const MAX_MEMORY_DESCRIPTORS: usize = 256;
 pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_DISPLAY_PRESENT_RECTS: usize = 8;
 pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
 pub const DISPLAY_CONFIG_BASE: usize = 0x0000_0100_1200_0000;
 pub const DISPLAY_PRESENT_BASE: usize = DISPLAY_CONFIG_BASE + 0x1000;
@@ -183,25 +184,88 @@ impl FramebufferConfig {
     }
 }
 
+struct FramebufferPresentRect {
+    position: AtomicU64,
+    size: AtomicU64,
+}
+
+impl FramebufferPresentRect {
+    const fn new() -> Self {
+        Self { position: AtomicU64::new(0), size: AtomicU64::new(0) }
+    }
+
+    fn store(&self, rect: GuiRect) {
+        let position = (rect.x as u32 as u64) | (u64::from(rect.y as u32) << 32);
+        let size = u64::from(rect.width) | (u64::from(rect.height) << 32);
+        self.position.store(position, Ordering::Relaxed);
+        self.size.store(size, Ordering::Relaxed);
+    }
+
+    fn load(&self) -> GuiRect {
+        let position = self.position.load(Ordering::Relaxed);
+        let size = self.size.load(Ordering::Relaxed);
+        GuiRect::new(
+            position as u32 as i32,
+            (position >> 32) as u32 as i32,
+            size as u32,
+            (size >> 32) as u32,
+        )
+    }
+}
+
 /// Core-owned publication state for the Display-to-GPU present boundary.
 /// Display may publish a new sequence after writing the mapped framebuffer;
 /// Core only submits a GPU transfer when the sequence changes.
 #[repr(C)]
 pub struct FramebufferPresentState {
     sequence: AtomicU32,
+    full: AtomicBool,
+    count: AtomicU32,
+    rects: [FramebufferPresentRect; MAX_DISPLAY_PRESENT_RECTS],
 }
 
 impl FramebufferPresentState {
     pub const fn new() -> Self {
-        Self { sequence: AtomicU32::new(0) }
+        Self {
+            sequence: AtomicU32::new(0),
+            full: AtomicBool::new(false),
+            count: AtomicU32::new(0),
+            rects: [const { FramebufferPresentRect::new() }; MAX_DISPLAY_PRESENT_RECTS],
+        }
     }
 
-    pub fn publish(&self) {
+    pub fn publish(&self, full: bool, rects: &[GuiRect]) {
+        let full = full || rects.len() > MAX_DISPLAY_PRESENT_RECTS;
+        let count = if full { 0 } else { rects.len() };
+        for (index, rect) in rects[..count].iter().copied().enumerate() {
+            self.rects[index].store(rect);
+        }
+        self.full.store(full, Ordering::Relaxed);
+        self.count.store(count as u32, Ordering::Relaxed);
         self.sequence.fetch_add(1, Ordering::Release);
     }
 
     pub fn sequence(&self) -> u32 {
         self.sequence.load(Ordering::Acquire)
+    }
+
+    pub fn snapshot(&self) -> (u32, bool, [GuiRect; MAX_DISPLAY_PRESENT_RECTS]) {
+        for _ in 0..4 {
+            let sequence = self.sequence.load(Ordering::Acquire);
+            let full = self.full.load(Ordering::Relaxed);
+            let count =
+                (self.count.load(Ordering::Relaxed) as usize).min(MAX_DISPLAY_PRESENT_RECTS);
+            let mut rects = [GuiRect::EMPTY; MAX_DISPLAY_PRESENT_RECTS];
+            if !full {
+                for (index, rect) in rects[..count].iter_mut().enumerate() {
+                    *rect = self.rects[index].load();
+                }
+            }
+            if self.sequence.load(Ordering::Acquire) == sequence {
+                return (sequence, full, rects);
+            }
+        }
+        (self.sequence(), true, [GuiRect::EMPTY; MAX_DISPLAY_PRESENT_RECTS])
     }
 }
 
@@ -2396,8 +2460,12 @@ mod tests {
     fn framebuffer_present_sequence_publishes_monotonically() {
         let state = FramebufferPresentState::new();
         assert_eq!(state.sequence(), 0);
-        state.publish();
-        state.publish();
+        let rect = GuiRect::new(4, 8, 16, 32);
+        state.publish(false, &[rect]);
+        let (_, full, rects) = state.snapshot();
+        assert!(!full);
+        assert_eq!(rects[0], rect);
+        state.publish(true, &[]);
         assert_eq!(state.sequence(), 2);
     }
 

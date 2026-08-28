@@ -198,14 +198,14 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
 }
 
 pub(crate) fn present() -> bool {
-    let present_sequence = crate::arch::framebuffer_present_sequence();
+    let present_state = crate::arch::framebuffer_present_snapshot();
     if !DEVICE_READY.load(Ordering::Acquire) {
         if DEVICE_ATTEMPTED.swap(true, Ordering::AcqRel) {
             return false;
         }
         let Some(resources) = crate::arch::boot_resources() else { return false };
         let Some(framebuffer) = resources.framebuffer() else { return false };
-        let Ok(device) = VirtioGpuDevice::initialize(framebuffer, present_sequence) else {
+        let Ok(device) = VirtioGpuDevice::initialize(framebuffer, present_state) else {
             return false;
         };
         unsafe { core::ptr::addr_of_mut!(DEVICE).write(MaybeUninit::new(device)) };
@@ -213,7 +213,7 @@ pub(crate) fn present() -> bool {
         #[cfg(feature = "qemu-proof")]
         crate::arch_proof_line(b"LogOS vNext: VirtIO GPU scanout ready");
     }
-    with_device_mut(|device| device.present(present_sequence)).is_ok()
+    with_device_mut(|device| device.present(present_state)).is_ok()
 }
 
 fn with_device_mut<T>(
@@ -234,7 +234,11 @@ fn with_device_mut<T>(
 impl VirtioGpuDevice {
     fn initialize(
         framebuffer: crate::boot_resources::FramebufferInfo,
-        present_sequence: Option<u32>,
+        present_state: Option<(
+            u32,
+            bool,
+            [logos_abi::GuiRect; logos_abi::MAX_DISPLAY_PRESENT_RECTS],
+        )>,
     ) -> Result<Self, GpuError> {
         if framebuffer.format() != crate::boot_resources::PixelFormat::Bgr8 {
             return Err(GpuError::InvalidFramebuffer);
@@ -314,7 +318,7 @@ impl VirtioGpuDevice {
             resource_id: RESOURCE_ID,
             rect: framebuffer_rect,
         })?;
-        device.present(present_sequence)?;
+        device.present(present_state)?;
         Ok(device)
     }
 
@@ -416,7 +420,15 @@ impl VirtioGpuDevice {
         Err(GpuError::Timeout)
     }
 
-    fn present(&mut self, present_sequence: Option<u32>) -> Result<(), GpuError> {
+    fn present(
+        &mut self,
+        present_state: Option<(
+            u32,
+            bool,
+            [logos_abi::GuiRect; logos_abi::MAX_DISPLAY_PRESENT_RECTS],
+        )>,
+    ) -> Result<(), GpuError> {
+        let present_sequence = present_state.map(|state| state.0);
         if self.last_present_sequence == present_sequence {
             #[cfg(feature = "qemu-proof")]
             if !GPU_PROOF_IDLE_SUPPRESSED.swap(true, Ordering::AcqRel) {
@@ -424,16 +436,45 @@ impl VirtioGpuDevice {
             }
             return Ok(());
         }
-        self.command(VirtioGpuCommand::TransferToHost2d {
-            resource_id: RESOURCE_ID,
-            rect: self.transfer,
-        })?;
-        self.command(VirtioGpuCommand::ResourceFlush {
-            resource_id: RESOURCE_ID,
-            rect: self.framebuffer,
-        })?;
+        let full = present_state
+            .is_none_or(|(_, full, rects)| full || rects.iter().all(|rect| rect.is_empty()))
+            || self.last_present_sequence.is_none();
+        if full {
+            self.transfer_rect(self.transfer, self.framebuffer)?;
+        } else if let Some((_, _, rects)) = present_state {
+            for rect in rects.iter().copied().filter(|rect| !rect.is_empty()) {
+                let rect = self.present_rect(rect)?;
+                self.transfer_rect(rect, rect)?;
+            }
+        }
         self.last_present_sequence = present_sequence;
         Ok(())
+    }
+
+    fn transfer_rect(
+        &mut self,
+        transfer: VirtioGpuRect,
+        flush: VirtioGpuRect,
+    ) -> Result<(), GpuError> {
+        self.command(VirtioGpuCommand::TransferToHost2d {
+            resource_id: RESOURCE_ID,
+            rect: transfer,
+        })?;
+        self.command(VirtioGpuCommand::ResourceFlush { resource_id: RESOURCE_ID, rect: flush })
+    }
+
+    fn present_rect(&self, rect: logos_abi::GuiRect) -> Result<VirtioGpuRect, GpuError> {
+        if rect.x < 0 || rect.y < 0 {
+            return Err(GpuError::InvalidFramebuffer);
+        }
+        let rect = VirtioGpuRect::new(rect.x as u32, rect.y as u32, rect.width, rect.height)
+            .ok_or(GpuError::InvalidFramebuffer)?;
+        if rect.x + rect.width > self.framebuffer.width
+            || rect.y + rect.height > self.framebuffer.height
+        {
+            return Err(GpuError::InvalidFramebuffer);
+        }
+        Ok(rect)
     }
 }
 

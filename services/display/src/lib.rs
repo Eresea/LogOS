@@ -8,8 +8,8 @@ extern crate std;
 use alloc::vec::Vec;
 use logos_abi::{
     CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, GuiRect, MAX_COLUMNS,
-    MAX_FRAMEBUFFER_BYTES, MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind,
-    RENDER_FLAG_MORE, RenderMessage,
+    MAX_DISPLAY_PRESENT_RECTS, MAX_FRAMEBUFFER_BYTES, MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS,
+    MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
 };
 
 mod gui;
@@ -307,6 +307,9 @@ pub struct Display {
     gui_tile_y: i32,
     backbuffer: Option<Vec<u8>>,
     presented: bool,
+    presented_full: bool,
+    presented_damage: [GuiRect; MAX_DISPLAY_PRESENT_RECTS],
+    presented_damage_count: usize,
 }
 
 impl Display {
@@ -333,6 +336,9 @@ impl Display {
             gui_tile_y: 0,
             backbuffer: None,
             presented: false,
+            presented_full: false,
+            presented_damage: [GuiRect::EMPTY; MAX_DISPLAY_PRESENT_RECTS],
+            presented_damage_count: 0,
         }
     }
 
@@ -374,6 +380,8 @@ impl Display {
                 .copy_from_slice(&backbuffer[start..start + row_bytes]);
         }
         self.presented = true;
+        self.presented_full = true;
+        self.presented_damage_count = 0;
     }
 
     fn present_damage(
@@ -398,9 +406,16 @@ impl Display {
                 let end = row * stride + right * 4;
                 framebuffer[start..end].copy_from_slice(&backbuffer[start..end]);
             }
-        }
-        if damage.iter().copied().any(|rect| !rect.is_empty()) {
             self.presented = true;
+            if !self.presented_full {
+                if self.presented_damage_count < MAX_DISPLAY_PRESENT_RECTS {
+                    self.presented_damage[self.presented_damage_count] = rect;
+                    self.presented_damage_count += 1;
+                } else {
+                    self.presented_full = true;
+                    self.presented_damage_count = 0;
+                }
+            }
         }
     }
 
@@ -427,6 +442,9 @@ impl Display {
         self.gui_tile_x = 0;
         self.gui_tile_y = 0;
         self.presented = false;
+        self.presented_full = false;
+        self.presented_damage_count = 0;
+        self.presented_damage = [GuiRect::EMPTY; MAX_DISPLAY_PRESENT_RECTS];
     }
 
     pub fn toggle_cursor(&mut self) -> bool {
@@ -927,9 +945,17 @@ impl Display {
     }
 
     pub fn take_presented(&mut self) -> bool {
-        let presented = self.presented;
+        let (full, _, count) = self.take_presented_damage();
+        full || count != 0
+    }
+
+    pub fn take_presented_damage(&mut self) -> (bool, [GuiRect; MAX_DISPLAY_PRESENT_RECTS], usize) {
+        let result = (self.presented_full, self.presented_damage, self.presented_damage_count);
         self.presented = false;
-        presented
+        self.presented_full = false;
+        self.presented_damage_count = 0;
+        self.presented_damage = [GuiRect::EMPTY; MAX_DISPLAY_PRESENT_RECTS];
+        result
     }
 }
 
@@ -969,6 +995,19 @@ mod tests {
         display.present_all(&mut framebuffer, 4, 4, 4 * 4);
         assert!(display.take_presented());
         assert!(!display.take_presented());
+    }
+
+    #[test]
+    fn damage_present_signal_keeps_bounded_rectangles() {
+        let mut display = Display::new(1);
+        display.ensure_backbuffer(8 * 8 * 4).unwrap();
+        let mut framebuffer = [0; 8 * 8 * 4];
+        let damage = [GuiRect::new(2, 3, 4, 2)];
+        display.present_damage(&mut framebuffer, 8, 8, 8 * 4, &damage);
+        let (full, rects, count) = display.take_presented_damage();
+        assert!(!full);
+        assert_eq!(count, 1);
+        assert_eq!(rects[0], damage[0]);
     }
 
     #[test]

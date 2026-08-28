@@ -94,8 +94,13 @@ fn render(
         config.stride as usize * 4,
         format,
     );
-    if display.take_presented() {
-        present_state.publish();
+    publish_present(display, present_state);
+}
+
+fn publish_present(display: &mut logos_display::Display, present_state: &FramebufferPresentState) {
+    let (full, rects, count) = display.take_presented_damage();
+    if full || count != 0 {
+        present_state.publish(full, &rects[..count]);
     }
 }
 
@@ -302,9 +307,7 @@ pub extern "C" fn _start() -> ! {
                 config.stride as usize * 4,
                 format,
             );
-            if display.take_presented() {
-                present_state.publish();
-            }
+            publish_present(display, present_state);
             gui_render_pending = display.render_pending();
             gui_dirty = false;
             progressed = true;
