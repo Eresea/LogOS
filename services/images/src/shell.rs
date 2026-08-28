@@ -425,6 +425,19 @@ fn send_shell_surface(
     }
 }
 
+fn flush_pending<T: Copy>(capability: logos_abi::CapabilityHandle, pending: &mut Option<T>) {
+    let Some(message) = *pending else { return };
+    match common::ipc_send_handle(capability, &message) {
+        IpcStatus::Ok => *pending = None,
+        IpcStatus::Full => {}
+        IpcStatus::Stale
+        | IpcStatus::Disconnected
+        | IpcStatus::Unauthorized
+        | IpcStatus::Malformed
+        | IpcStatus::Empty => *pending = None,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
@@ -503,10 +516,11 @@ pub extern "C" fn _start() -> ! {
         true,
     );
     let context = GuiSessionContext::EMPTY;
-    let _ = common::ipc_send_handle(flow, &context);
-    let _ = common::ipc_send_handle(atrium_context, &context);
+    let mut pending_flow_context = Some(context);
+    let mut pending_atrium_context = Some(context);
     let mut pending_user: Option<IpcBytes> = None;
     let mut pending_lock_request: Option<UserRequest> = None;
+    let mut pending_lock_response: Option<UserResponse> = None;
     let mut response = IpcBytes::empty(MessageKind::UserResponse);
     let mut lock_request = UserRequest::new(UserOperation::Login, 1);
     let mut atrium_command = AtriumControl::new(AtriumControlOperation::Reset, 1);
@@ -515,11 +529,15 @@ pub extern "C" fn _start() -> ! {
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        flush_pending(flow, &mut pending_flow_context);
+        flush_pending(atrium_context, &mut pending_atrium_context);
+        flush_pending(lockscreen_response, &mut pending_lock_response);
         while common::ipc_receive_handle(atrium_control, &mut atrium_command) == IpcStatus::Ok {
             if atrium_command.operation == AtriumControlOperation::Logout && pending_user.is_none()
             {
                 if let Ok(mut request) = shell.logout() {
-                    let _ = common::ipc_send_handle(atrium_context, &GuiSessionContext::EMPTY);
+                    pending_flow_context = Some(GuiSessionContext::EMPTY);
+                    pending_atrium_context = Some(GuiSessionContext::EMPTY);
                     let bytes = unsafe {
                         core::slice::from_raw_parts(
                             (&request as *const UserRequest).cast::<u8>(),
@@ -534,6 +552,7 @@ pub extern "C" fn _start() -> ! {
         while common::ipc_receive_handle(lockscreen_request, &mut lock_request) == IpcStatus::Ok {
             if pending_user.is_some()
                 || pending_lock_request.is_some()
+                || pending_lock_response.is_some()
                 || !lock_request.is_valid()
                 || !matches!(lock_request.operation, UserOperation::Claim | UserOperation::Login)
             {
@@ -582,12 +601,12 @@ pub extern "C" fn _start() -> ! {
                         lock_response.root = result.root;
                         lock_response.rights = result.rights;
                     }
-                    let _ = common::ipc_send_handle(lockscreen_response, &lock_response);
+                    pending_lock_response = Some(lock_response);
                 }
                 if applied.is_ok() {
                     let context = shell.context();
-                    let _ = common::ipc_send_handle(flow, &context);
-                    let _ = common::ipc_send_handle(atrium_context, &context);
+                    pending_flow_context = Some(context);
+                    pending_atrium_context = Some(context);
                 }
             }
         }
@@ -595,6 +614,7 @@ pub extern "C" fn _start() -> ! {
             input,
             user_send,
             user_receive,
+            flow,
             atrium_control,
             atrium_context,
             lockscreen_request,

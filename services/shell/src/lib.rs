@@ -578,6 +578,7 @@ pub struct Shell {
     focus: ShellFocus,
     context: GuiSessionContext,
     pending_request: u32,
+    pending_operation: UserOperation,
     pending_logout: bool,
     next_request: u32,
     retries: u8,
@@ -591,6 +592,7 @@ impl Shell {
             focus: ShellFocus::LockScreen,
             context: GuiSessionContext::EMPTY,
             pending_request: 0,
+            pending_operation: UserOperation::Login,
             pending_logout: false,
             next_request: 1,
             retries: 0,
@@ -643,6 +645,7 @@ impl Shell {
             return Err(ShellError::InvalidRequest);
         }
         self.pending_request = request_id;
+        self.pending_operation = operation;
         self.pending_logout = false;
         self.phase = if operation == UserOperation::Claim {
             ShellPhase::ClaimPending
@@ -658,8 +661,10 @@ impl Shell {
     }
 
     pub fn apply_user_response(&mut self, response: UserResponse) -> Result<(), ShellError> {
-        if response.request_id != self.pending_request || self.pending_request == 0 {
-            self.clear_context();
+        if response.request_id != self.pending_request
+            || self.pending_request == 0
+            || response.operation != self.pending_operation
+        {
             return Err(ShellError::Stale);
         }
         if self.pending_logout {
@@ -724,6 +729,7 @@ impl Shell {
         let mut request = UserRequest::new(UserOperation::Logout, request_id);
         request.session = context.session;
         self.pending_request = request_id;
+        self.pending_operation = UserOperation::Logout;
         self.pending_logout = true;
         self.clear_context();
         self.phase = ShellPhase::Locked;
@@ -734,6 +740,7 @@ impl Shell {
     pub fn restart(&mut self) {
         self.restart_generation = self.restart_generation.wrapping_add(1).max(1);
         self.pending_request = 0;
+        self.pending_operation = UserOperation::Login;
         self.pending_logout = false;
         self.clear_context();
         self.phase = ShellPhase::Locked;
@@ -803,6 +810,19 @@ mod tests {
         shell.restart();
         assert_eq!(shell.phase(), ShellPhase::Locked);
         assert!(shell.context().is_clear());
+    }
+
+    #[test]
+    fn stale_response_does_not_clear_current_session() {
+        let mut shell = Shell::new();
+        let request = shell.begin_user_request(UserOperation::Login, b"alice", b"secret").unwrap();
+        shell.apply_user_response(response(request, UserStatus::Ok)).unwrap();
+        let stale = UserResponse::new(
+            UserRequest::new(UserOperation::Login, request.request_id.wrapping_add(1)),
+            UserStatus::BadCredentials,
+        );
+        assert_eq!(shell.apply_user_response(stale), Err(ShellError::Stale));
+        assert!(shell.context().is_authenticated());
     }
 
     #[test]
