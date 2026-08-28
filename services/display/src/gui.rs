@@ -16,7 +16,7 @@ impl RenderNode {
 }
 
 const MAX_GUI_PLAN_COMMANDS: usize = MAX_GUI_SURFACES * MAX_GUI_NODES;
-const MAX_GUI_PLAN_OCCLUDERS: usize = MAX_GUI_PLAN_COMMANDS * (MAX_GUI_PLAN_COMMANDS - 1) / 2;
+const MAX_GUI_PLAN_OCCLUDERS: usize = MAX_GUI_PLAN_COMMANDS;
 
 #[derive(Clone, Copy)]
 struct RenderPlanEntry {
@@ -573,51 +573,34 @@ impl GuiSurfaceRegistry {
             count += 1;
         }
 
-        for (surface_position, index) in order[..count].iter().copied().enumerate() {
+        for index in order[..count].iter().copied() {
             let mut clip = self.slots[index].bounds;
             if self.slots[index].active_frame != 0 {
                 let node_count = self.slots[index].active_node_count as usize;
-                for node_position in 0..node_count {
-                    let command = self.slots[index].active_nodes[node_position]
-                        .expect("active node count must match active nodes")
-                        .command;
-                    self.append_plan_entry(
-                        command,
-                        &mut clip,
-                        &order[..count],
-                        surface_position,
-                        node_position,
-                    );
+                let nodes = self.slots[index].active_nodes;
+                for node in nodes[..node_count].iter().flatten() {
+                    let command = node.command;
+                    self.append_plan_entry(command, &mut clip);
                 }
             } else {
-                let mut command_position = 0;
                 let batch_count = self.slots[index].batch_count as usize;
                 let batches = self.slots[index].batches;
                 for batch in batches[..batch_count].iter().flatten() {
                     for command in batch.commands[..batch.command_count as usize].iter().copied() {
-                        self.append_plan_entry(
-                            command,
-                            &mut clip,
-                            &order[..count],
-                            surface_position,
-                            command_position,
-                        );
-                        command_position += 1;
+                        self.append_plan_entry(command, &mut clip);
                     }
                 }
             }
         }
+        let occluder_count = self.plan.occluder_count;
+        for entry in self.plan.entries[..self.plan.entry_count].iter_mut().flatten() {
+            let start = usize::from(entry.occluder_start);
+            entry.occluder_count = occluder_count.saturating_sub(start) as u16;
+        }
         self.plan.valid = true;
     }
 
-    fn append_plan_entry(
-        &mut self,
-        command: GuiDrawCommand,
-        clip: &mut GuiRect,
-        order: &[usize],
-        surface_position: usize,
-        command_position: usize,
-    ) {
+    fn append_plan_entry(&mut self, command: GuiDrawCommand, clip: &mut GuiRect) {
         if command.kind == GuiDrawKind::ClipRect {
             *clip = intersect(*clip, command_rect(command));
             return;
@@ -625,67 +608,18 @@ impl GuiSurfaceRegistry {
         if self.plan.entry_count == MAX_GUI_PLAN_COMMANDS {
             return;
         }
-        let (occluders, occluder_count) =
-            self.occluders_after(order, surface_position, command_position);
-        let available = MAX_GUI_PLAN_OCCLUDERS - self.plan.occluder_count;
-        let copied = occluder_count.min(available);
-        let start = self.plan.occluder_count;
-        self.plan.occluders[start..start + copied].copy_from_slice(&occluders[..copied]);
-        self.plan.occluder_count += copied;
+        let occluder_start = self.plan.occluder_count + usize::from(is_opaque_occluder(command));
+        if is_opaque_occluder(command) && self.plan.occluder_count < MAX_GUI_PLAN_OCCLUDERS {
+            self.plan.occluders[self.plan.occluder_count] = command_rect(command);
+            self.plan.occluder_count += 1;
+        }
         self.plan.entries[self.plan.entry_count] = Some(RenderPlanEntry {
             command,
             clip: *clip,
-            occluder_start: start as u16,
-            occluder_count: copied as u16,
+            occluder_start: occluder_start as u16,
+            occluder_count: 0,
         });
         self.plan.entry_count += 1;
-    }
-
-    fn occluders_after(
-        &self,
-        order: &[usize],
-        surface_position: usize,
-        command_position: usize,
-    ) -> ([GuiRect; MAX_GUI_SURFACES * MAX_GUI_NODES], usize) {
-        let mut occluders = [GuiRect::EMPTY; MAX_GUI_SURFACES * MAX_GUI_NODES];
-        let mut count = 0;
-        for (position, index) in order.iter().copied().enumerate() {
-            if position < surface_position {
-                continue;
-            }
-            let slot = self.slots[index];
-            if slot.active_frame != 0 {
-                for (node_index, node) in slot.active_nodes[..slot.active_node_count as usize]
-                    .iter()
-                    .flatten()
-                    .enumerate()
-                {
-                    if position == surface_position && node_index <= command_position {
-                        continue;
-                    }
-                    if is_opaque_occluder(node.command) && count < occluders.len() {
-                        occluders[count] = command_rect(node.command);
-                        count += 1;
-                    }
-                }
-            } else {
-                let mut node_index = 0;
-                for batch in slot.batches[..slot.batch_count as usize].iter().flatten() {
-                    for command in batch.commands[..batch.command_count as usize].iter().copied() {
-                        if position == surface_position && node_index <= command_position {
-                            node_index += 1;
-                            continue;
-                        }
-                        if is_opaque_occluder(command) && count < occluders.len() {
-                            occluders[count] = command_rect(command);
-                            count += 1;
-                        }
-                        node_index += 1;
-                    }
-                }
-            }
-        }
-        (occluders, count)
     }
 
     fn lookup(&self, handle: SurfaceHandle) -> Result<&SurfaceSlot, GuiRegistryError> {
