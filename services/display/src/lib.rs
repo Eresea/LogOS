@@ -600,8 +600,16 @@ impl Display {
         }
         if rendered != 0 {
             let (damage, damage_count) = self.gui.take_damage();
-            rendered +=
-                self.gui.render(backbuffer, width, height, stride, format, &damage, damage_count);
+            rendered += self.gui.render(
+                &mut self.glyph_cache,
+                backbuffer,
+                width,
+                height,
+                stride,
+                format,
+                &damage,
+                damage_count,
+            );
         }
         let present = first_render || rendered != 0;
         if present {
@@ -824,8 +832,17 @@ impl Display {
                     )
                 })
                 .unwrap_or(0);
-            rendered +=
-                terminal + self.gui.render(backbuffer, width, height, stride, format, &damage, 1);
+            rendered += terminal
+                + self.gui.render(
+                    &mut self.glyph_cache,
+                    backbuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    &damage,
+                    1,
+                );
             self.present_damage(framebuffer, width, height, stride, &[tile]);
             self.advance_gui_tile(rect, right, bottom);
         }

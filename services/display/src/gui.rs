@@ -50,15 +50,16 @@ pub trait GuiRenderBackend {
     fn draw(&mut self, command: GuiDrawCommand, clip: GuiRect) -> usize;
 }
 
-struct SoftwareRenderBackend<'a> {
-    framebuffer: &'a mut [u8],
+struct SoftwareRenderBackend<'framebuffer, 'glyph> {
+    framebuffer: &'framebuffer mut [u8],
+    glyph_cache: &'glyph mut super::GlyphCache,
     width: usize,
     height: usize,
     stride: usize,
     format: super::PixelFormat,
 }
 
-impl GuiRenderBackend for SoftwareRenderBackend<'_> {
+impl GuiRenderBackend for SoftwareRenderBackend<'_, '_> {
     fn draw(&mut self, command: GuiDrawCommand, clip: GuiRect) -> usize {
         render_command(
             self.framebuffer,
@@ -66,6 +67,7 @@ impl GuiRenderBackend for SoftwareRenderBackend<'_> {
             self.height,
             self.stride,
             self.format,
+            self.glyph_cache,
             command,
             clip,
         )
@@ -497,8 +499,9 @@ impl GuiSurfaceRegistry {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn render(
+    pub(crate) fn render(
         &mut self,
+        glyph_cache: &mut super::GlyphCache,
         framebuffer: &mut [u8],
         width: usize,
         height: usize,
@@ -507,7 +510,8 @@ impl GuiSurfaceRegistry {
         damage: &[GuiRect; MAX_GUI_DAMAGE_RECTS],
         damage_count: usize,
     ) -> usize {
-        let mut backend = SoftwareRenderBackend { framebuffer, width, height, stride, format };
+        let mut backend =
+            SoftwareRenderBackend { framebuffer, glyph_cache, width, height, stride, format };
         self.compose(&mut backend, damage, damage_count)
     }
 
@@ -935,6 +939,7 @@ fn render_command(
     height: usize,
     stride: usize,
     format: super::PixelFormat,
+    glyph_cache: &mut super::GlyphCache,
     command: GuiDrawCommand,
     clip: GuiRect,
 ) -> usize {
@@ -1020,7 +1025,7 @@ fn render_command(
             for (index, byte) in
                 command.text[..command.text_len as usize].iter().copied().enumerate()
             {
-                let glyph = super::embedded_glyph(u32::from(byte));
+                let glyph = glyph_cache.get(u32::from(byte));
                 let base_x = command.x + (index * super::GLYPH_WIDTH) as i32;
                 for glyph_y in 0..super::GLYPH_HEIGHT {
                     for glyph_x in 0..super::GLYPH_WIDTH {
@@ -1703,7 +1708,9 @@ mod tests {
         for pixel in framebuffer.chunks_exact_mut(4) {
             pixel.copy_from_slice(&background);
         }
+        let mut glyph_cache = crate::GlyphCache::new();
         registry.render(
+            &mut glyph_cache,
             &mut framebuffer,
             width,
             height,
@@ -1776,8 +1783,10 @@ mod tests {
         damage[0] = clip;
         let mut occluders = [GuiRect::EMPTY; MAX_GUI_SURFACES * MAX_GUI_NODES];
         occluders[0] = clip;
+        let mut glyph_cache = crate::GlyphCache::new();
         let mut backend = SoftwareRenderBackend {
             framebuffer: &mut framebuffer,
+            glyph_cache: &mut glyph_cache,
             width: 48,
             height: 32,
             stride: 48 * 4,
