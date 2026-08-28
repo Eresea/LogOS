@@ -76,3 +76,4 @@
 | [0073](0073-bounded-pointer-input-path.md) | Accepted | Bounded IRQ12 → Input → Atrium pointer delivery, wake ownership, capture, and local routing |
 | [0074](0074-bounded-native-cursor.md) | Accepted | Atrium-owned bounded native cursor surface and LockScreen left-button interaction |
 | [0075](0075-retained-graphics-v2.md) | Accepted | Atomic retained scene commits, stable node damage, dirty-tile RAM composition, caching, and occlusion |
+| [0076](0076-bounded-gpu-present-boundary.md) | Accepted | Core-owned bounded GPU resources and queues with Display-owned scene policy, dirty-region present, and software fallback |
