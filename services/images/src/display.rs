@@ -5,9 +5,10 @@
 mod common;
 
 use logos_abi::{
-    DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, FramebufferConfig, FramebufferFormat, GuiRect,
-    GuiSceneOp, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, IpcStatus,
-    MessageKind, RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
+    DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, DISPLAY_PRESENT_BASE, FramebufferConfig,
+    FramebufferFormat, FramebufferPresentState, GuiRect, GuiSceneOp, GuiStatus,
+    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, IpcStatus, MessageKind,
+    RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
@@ -80,6 +81,7 @@ fn render(
     display: &mut logos_display::Display,
     framebuffer: &mut [u8],
     config: &FramebufferConfig,
+    present_state: &FramebufferPresentState,
 ) {
     let format = match config.format {
         FramebufferFormat::Bgr8 => logos_display::PixelFormat::Bgr8,
@@ -92,6 +94,9 @@ fn render(
         config.stride as usize * 4,
         format,
     );
+    if display.take_presented() {
+        present_state.publish();
+    }
 }
 
 static mut DISPLAY: logos_display::Display = logos_display::Display::new(1);
@@ -101,6 +106,7 @@ pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let display = unsafe { &mut *core::ptr::addr_of_mut!(DISPLAY) };
     let config = unsafe { &*(DISPLAY_CONFIG_BASE as *const FramebufferConfig) };
+    let present_state = unsafe { &*(DISPLAY_PRESENT_BASE as *const FramebufferPresentState) };
     let framebuffer = unsafe {
         core::slice::from_raw_parts_mut(DISPLAY_FRAMEBUFFER_BASE as *mut u8, config.bytes as usize)
     };
@@ -282,7 +288,7 @@ pub extern "C" fn _start() -> ! {
             lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
         }
         if render_pending && render_complete && !gui_render_pending {
-            render(display, framebuffer, config);
+            render(display, framebuffer, config, present_state);
             if display.gui().terminal_bounds().is_some() {
                 gui_dirty = true;
             }
@@ -296,6 +302,9 @@ pub extern "C" fn _start() -> ! {
                 config.stride as usize * 4,
                 format,
             );
+            if display.take_presented() {
+                present_state.publish();
+            }
             gui_render_pending = display.render_pending();
             gui_dirty = false;
             progressed = true;

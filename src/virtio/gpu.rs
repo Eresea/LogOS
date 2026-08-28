@@ -99,6 +99,8 @@ static mut DEVICE: MaybeUninit<VirtioGpuDevice> = MaybeUninit::uninit();
 static DEVICE_READY: AtomicBool = AtomicBool::new(false);
 static DEVICE_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 static DEVICE_BUSY: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "qemu-proof")]
+static GPU_PROOF_IDLE_SUPPRESSED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GpuError {
@@ -179,6 +181,7 @@ struct VirtioGpuDevice {
     framebuffer: VirtioGpuRect,
     transfer: VirtioGpuRect,
     next_fence: u64,
+    last_present_sequence: Option<u32>,
 }
 
 pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
@@ -195,19 +198,22 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
 }
 
 pub(crate) fn present() -> bool {
+    let present_sequence = crate::arch::framebuffer_present_sequence();
     if !DEVICE_READY.load(Ordering::Acquire) {
         if DEVICE_ATTEMPTED.swap(true, Ordering::AcqRel) {
             return false;
         }
         let Some(resources) = crate::arch::boot_resources() else { return false };
         let Some(framebuffer) = resources.framebuffer() else { return false };
-        let Ok(device) = VirtioGpuDevice::initialize(framebuffer) else { return false };
+        let Ok(device) = VirtioGpuDevice::initialize(framebuffer, present_sequence) else {
+            return false;
+        };
         unsafe { core::ptr::addr_of_mut!(DEVICE).write(MaybeUninit::new(device)) };
         DEVICE_READY.store(true, Ordering::Release);
         #[cfg(feature = "qemu-proof")]
         crate::arch_proof_line(b"LogOS vNext: VirtIO GPU scanout ready");
     }
-    with_device_mut(|device| device.present()).is_ok()
+    with_device_mut(|device| device.present(present_sequence)).is_ok()
 }
 
 fn with_device_mut<T>(
@@ -226,7 +232,10 @@ fn with_device_mut<T>(
 }
 
 impl VirtioGpuDevice {
-    fn initialize(framebuffer: crate::boot_resources::FramebufferInfo) -> Result<Self, GpuError> {
+    fn initialize(
+        framebuffer: crate::boot_resources::FramebufferInfo,
+        present_sequence: Option<u32>,
+    ) -> Result<Self, GpuError> {
         if framebuffer.format() != crate::boot_resources::PixelFormat::Bgr8 {
             return Err(GpuError::InvalidFramebuffer);
         }
@@ -261,6 +270,7 @@ impl VirtioGpuDevice {
             framebuffer: framebuffer_rect,
             transfer,
             next_fence: 1,
+            last_present_sequence: None,
         };
         device.reset()?;
         unsafe {
@@ -304,7 +314,7 @@ impl VirtioGpuDevice {
             resource_id: RESOURCE_ID,
             rect: framebuffer_rect,
         })?;
-        device.present()?;
+        device.present(present_sequence)?;
         Ok(device)
     }
 
@@ -406,7 +416,14 @@ impl VirtioGpuDevice {
         Err(GpuError::Timeout)
     }
 
-    fn present(&mut self) -> Result<(), GpuError> {
+    fn present(&mut self, present_sequence: Option<u32>) -> Result<(), GpuError> {
+        if self.last_present_sequence == present_sequence {
+            #[cfg(feature = "qemu-proof")]
+            if !GPU_PROOF_IDLE_SUPPRESSED.swap(true, Ordering::AcqRel) {
+                crate::arch_proof_line(b"LogOS vNext: VirtIO GPU idle present suppressed");
+            }
+            return Ok(());
+        }
         self.command(VirtioGpuCommand::TransferToHost2d {
             resource_id: RESOURCE_ID,
             rect: self.transfer,
@@ -414,7 +431,9 @@ impl VirtioGpuDevice {
         self.command(VirtioGpuCommand::ResourceFlush {
             resource_id: RESOURCE_ID,
             rect: self.framebuffer,
-        })
+        })?;
+        self.last_present_sequence = present_sequence;
+        Ok(())
     }
 }
 

@@ -306,6 +306,7 @@ pub struct Display {
     gui_tile_x: i32,
     gui_tile_y: i32,
     backbuffer: Option<Vec<u8>>,
+    presented: bool,
 }
 
 impl Display {
@@ -331,6 +332,7 @@ impl Display {
             gui_tile_x: 0,
             gui_tile_y: 0,
             backbuffer: None,
+            presented: false,
         }
     }
 
@@ -363,7 +365,7 @@ impl Display {
         Ok(())
     }
 
-    fn present_all(&self, framebuffer: &mut [u8], width: usize, height: usize, stride: usize) {
+    fn present_all(&mut self, framebuffer: &mut [u8], width: usize, height: usize, stride: usize) {
         let Some(backbuffer) = self.backbuffer.as_ref() else { return };
         let row_bytes = width * 4;
         for row in 0..height {
@@ -371,10 +373,11 @@ impl Display {
             framebuffer[start..start + row_bytes]
                 .copy_from_slice(&backbuffer[start..start + row_bytes]);
         }
+        self.presented = true;
     }
 
     fn present_damage(
-        &self,
+        &mut self,
         framebuffer: &mut [u8],
         width: usize,
         height: usize,
@@ -395,6 +398,9 @@ impl Display {
                 let end = row * stride + right * 4;
                 framebuffer[start..end].copy_from_slice(&backbuffer[start..end]);
             }
+        }
+        if damage.iter().copied().any(|rect| !rect.is_empty()) {
+            self.presented = true;
         }
     }
 
@@ -420,6 +426,7 @@ impl Display {
         self.gui_tile_index = 0;
         self.gui_tile_x = 0;
         self.gui_tile_y = 0;
+        self.presented = false;
     }
 
     pub fn toggle_cursor(&mut self) -> bool {
@@ -918,6 +925,12 @@ impl Display {
     pub const fn render_pending(&self) -> bool {
         self.gui_background_pending || self.gui_damage_count != 0
     }
+
+    pub fn take_presented(&mut self) -> bool {
+        let presented = self.presented;
+        self.presented = false;
+        presented
+    }
 }
 
 impl Default for Display {
@@ -946,6 +959,16 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(cache.next, next);
         assert!(cache.entries.iter().any(|entry| entry.valid && entry.scalar == 'A' as u32));
+    }
+
+    #[test]
+    fn present_signal_is_consumed_once() {
+        let mut display = Display::new(1);
+        display.ensure_backbuffer(4 * 4 * 4).unwrap();
+        let mut framebuffer = [0; 4 * 4 * 4];
+        display.present_all(&mut framebuffer, 4, 4, 4 * 4);
+        assert!(display.take_presented());
+        assert!(!display.take_presented());
     }
 
     #[test]

@@ -584,6 +584,12 @@ fn boot_impl() -> ! {
                 crate::service_runtime::ServiceRuntimeError::FramebufferConfigProcess(_) => {
                     fatal(b"LogOS vNext: framebuffer config process mapping")
                 }
+                crate::service_runtime::ServiceRuntimeError::FramebufferPresent(_) => {
+                    fatal(b"LogOS vNext: framebuffer present mapping")
+                }
+                crate::service_runtime::ServiceRuntimeError::FramebufferPresentProcess(_) => {
+                    fatal(b"LogOS vNext: framebuffer present process mapping")
+                }
                 crate::service_runtime::ServiceRuntimeError::Keyboard(_) => {
                     fatal(b"LogOS vNext: keyboard mapping")
                 }
@@ -742,6 +748,15 @@ fn publish_boot_resources(
 #[allow(dead_code)]
 pub(crate) fn boot_resources() -> Option<BootResources> {
     unsafe { BOOT_RESOURCES }
+}
+
+pub(crate) fn framebuffer_present_sequence() -> Option<u32> {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe {
+        (*core::ptr::addr_of!(SERVICE_RUNTIME)).framebuffer_present_frame().map(|frame| {
+            (&*(frame.raw() as usize as *const logos_abi::FramebufferPresentState)).sequence()
+        })
+    }
 }
 
 #[allow(dead_code)]

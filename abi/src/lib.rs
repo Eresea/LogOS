@@ -8,7 +8,7 @@
 use core::{
     cell::UnsafeCell,
     mem::MaybeUninit,
-    sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
 };
 
 mod atrium;
@@ -89,6 +89,7 @@ pub const MAX_MEMORY_DESCRIPTORS: usize = 256;
 pub const MAX_FRAMEBUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DISPLAY_FRAMEBUFFER_BASE: usize = 0x0000_0100_1000_0000;
 pub const DISPLAY_CONFIG_BASE: usize = 0x0000_0100_1200_0000;
+pub const DISPLAY_PRESENT_BASE: usize = DISPLAY_CONFIG_BASE + 0x1000;
 pub const INPUT_KEYBOARD_RING_BASE: usize = 0x0000_0100_1100_0000;
 pub const KEYBOARD_RING_CAPACITY: usize = 256;
 pub const INPUT_POINTER_RING_BASE: usize = 0x0000_0100_1101_0000;
@@ -179,6 +180,34 @@ impl FramebufferConfig {
         format: FramebufferFormat,
     ) -> Self {
         Self { bytes, width, height, stride, format }
+    }
+}
+
+/// Core-owned publication state for the Display-to-GPU present boundary.
+/// Display may publish a new sequence after writing the mapped framebuffer;
+/// Core only submits a GPU transfer when the sequence changes.
+#[repr(C)]
+pub struct FramebufferPresentState {
+    sequence: AtomicU32,
+}
+
+impl FramebufferPresentState {
+    pub const fn new() -> Self {
+        Self { sequence: AtomicU32::new(0) }
+    }
+
+    pub fn publish(&self) {
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn sequence(&self) -> u32 {
+        self.sequence.load(Ordering::Acquire)
+    }
+}
+
+impl Default for FramebufferPresentState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2351,6 +2380,7 @@ pub type StreamIpc = SharedIpc<IpcBytes, 8>;
 pub type PointerByteRing = KeyboardByteRing;
 
 const _: () = assert!(core::mem::size_of::<FramebufferConfig>() <= IPC_PAGE_BYTES);
+const _: () = assert!(core::mem::size_of::<FramebufferPresentState>() <= IPC_PAGE_BYTES);
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2360,6 +2390,15 @@ mod tests {
         for code in [KeyCode::Unknown, KeyCode::Escape, KeyCode::Right, KeyCode::function(12)] {
             assert_eq!(KeyCode::from_raw(code.raw()), code);
         }
+    }
+
+    #[test]
+    fn framebuffer_present_sequence_publishes_monotonically() {
+        let state = FramebufferPresentState::new();
+        assert_eq!(state.sequence(), 0);
+        state.publish();
+        state.publish();
+        assert_eq!(state.sequence(), 2);
     }
 
     #[test]

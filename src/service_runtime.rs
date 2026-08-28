@@ -187,6 +187,8 @@ pub enum ServiceRuntimeError {
     FramebufferProcess(ProcessError),
     FramebufferConfig(PageTableError),
     FramebufferConfigProcess(ProcessError),
+    FramebufferPresent(PageTableError),
+    FramebufferPresentProcess(ProcessError),
     Keyboard(PageTableError),
     KeyboardProcess(ProcessError),
     Pointer(PageTableError),
@@ -237,6 +239,7 @@ pub struct ServiceRuntime {
     network_config_frame: Option<FrameAddress>,
     network_packet_frames: [Option<FrameAddress>; logos_abi::NETWORK_PACKET_PAGE_COUNT],
     framebuffer_config_frame: Option<FrameAddress>,
+    framebuffer_present_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     pointer_frame: Option<FrameAddress>,
     tasks: Vec<Option<crate::TaskHandle>>,
@@ -497,6 +500,7 @@ impl ServiceRuntime {
             network_config_frame: None,
             network_packet_frames: [None; logos_abi::NETWORK_PACKET_PAGE_COUNT],
             framebuffer_config_frame: None,
+            framebuffer_present_frame: None,
             keyboard_frame: None,
             pointer_frame: None,
             tasks: Vec::new(),
@@ -1242,6 +1246,12 @@ impl ServiceRuntime {
         memory.clear(framebuffer_config_frame).map_err(ServiceRuntimeError::FramebufferConfig)?;
         initialize_framebuffer_config(framebuffer_config_frame, framebuffer);
         self.map_framebuffer_config(framebuffer_config_frame)?;
+        let framebuffer_present_frame =
+            self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
+        self.framebuffer_present_frame = Some(framebuffer_present_frame);
+        memory.clear(framebuffer_present_frame).map_err(ServiceRuntimeError::FramebufferPresent)?;
+        initialize_framebuffer_present(framebuffer_present_frame);
+        self.map_framebuffer_present(framebuffer_present_frame)?;
         let keyboard_frame =
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
         self.keyboard_frame = Some(keyboard_frame);
@@ -1331,6 +1341,10 @@ impl ServiceRuntime {
     #[allow(dead_code)]
     pub(crate) fn framebuffer_config_frame(&self) -> Option<FrameAddress> {
         self.framebuffer_config_frame
+    }
+
+    pub(crate) fn framebuffer_present_frame(&self) -> Option<FrameAddress> {
+        self.framebuffer_present_frame
     }
 
     fn map_framebuffer(
@@ -1730,6 +1744,35 @@ impl ServiceRuntime {
         )
         .ok_or(ServiceRuntimeError::FramebufferConfigProcess(ProcessError::AddressSpace))?;
         self.processes.map(process, mapping).map_err(ServiceRuntimeError::FramebufferConfigProcess)
+    }
+
+    fn map_framebuffer_present(&mut self, frame: FrameAddress) -> Result<(), ServiceRuntimeError> {
+        let service = ServiceId::Display;
+        let index = service.index();
+        let Some((process, _)) = self.launch(service) else {
+            return Err(ServiceRuntimeError::FramebufferPresentProcess(
+                ProcessError::InvalidHandle,
+            ));
+        };
+        let mut memory = IdentityPageTableMemory;
+        let tables = unsafe { self.tables[index].assume_init_mut() };
+        tables
+            .map_raw_page(
+                logos_abi::DISPLAY_PRESENT_BASE,
+                frame,
+                MappingFlags::DATA,
+                &mut self.frame_pool,
+                &mut memory,
+            )
+            .map_err(ServiceRuntimeError::FramebufferPresent)?;
+        let mapping = VirtualMapping::new(
+            logos_abi::DISPLAY_PRESENT_BASE,
+            frame.raw() as usize,
+            1,
+            MappingFlags::DATA,
+        )
+        .ok_or(ServiceRuntimeError::FramebufferPresentProcess(ProcessError::AddressSpace))?;
+        self.processes.map(process, mapping).map_err(ServiceRuntimeError::FramebufferPresentProcess)
     }
 
     pub fn start_tasks(&mut self) -> Result<(), ServiceRuntimeError> {
@@ -6644,6 +6687,10 @@ impl ServiceRuntime {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             self.framebuffer_config_frame = None;
         }
+        if let Some(frame) = self.framebuffer_present_frame {
+            self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
+            self.framebuffer_present_frame = None;
+        }
         for frame in &mut self.ipc_staging_frames {
             if let Some(frame) = frame.take() {
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
@@ -6829,6 +6876,13 @@ fn initialize_framebuffer_config(
     // The frame is identity-mapped in the kernel root before it is mapped
     // read-only by policy into the Display address space.
     unsafe { (frame.raw() as usize as *mut logos_abi::FramebufferConfig).write(config) };
+}
+
+fn initialize_framebuffer_present(frame: FrameAddress) {
+    unsafe {
+        (frame.raw() as usize as *mut logos_abi::FramebufferPresentState)
+            .write(logos_abi::FramebufferPresentState::new());
+    }
 }
 
 fn map_loaded_pages(

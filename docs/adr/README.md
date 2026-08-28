@@ -77,3 +77,4 @@
 | [0074](0074-bounded-native-cursor.md) | Accepted | Atrium-owned bounded native cursor surface and LockScreen left-button interaction |
 | [0075](0075-retained-graphics-v2.md) | Accepted | Atomic retained scene commits, stable node damage, dirty-tile RAM composition, caching, and occlusion |
 | [0076](0076-bounded-gpu-present-boundary.md) | Accepted | Core-owned bounded GPU resources and queues with Display-owned scene policy, dirty-region present, and software fallback |
+| [0077](0077-bounded-display-present-sequence.md) | Accepted | One Core-owned atomic sequence lets Display publish completed framebuffer presents without repeated idle GPU transfers |
