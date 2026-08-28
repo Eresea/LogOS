@@ -186,7 +186,9 @@ pub struct PointerDecoder {
 
 impl PointerDecoder {
     pub const fn new() -> Self {
-        Self { packet: [0; 3], packet_len: 0, x: 0, y: 0, buttons: 0 }
+        // The GUI profile is fixed at 640x400, so relative motion starts at
+        // the same centered position used by Atrium and LockScreen.
+        Self { packet: [0; 3], packet_len: 0, x: 320, y: 200, buttons: 0 }
     }
 
     pub const fn position(&self) -> (i16, i16) {
@@ -543,11 +545,12 @@ mod tests {
     #[test]
     fn pointer_packets_decode_to_semantic_events() {
         let mut decoder = PointerDecoder::new();
+        assert_eq!(decoder.position(), (320, 200));
         assert_eq!(decoder.feed(0x08), None);
         assert_eq!(decoder.feed(4), None);
         let event = decoder.feed(2).unwrap();
-        assert_eq!(event.pointer_event().unwrap().x, 4);
-        assert_eq!(event.pointer_event().unwrap().y, -2);
+        assert_eq!(event.pointer_event().unwrap().x, 324);
+        assert_eq!(event.pointer_event().unwrap().y, 198);
 
         let _ = decoder.feed(0x09);
         let _ = decoder.feed(0);
@@ -564,7 +567,7 @@ mod tests {
         assert_eq!(decoder.feed(0x48), None);
         assert_eq!(decoder.feed(0), None);
         assert_eq!(decoder.feed(0), None);
-        assert_eq!(decoder.position(), (0, 0));
+        assert_eq!(decoder.position(), (320, 200));
     }
 
     #[test]

@@ -500,6 +500,9 @@ impl UserCatalog {
         name: &[u8],
         password: &[u8],
     ) -> Result<(UserId, SessionHandle), UserError> {
+        if !self.claimed {
+            return Err(UserError::NotClaimed);
+        }
         let name = UserName::parse(name)?;
         let index = self.find_user(name).ok_or(UserError::NotFound)?;
         let user = self.users[index].ok_or(UserError::Corrupt)?;
@@ -1196,6 +1199,7 @@ mod tests {
     fn claim_is_one_shot_and_login_verifies_argon2id_passwords() {
         let mut catalog = UserCatalog::new();
         let mut entropy = Entropy(1);
+        assert_eq!(catalog.login(b"admin", b"password"), Err(UserError::NotClaimed));
         let (_, session) =
             catalog.claim(b"admin", b"correct horse", root(1), &mut entropy).unwrap();
         assert!(catalog.is_claimed());
