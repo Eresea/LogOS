@@ -228,6 +228,7 @@ pub struct ServiceRuntime {
     bootstrap_directory: Vec<logos_abi::CapabilityHandle>,
     bootstrap_heap: Vec<logos_abi::CapabilityHandle>,
     keyboard_event: logos_abi::EventHandle,
+    pointer_event: logos_abi::EventHandle,
     service_heaps: Vec<ServiceHeapState>,
     service_stacks: Vec<ServiceStackState>,
     user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
@@ -487,6 +488,7 @@ impl ServiceRuntime {
             bootstrap_directory: Vec::new(),
             bootstrap_heap: Vec::new(),
             keyboard_event: logos_abi::EventHandle::EMPTY,
+            pointer_event: logos_abi::EventHandle::EMPTY,
             service_heaps: Vec::new(),
             service_stacks: Vec::new(),
             user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
@@ -776,6 +778,9 @@ impl ServiceRuntime {
                 crate::runtime_events::clear_hardware_event(
                     crate::runtime_events::HardwareEventSource::Keyboard,
                 );
+                crate::runtime_events::clear_hardware_event(
+                    crate::runtime_events::HardwareEventSource::Pointer,
+                );
                 return Err($error);
             }};
         }
@@ -906,6 +911,13 @@ impl ServiceRuntime {
             Err(_) => fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::Capacity)),
         };
         self.keyboard_event = keyboard_event;
+        let pointer_event = match events
+            .create_hardware_event(input, crate::runtime_events::HardwareEventSource::Pointer)
+        {
+            Ok(event) => event,
+            Err(_) => fail_ipc_init!(ServiceRuntimeError::Ipc(IpcError::Capacity)),
+        };
+        self.pointer_event = pointer_event;
         for spec in SERVICE_IMAGES {
             let service = spec.service();
             let owner = match self.runtime_service_handle(service) {
@@ -6569,6 +6581,9 @@ impl ServiceRuntime {
         crate::runtime_events::clear_hardware_event(
             crate::runtime_events::HardwareEventSource::Keyboard,
         );
+        crate::runtime_events::clear_hardware_event(
+            crate::runtime_events::HardwareEventSource::Pointer,
+        );
         self.storage_map_windows = [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
             crate::storage_ipc::STORAGE_MAP_CLIENTS];
         for slot in 0..MAX_PROGRAMS {
@@ -6594,6 +6609,7 @@ impl ServiceRuntime {
         self.service_handles.clear();
         self.dynamic_events = None;
         self.keyboard_event = logos_abi::EventHandle::EMPTY;
+        self.pointer_event = logos_abi::EventHandle::EMPTY;
         self.storage_response = None;
         self.device_response = None;
         self.storage_map_response = None;

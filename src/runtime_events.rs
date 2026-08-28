@@ -4,9 +4,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use logos_abi::{
-    DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE,
-    DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse, DirectoryStatus,
-    EventHandle, EventSetHandle, ServiceHandle,
+    DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD, DIRECTORY_EVENT_FLAG_HARDWARE_POINTER,
+    DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE, DirectoryRecord, DirectoryRecordKind,
+    DirectoryRequest, DirectoryResponse, DirectoryStatus, EventHandle, EventSetHandle,
+    ServiceHandle,
 };
 
 const NO_DEADLINE: u64 = u64::MAX;
@@ -15,6 +16,7 @@ const NO_DEADLINE: u64 = u64::MAX;
 pub(crate) enum HardwareEventSource {
     Network,
     Keyboard,
+    Pointer,
 }
 
 static NETWORK_EVENT_RAW: AtomicU64 = AtomicU64::new(0);
@@ -23,11 +25,15 @@ static NETWORK_PENDING: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_EVENT_RAW: AtomicU64 = AtomicU64::new(0);
 static KEYBOARD_SET_RAW: AtomicU64 = AtomicU64::new(0);
 static KEYBOARD_PENDING: AtomicBool = AtomicBool::new(false);
+static POINTER_EVENT_RAW: AtomicU64 = AtomicU64::new(0);
+static POINTER_SET_RAW: AtomicU64 = AtomicU64::new(0);
+static POINTER_PENDING: AtomicBool = AtomicBool::new(false);
 
 fn hardware_event_raw(source: HardwareEventSource) -> &'static AtomicU64 {
     match source {
         HardwareEventSource::Network => &NETWORK_EVENT_RAW,
         HardwareEventSource::Keyboard => &KEYBOARD_EVENT_RAW,
+        HardwareEventSource::Pointer => &POINTER_EVENT_RAW,
     }
 }
 
@@ -35,6 +41,7 @@ fn hardware_set_raw(source: HardwareEventSource) -> &'static AtomicU64 {
     match source {
         HardwareEventSource::Network => &NETWORK_SET_RAW,
         HardwareEventSource::Keyboard => &KEYBOARD_SET_RAW,
+        HardwareEventSource::Pointer => &POINTER_SET_RAW,
     }
 }
 
@@ -42,6 +49,7 @@ fn hardware_pending(source: HardwareEventSource) -> &'static AtomicBool {
     match source {
         HardwareEventSource::Network => &NETWORK_PENDING,
         HardwareEventSource::Keyboard => &KEYBOARD_PENDING,
+        HardwareEventSource::Pointer => &POINTER_PENDING,
     }
 }
 
@@ -96,14 +104,18 @@ pub(crate) fn signal_hardware_event(source: HardwareEventSource) {
 }
 
 fn hardware_event_is_pending(event: EventHandle) -> bool {
-    [HardwareEventSource::Network, HardwareEventSource::Keyboard].into_iter().any(|source| {
-        hardware_event_raw(source).load(Ordering::Acquire) == event.raw()
-            && hardware_pending(source).load(Ordering::Acquire)
-    })
+    [HardwareEventSource::Network, HardwareEventSource::Keyboard, HardwareEventSource::Pointer]
+        .into_iter()
+        .any(|source| {
+            hardware_event_raw(source).load(Ordering::Acquire) == event.raw()
+                && hardware_pending(source).load(Ordering::Acquire)
+        })
 }
 
 fn consume_hardware_event(event: EventHandle) {
-    for source in [HardwareEventSource::Network, HardwareEventSource::Keyboard] {
+    for source in
+        [HardwareEventSource::Network, HardwareEventSource::Keyboard, HardwareEventSource::Pointer]
+    {
         if hardware_event_raw(source).load(Ordering::Acquire) == event.raw() {
             hardware_pending(source).store(false, Ordering::Release);
         }
@@ -113,11 +125,13 @@ fn consume_hardware_event(event: EventHandle) {
 fn bind_all_hardware_wait_sets(event: EventHandle, set: EventSetHandle) {
     bind_hardware_wait_set(HardwareEventSource::Network, event, set);
     bind_hardware_wait_set(HardwareEventSource::Keyboard, event, set);
+    bind_hardware_wait_set(HardwareEventSource::Pointer, event, set);
 }
 
 fn unbind_all_hardware_wait_sets(event: EventHandle, set: EventSetHandle) {
     unbind_hardware_wait_set(HardwareEventSource::Network, event, set);
     unbind_hardware_wait_set(HardwareEventSource::Keyboard, event, set);
+    unbind_hardware_wait_set(HardwareEventSource::Pointer, event, set);
 }
 
 struct Slot<T> {
@@ -197,6 +211,7 @@ impl RuntimeEventRegistry {
         let flags = match source {
             HardwareEventSource::Network => 0,
             HardwareEventSource::Keyboard => DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD,
+            HardwareEventSource::Pointer => DIRECTORY_EVENT_FLAG_HARDWARE_POINTER,
         };
         let event = self.create_event_with_flags(owner, flags)?;
         bind_hardware_event(source, event);
@@ -508,7 +523,11 @@ impl RuntimeEventRegistry {
                 set.members.retain(|member| *member != event);
             }
         }
-        for source in [HardwareEventSource::Network, HardwareEventSource::Keyboard] {
+        for source in [
+            HardwareEventSource::Network,
+            HardwareEventSource::Keyboard,
+            HardwareEventSource::Pointer,
+        ] {
             if hardware_event_raw(source).load(Ordering::Acquire) == event.raw() {
                 clear_hardware_event(source);
             }
@@ -700,9 +719,11 @@ mod tests {
     #[test]
     fn event_directory_exposes_owned_hardware_source() {
         clear_hardware_event(HardwareEventSource::Keyboard);
+        clear_hardware_event(HardwareEventSource::Pointer);
         let owner = owner();
         let mut events = RuntimeEventRegistry::new();
-        let event = events.create_hardware_event(owner, HardwareEventSource::Keyboard).unwrap();
+        let keyboard = events.create_hardware_event(owner, HardwareEventSource::Keyboard).unwrap();
+        let pointer = events.create_hardware_event(owner, HardwareEventSource::Pointer).unwrap();
         let mut request = DirectoryRequest::new(logos_abi::DirectoryOperation::Events, 1);
         request.subject = owner;
         let mut response = DirectoryResponse::empty(
@@ -711,11 +732,33 @@ mod tests {
             request.request_id,
         );
         assert_eq!(events.directory(request, &mut response), DirectoryStatus::Ok);
-        assert_eq!(response.count, 1);
+        assert_eq!(response.count, 2);
         assert_eq!(response.records[0].kind, DirectoryRecordKind::Event);
-        assert_eq!(response.records[0].handle, event.raw());
+        assert_eq!(response.records[0].handle, keyboard.raw());
         assert_eq!(response.records[0].flags, DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD);
+        assert_eq!(response.records[1].kind, DirectoryRecordKind::Event);
+        assert_eq!(response.records[1].handle, pointer.raw());
+        assert_eq!(response.records[1].flags, DIRECTORY_EVENT_FLAG_HARDWARE_POINTER);
         clear_hardware_event(HardwareEventSource::Keyboard);
+        clear_hardware_event(HardwareEventSource::Pointer);
+    }
+
+    #[test]
+    fn pointer_signal_wakes_a_waiting_set_independently() {
+        clear_hardware_event(HardwareEventSource::Keyboard);
+        clear_hardware_event(HardwareEventSource::Pointer);
+        let owner = owner();
+        let mut events = RuntimeEventRegistry::new();
+        let keyboard = events.create_hardware_event(owner, HardwareEventSource::Keyboard).unwrap();
+        let pointer = events.create_hardware_event(owner, HardwareEventSource::Pointer).unwrap();
+        let set = events.create_set(owner).unwrap();
+        events.add(owner, set, keyboard).unwrap();
+        events.add(owner, set, pointer).unwrap();
+        assert_eq!(events.wait_any(owner, set, 1, Some(10)), Ok(EventWait::Pending));
+        signal_hardware_event(HardwareEventSource::Pointer);
+        assert_eq!(events.wait_any(owner, set, 2, Some(10)), Ok(EventWait::Ready(pointer)));
+        clear_hardware_event(HardwareEventSource::Keyboard);
+        clear_hardware_event(HardwareEventSource::Pointer);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use crate::{ABI_VERSION, IPC_PAGE_BYTES, MAX_SERVICE_NAME_BYTES, SERVICE_HEAP_MA
 pub const RUNTIME_ABI_VERSION: u16 = ABI_VERSION;
 pub const DIRECTORY_FLAG_MORE: u8 = 1 << 0;
 pub const DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD: u16 = 1 << 0;
+pub const DIRECTORY_EVENT_FLAG_HARDWARE_POINTER: u16 = 1 << 1;
 pub const DIRECTORY_RECORDS_PER_PAGE: usize = 32;
 macro_rules! define_handle {
     ($name:ident) => {
@@ -654,6 +655,17 @@ mod tests {
         record.peer = ServiceHandle::EMPTY;
         assert!(!record.is_valid());
         assert_eq!(DirectoryOperation::from_raw(4), Some(DirectoryOperation::Events));
+    }
+
+    #[test]
+    fn pointer_hardware_event_flag_is_distinct_and_valid() {
+        let mut record = DirectoryRecord::EMPTY;
+        record.kind = DirectoryRecordKind::Event;
+        record.flags = DIRECTORY_EVENT_FLAG_HARDWARE_POINTER;
+        record.handle = EventHandle::new(4, 2).unwrap().raw();
+        record.peer = ServiceHandle::new(5, 2).unwrap();
+        assert!(record.is_valid());
+        assert_ne!(DIRECTORY_EVENT_FLAG_HARDWARE_POINTER, DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD);
     }
 
     #[test]

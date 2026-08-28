@@ -30,11 +30,10 @@ pub use device_api::{
 };
 pub use graphics::{
     GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch,
-    GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiNodeOperation, GuiRect,
-    GuiSceneOp, GuiSessionContext, GuiStatus,
-    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS,
-    MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES,
-    SurfaceHandle,
+    GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiNodeOperation, GuiRect, GuiSceneOp,
+    GuiSessionContext, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
+    MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
+    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
 };
 
 pub use package_ipc::{
@@ -42,11 +41,12 @@ pub use package_ipc::{
     PackageRequest, PackageResponse, PackageStatus, PackageTarget, PackageTargetKind,
 };
 pub use runtime_abi::{
-    CapabilityHandle, DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD, DIRECTORY_FLAG_MORE,
-    DIRECTORY_RECORDS_PER_PAGE, DirectoryOperation, DirectoryRecord, DirectoryRecordKind,
-    DirectoryRequest, DirectoryResponse, DirectoryStatus, EndpointHandle, EventHandle,
-    EventOperation, EventRequest, EventResponse, EventSetHandle, EventStatus, ProgramBootstrapPage,
-    RUNTIME_ABI_VERSION, ServiceBootstrapPage, ServiceHandle,
+    CapabilityHandle, DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD,
+    DIRECTORY_EVENT_FLAG_HARDWARE_POINTER, DIRECTORY_FLAG_MORE, DIRECTORY_RECORDS_PER_PAGE,
+    DirectoryOperation, DirectoryRecord, DirectoryRecordKind, DirectoryRequest, DirectoryResponse,
+    DirectoryStatus, EndpointHandle, EventHandle, EventOperation, EventRequest, EventResponse,
+    EventSetHandle, EventStatus, ProgramBootstrapPage, RUNTIME_ABI_VERSION, ServiceBootstrapPage,
+    ServiceHandle,
 };
 pub use service_manager::{
     MANAGER_ABI_VERSION, ManagerOperation, ManagerRequest, ManagerResponse, ManagerRights,

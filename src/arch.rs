@@ -1868,8 +1868,10 @@ pub(super) fn handle_pointer_interrupt() {
             {
                 if notification == logos_abi::Notify::Notified {
                     crate::runtime_events::signal_hardware_event(
-                        crate::runtime_events::HardwareEventSource::Keyboard,
+                        crate::runtime_events::HardwareEventSource::Pointer,
                     );
+                    #[cfg(feature = "qemu-proof")]
+                    proof_line(b"LogOS vNext: pointer event wake");
                 }
             }
         }

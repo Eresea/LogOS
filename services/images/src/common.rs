@@ -1238,13 +1238,22 @@ pub fn sleep() {
 }
 
 #[allow(dead_code)]
-pub fn sleep_on_keyboard() {
+pub fn sleep_on_input() {
     #[cfg(target_os = "none")]
     {
-        if let Ok(keyboard_event) =
-            discover_hardware_event(logos_abi::DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD)
-        {
-            wait_on_event_handles(core::slice::from_ref(&keyboard_event));
+        let mut events = [logos_abi::EventHandle::EMPTY; 2];
+        let mut count = 0;
+        for flags in [
+            logos_abi::DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD,
+            logos_abi::DIRECTORY_EVENT_FLAG_HARDWARE_POINTER,
+        ] {
+            if let Ok(event) = discover_hardware_event(flags) {
+                events[count] = event;
+                count += 1;
+            }
+        }
+        if count != 0 {
+            wait_on_event_handles(&events[..count]);
             return;
         }
     }

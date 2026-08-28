@@ -4,8 +4,8 @@
 extern crate std;
 
 use logos_abi::{
-    InputMessage, KeyCode, KeyState, MAX_TEXT_BYTES, MOD_SHIFT, MessageKind, UserOperation,
-    UserStatus,
+    GuiRect, InputMessage, KeyCode, KeyState, MAX_TEXT_BYTES, MOD_SHIFT, MessageKind, PointerState,
+    UserOperation, UserStatus,
 };
 use logos_ui::{
     UI_KEY_BACKSPACE, UiButton, UiButtonEvent, UiComponent, UiInput, UiInputEvent,
@@ -15,6 +15,11 @@ use logos_ui_forms::{BoundedText, Control, FormState, ValidationError};
 
 pub const MAX_FIELD_BYTES: usize = 32;
 pub const MAX_RETRIES: u8 = 3;
+pub const USERNAME_BOUNDS: GuiRect = GuiRect::new(170, 132, 300, 36);
+pub const PASSWORD_BOUNDS: GuiRect = GuiRect::new(170, 192, 300, 36);
+pub const CONFIRM_PASSWORD_BOUNDS: GuiRect = GuiRect::new(170, 252, 300, 36);
+pub const SUBMIT_BOUNDS: GuiRect = GuiRect::new(250, 248, 140, 36);
+pub const CLAIM_SUBMIT_BOUNDS: GuiRect = GuiRect::new(250, 300, 140, 36);
 
 pub type LoginText = BoundedText<MAX_FIELD_BYTES>;
 
@@ -314,6 +319,40 @@ impl LockScreen {
         }
     }
 
+    pub fn pointer_input(&mut self, input: InputMessage) -> LockScreenAction {
+        if self.form.submitting() {
+            return LockScreenAction::Ignored;
+        }
+        let Some(pointer) = input.pointer_event() else { return LockScreenAction::Ignored };
+        if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
+            return LockScreenAction::Ignored;
+        }
+        let target = if USERNAME_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y)) {
+            LockScreenField::Username
+        } else if PASSWORD_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y)) {
+            LockScreenField::Password
+        } else if self.mode == LockScreenMode::Claim
+            && CONFIRM_PASSWORD_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y))
+        {
+            LockScreenField::ConfirmPassword
+        } else if (self.mode == LockScreenMode::Login
+            && SUBMIT_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y)))
+            || (self.mode == LockScreenMode::Claim
+                && CLAIM_SUBMIT_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y)))
+        {
+            return self.submit();
+        } else {
+            return LockScreenAction::Ignored;
+        };
+        if self.field == target {
+            LockScreenAction::Ignored
+        } else {
+            self.field = target;
+            self.components.focus(target);
+            LockScreenAction::Changed
+        }
+    }
+
     /// Validate the active login form. Enter and a future button adapter share this path.
     pub fn submit(&mut self) -> LockScreenAction {
         if self.form.submitting() {
@@ -595,5 +634,44 @@ mod tests {
         assert!(lock.form().controls.confirm_password.touched());
         assert!(lock.form().controls.confirm_password.errors().contains(ValidationError::Mismatch));
         assert!(!lock.form().can_submit());
+    }
+
+    #[test]
+    fn pointer_selects_fields_and_submits_login() {
+        let mut lock = LockScreen::new();
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(200, 205, 2, PointerState::Down).unwrap()),
+            LockScreenAction::Ignored
+        );
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(200, 205, 1, PointerState::Move).unwrap()),
+            LockScreenAction::Ignored
+        );
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(200, 205, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::Password);
+        let _ = lock.input(InputMessage::text(b"secret").unwrap());
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(200, 145, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Changed
+        );
+        let _ = lock.input(InputMessage::text(b"alice").unwrap());
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(260, 265, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Submit(UserOperation::Login)
+        );
+    }
+
+    #[test]
+    fn pointer_selects_claim_confirmation() {
+        let mut lock = LockScreen::new();
+        lock.set_unclaimed();
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(200, 270, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::ConfirmPassword);
     }
 }
