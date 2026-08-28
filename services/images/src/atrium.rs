@@ -370,13 +370,7 @@ fn send_surface_command(
 fn send_lockscreen_section(lockscreen: logos_abi::CapabilityHandle, visible: bool, next: &mut u32) {
     let mut hook = GuiHook::new(GuiHookKind::Section, next_request_id(next));
     hook.deadline = u64::from(visible);
-    loop {
-        match common::ipc_send_handle(lockscreen, &hook) {
-            IpcStatus::Ok => break,
-            IpcStatus::Full => common::wait_on_capability(lockscreen),
-            _ => break,
-        }
-    }
+    let _ = common::ipc_send_handle(lockscreen, &hook);
 }
 
 fn queue_terminal_response(

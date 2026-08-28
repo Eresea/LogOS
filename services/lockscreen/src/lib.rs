@@ -181,6 +181,7 @@ pub enum LockScreenAction {
 pub struct LockScreen {
     mode: LockScreenMode,
     field: LockScreenField,
+    hovered: Option<LockScreenField>,
     form: LoginForm,
     components: LockScreenComponents,
     retries: u8,
@@ -223,6 +224,7 @@ impl LockScreen {
         Self {
             mode: LockScreenMode::Login,
             field: LockScreenField::Username,
+            hovered: None,
             form: LoginForm::new(),
             components: LockScreenComponents::new(),
             retries: 0,
@@ -235,6 +237,9 @@ impl LockScreen {
     }
     pub const fn field(&self) -> LockScreenField {
         self.field
+    }
+    pub const fn hovered(&self) -> Option<LockScreenField> {
+        self.hovered
     }
     pub const fn retries(&self) -> u8 {
         self.retries
@@ -324,32 +329,36 @@ impl LockScreen {
             return LockScreenAction::Ignored;
         }
         let Some(pointer) = input.pointer_event() else { return LockScreenAction::Ignored };
-        if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
-            return LockScreenAction::Ignored;
-        }
-        let target = if USERNAME_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y)) {
-            LockScreenField::Username
-        } else if PASSWORD_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y)) {
-            LockScreenField::Password
-        } else if self.mode == LockScreenMode::Claim
-            && CONFIRM_PASSWORD_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y))
-        {
-            LockScreenField::ConfirmPassword
-        } else if (self.mode == LockScreenMode::Login
-            && SUBMIT_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y)))
-            || (self.mode == LockScreenMode::Claim
-                && CLAIM_SUBMIT_BOUNDS.contains(i32::from(pointer.x), i32::from(pointer.y)))
-        {
-            return self.submit();
-        } else {
-            return LockScreenAction::Ignored;
-        };
-        if self.field == target {
-            LockScreenAction::Ignored
-        } else {
-            self.field = target;
-            self.components.focus(target);
-            LockScreenAction::Changed
+        let target = self.pointer_target(pointer.x, pointer.y);
+        let hover_changed = self.hovered != target;
+        self.hovered = target;
+        match pointer.state {
+            PointerState::Move => {
+                if hover_changed {
+                    LockScreenAction::Changed
+                } else {
+                    LockScreenAction::Ignored
+                }
+            }
+            PointerState::Down if pointer.buttons & 1 != 0 => {
+                let Some(target) = target else {
+                    return if hover_changed {
+                        LockScreenAction::Changed
+                    } else {
+                        LockScreenAction::Ignored
+                    };
+                };
+                if target == LockScreenField::Submit {
+                    self.field = target;
+                    self.components.focus(target);
+                    self.activate_submit()
+                } else {
+                    self.field = target;
+                    self.components.focus(target);
+                    LockScreenAction::Changed
+                }
+            }
+            _ => LockScreenAction::Ignored,
         }
     }
 
@@ -385,6 +394,7 @@ impl LockScreen {
                 self.failure = true;
                 self.retries = self.retries.saturating_add(1).min(MAX_RETRIES);
                 self.field = LockScreenField::Password;
+                self.components.focus(self.field);
             }
             UserStatus::Ok => self.set_locked(),
             _ => self.failure = true,
@@ -399,6 +409,34 @@ impl LockScreen {
 
     pub fn cancel_submission(&mut self) {
         self.form.complete_submission();
+    }
+
+    fn pointer_target(&self, x: i16, y: i16) -> Option<LockScreenField> {
+        let x = i32::from(x);
+        let y = i32::from(y);
+        if USERNAME_BOUNDS.contains(x, y) {
+            Some(LockScreenField::Username)
+        } else if PASSWORD_BOUNDS.contains(x, y) {
+            Some(LockScreenField::Password)
+        } else if self.mode == LockScreenMode::Claim && CONFIRM_PASSWORD_BOUNDS.contains(x, y) {
+            Some(LockScreenField::ConfirmPassword)
+        } else if (self.mode == LockScreenMode::Login && SUBMIT_BOUNDS.contains(x, y))
+            || (self.mode == LockScreenMode::Claim && CLAIM_SUBMIT_BOUNDS.contains(x, y))
+        {
+            Some(LockScreenField::Submit)
+        } else {
+            None
+        }
+    }
+
+    fn activate_submit(&mut self) -> LockScreenAction {
+        let mut output = UiOutput::new();
+        let _ = self.components.submit.handle_event(UiInputEvent::Click, &mut output);
+        if matches!(output.pop(), Some(UiButtonEvent::Clicked)) {
+            self.submit()
+        } else {
+            LockScreenAction::Ignored
+        }
     }
 
     fn component_event(&mut self, event: UiInputEvent) -> bool {
@@ -516,6 +554,7 @@ impl LockScreen {
         self.retries = 0;
         self.failure = false;
         self.field = LockScreenField::Username;
+        self.hovered = None;
         self.components.focus(self.field);
     }
 }
@@ -686,6 +725,28 @@ mod tests {
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::ConfirmPassword);
+    }
+
+    #[test]
+    fn pointer_move_tracks_hover_and_button_click_uses_submit_component() {
+        let mut lock = LockScreen::new();
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(200, 205, 0, PointerState::Move).unwrap()),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.hovered(), Some(LockScreenField::Password));
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(200, 205, 0, PointerState::Move).unwrap()),
+            LockScreenAction::Ignored
+        );
+
+        let _ = lock.input(InputMessage::text(b"alice").unwrap());
+        let _ = lock.pointer_input(InputMessage::pointer(200, 205, 1, PointerState::Down).unwrap());
+        let _ = lock.input(InputMessage::text(b"secret").unwrap());
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(260, 265, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Submit(UserOperation::Login)
+        );
     }
 
     #[test]
