@@ -268,6 +268,16 @@ fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
     }
 }
 
+fn union_rect(left: GuiRect, right: GuiRect) -> GuiRect {
+    let x = left.x.min(right.x);
+    let y = left.y.min(right.y);
+    let right_edge =
+        left.x.saturating_add(left.width as i32).max(right.x.saturating_add(right.width as i32));
+    let bottom =
+        left.y.saturating_add(left.height as i32).max(right.y.saturating_add(right.height as i32));
+    GuiRect::new(x, y, right_edge.saturating_sub(x) as u32, bottom.saturating_sub(y) as u32)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisplayError {
     InvalidMessage,
@@ -634,9 +644,37 @@ impl Display {
         let screen = GuiRect::new(0, 0, width as u32, height as u32);
         let columns = cell_columns.min(surface.width as usize / GLYPH_WIDTH);
         let rows = cell_rows.min(surface.height as usize / GLYPH_HEIGHT);
+        let mut damage_bounds = GuiRect::EMPTY;
+        for damage_rect in damage[..damage_count].iter().copied() {
+            let clipped = intersect(intersect(damage_rect, surface), screen);
+            if clipped.is_empty() {
+                continue;
+            }
+            damage_bounds =
+                if damage_bounds.is_empty() { clipped } else { union_rect(damage_bounds, clipped) };
+        }
+        if damage_bounds.is_empty() {
+            return 0;
+        }
+        let local_left = damage_bounds.x.saturating_sub(surface.x).max(0) as usize;
+        let local_top = damage_bounds.y.saturating_sub(surface.y).max(0) as usize;
+        let local_right = damage_bounds
+            .x
+            .saturating_add(damage_bounds.width as i32)
+            .saturating_sub(surface.x)
+            .max(0) as usize;
+        let local_bottom = damage_bounds
+            .y
+            .saturating_add(damage_bounds.height as i32)
+            .saturating_sub(surface.y)
+            .max(0) as usize;
+        let first_column = (local_left / GLYPH_WIDTH).min(columns);
+        let last_column = local_right.saturating_add(GLYPH_WIDTH - 1) / GLYPH_WIDTH;
+        let first_row = (local_top / GLYPH_HEIGHT).min(rows);
+        let last_row = local_bottom.saturating_add(GLYPH_HEIGHT - 1) / GLYPH_HEIGHT;
         let mut rendered = 0;
-        for row in 0..rows {
-            for column in 0..columns {
+        for row in first_row..last_row.min(rows) {
+            for column in first_column..last_column.min(columns) {
                 let cell = cells[row * MAX_COLUMNS + column];
                 let cell_rect = terminal_cell_rect(surface, row, column);
                 let is_cursor = row == cursor_row && column == cursor_column;
