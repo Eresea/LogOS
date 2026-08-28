@@ -700,6 +700,8 @@ impl Display {
                 let is_cursor = row == cursor_row && column == cursor_column;
                 let glyph = glyph_cache.get(cell.codepoint);
                 let foreground = styled_foreground(cell);
+                let background_bytes = pixel_bytes(cell.background, format);
+                let foreground_bytes = pixel_bytes(foreground, format);
                 for damage_rect in damage[..damage_count].iter().copied() {
                     let clip = intersect(intersect(cell_rect, damage_rect), screen);
                     if clip.is_empty() {
@@ -711,10 +713,16 @@ impl Display {
                             let glyph_column = (x - cell_rect.x) as usize;
                             let coverage =
                                 styled_coverage(&glyph, glyph_row, glyph_column, cell.attributes);
-                            let color = blend_color(cell.background, foreground, coverage);
                             let offset = y as usize * stride + x as usize * 4;
-                            framebuffer[offset..offset + 4]
-                                .copy_from_slice(&pixel_bytes(color, format));
+                            let bytes = match coverage {
+                                0 => background_bytes,
+                                u8::MAX => foreground_bytes,
+                                _ => pixel_bytes(
+                                    blend_color(cell.background, foreground, coverage),
+                                    format,
+                                ),
+                            };
+                            framebuffer[offset..offset + 4].copy_from_slice(&bytes);
                             rendered += 1;
                         }
                     }
