@@ -9,9 +9,9 @@ Status: active preemptive SMP Core milestone.
   concurrent claims, ABI edge notifications, and the host-only service restart contract pass.
 - `cargo fmt --check`, workspace tests, and host clippy with warnings denied pass.
 - UEFI debug build and `qemu-proof` build pass for `x86_64-unknown-uefi`.
-- QEMU proof reaches `LogOS vNext: QEMU proof PASS` with debug `-smp 1`, `-smp 2`, and
-  `-smp 8`, and release `-smp 2`. The debug `-smp 2` run now reaches the same dynamic IPC,
-  event-set, manager, ring-3, and scheduler proof markers as the other SMP runs.
+- QEMU proof reaches `LogOS vNext: QEMU proof PASS` with `-smp 1`, `-smp 2`, and `-smp 8`.
+  The proof covers the dynamic IPC, event-set, manager, ring-3, scheduler, service restart,
+  and fresh QMP-triggered IRQ12 pointer-wake paths.
   The proof exercises the root-task handoff, repeated cancellable timer waits, two non-yielding
   CPU-bound tasks, GPR/flags/XMM preservation, per-CPU timer ticks, repeated preemption, a bounded
   Runtime timeout/completion/cancel lifecycle with generation-safe slot reuse, event-driven service
@@ -55,6 +55,11 @@ The enabled-profile Network and dedicated Fetch QEMU proofs are not yet PR gates
   listener path and Fetch terminal-input path still need a stable real-peer proof. DHCP fallback
   QEMU proof is also deferred post-merge. No massive-traffic claim is made; smoltcp 0.12 TCP
   congestion-control/high-throughput work remains outside this milestone.
+
+The bounded pointer proof is wired through IRQ12, the dedicated Input wake event, semantic cursor
+updates, LockScreen left-button hit targets, and Atrium hit-test/capture/local routing. QEMU proves
+a fresh pointer wake after relative motion/button injection; semantic delivery and native cursor /
+LockScreen rendering remain covered by bounded host tests because no ring-3 debug marker is emitted.
 
 - Storage v3 package host coverage passes variable-sized extent allocation/reuse, atomic replacement,
   abort, incomplete-write non-publication after reopen, stale handles, ordinary-file limits, and v1/v2

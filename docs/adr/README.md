@@ -72,3 +72,7 @@
 | [0069](0069-atrium-shell-orchestration.md) | Accepted | Atrium owns GUI shell orchestration while Shell brokers authentication, LockScreen owns credentials, and Display owns pixels |
 | [0070](0070-program-atrium-surface-contract.md) | Accepted | Running programs receive only bounded Atrium surface channels and a read-only program bootstrap page |
 | [0071](0071-atrium-system-management-surface.md) | Accepted | System is an inspect-only service-manager client rendered through one Atrium-owned surface |
+| [0072](0072-bounded-gui-raster-primitives.md) | Accepted | Display owns bounded rounded, thick-line, alpha, and fixed-kernel shadow rasterization |
+| [0073](0073-bounded-pointer-input-path.md) | Accepted | Bounded IRQ12 → Input → Atrium pointer delivery, wake ownership, capture, and local routing |
+| [0074](0074-bounded-native-cursor.md) | Accepted | Atrium-owned bounded native cursor surface and LockScreen left-button interaction |
+| [0075](0075-retained-graphics-v2.md) | Accepted | Atomic retained scene commits, stable node damage, dirty-tile RAM composition, caching, and occlusion |
