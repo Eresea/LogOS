@@ -488,6 +488,7 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     lock.input(event)
                 };
+                proof_line(b"LogOS vNext: LockScreen received input");
                 if let logos_lockscreen::LockScreenAction::Submit(operation) = action {
                     let (name, password) = lock.credentials();
                     let mut request = UserRequest::new(operation, next_id(&mut next_request));

@@ -14,6 +14,14 @@ static mut SENT_MASK: u8 = 0;
 static mut PENDING_POINTER: Option<InputMessage> = None;
 static mut POINTER_SENT_MASK: u8 = 0;
 
+#[cfg(feature = "qemu-proof")]
+fn proof_line(message: &[u8]) {
+    common::proof_line(message);
+}
+
+#[cfg(not(feature = "qemu-proof"))]
+fn proof_line(_message: &[u8]) {}
+
 fn flush_pointer(
     capability: logos_abi::CapabilityHandle,
     pending: &mut Option<InputMessage>,
@@ -111,6 +119,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         };
         if let Some(event) = decoder.feed(byte) {
+            proof_line(b"LogOS vNext: Input decoded keyboard event");
             *pending = Some(event.terminal_message());
             *sent_mask = 0;
         }

@@ -1320,7 +1320,11 @@ pub extern "C" fn _start() -> ! {
                 continue;
             }
             if !authenticated || atrium.phase() != logos_atrium::AtriumPhase::Home {
-                let _ = common::ipc_send_handle(lockscreen_input, &event);
+                if common::ipc_send_handle(lockscreen_input, &event) == IpcStatus::Ok {
+                    proof_line(b"LogOS vNext: Atrium sent LockScreen input");
+                } else {
+                    proof_line(b"LogOS vNext: Atrium dropped LockScreen input");
+                }
                 continue;
             }
             if let Some(pointer) = event.pointer_event() {
