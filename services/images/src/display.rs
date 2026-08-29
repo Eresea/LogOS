@@ -593,9 +593,9 @@ pub extern "C" fn _start() -> ! {
             gui_render_pending = display.render_pending();
             gui_dirty = fps_changed;
             progressed = true;
-            // Keep cursor motion flowing between bounded GUI slices without
+            // Keep interaction flowing between bounded GUI slices without
             // repeatedly draining render producers while the display is busy.
-            ready_mask = READY_ATRIUM_GUI | READY_LOCKSCREEN_GUI;
+            ready_mask = READY_INPUT | READY_ATRIUM_GUI | READY_LOCKSCREEN_GUI;
         }
         if progressed {
             publish_cursor(display, present_state, &mut published_cursor);
