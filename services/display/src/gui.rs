@@ -1546,6 +1546,7 @@ fn coverage_from_samples(samples: u8) -> u8 {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn plot(
     framebuffer: &mut [u8],
     width: usize,
@@ -1572,6 +1573,7 @@ fn plot(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn plot_packed(
     framebuffer: &mut [u8],
     width: usize,

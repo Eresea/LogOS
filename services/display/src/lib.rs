@@ -255,6 +255,7 @@ fn is_uninitialized(cell: Cell) -> bool {
     cell == Cell::EMPTY
 }
 
+#[inline(always)]
 fn pixel_bytes(color: u32, format: PixelFormat) -> [u8; 4] {
     let red = ((color >> 16) & 0xff) as u8;
     let green = ((color >> 8) & 0xff) as u8;
@@ -1241,6 +1242,7 @@ impl Display {
                 let start = row * stride + tile.x as usize * 4;
                 fill_row(&mut backbuffer[start..start + row_bytes], pixel);
             }
+            let backbuffer = self.backbuffer.as_mut().unwrap();
             let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
             damage[0] = tile;
             let terminal = self
