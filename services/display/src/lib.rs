@@ -310,6 +310,7 @@ const fn cursor_outline_mask() -> [u32; (POINTER_CURSOR_HEIGHT + 2) as usize] {
 const POINTER_CURSOR_OUTLINE: [u32; (POINTER_CURSOR_HEIGHT + 2) as usize] = cursor_outline_mask();
 
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn draw_cursor_pixel(
     framebuffer: &mut [u8],
     width: usize,
@@ -346,6 +347,7 @@ fn draw_cursor_pixel(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn draw_cursor_span(
     framebuffer: &mut [u8],
     width: usize,
