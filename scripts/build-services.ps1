@@ -48,7 +48,7 @@ foreach ($name in $names) {
     $destination = Join-Path $output "$name.ELF"
     Copy-Item -LiteralPath $source -Destination $destination -Force
     $file = Get-Item -LiteralPath $destination
-    if ($file.Length -gt 512KB) {
+    if ($file.Length -gt 2048KB) {
         $objcopy = Get-Command objcopy -ErrorAction SilentlyContinue
         if ($objcopy) {
             & $objcopy.Source --strip-all --strip-section-headers $destination
@@ -58,8 +58,8 @@ foreach ($name in $names) {
             $file = Get-Item -LiteralPath $destination
         }
     }
-    if ($file.Length -eq 0 -or $file.Length -gt 512KB) {
-        throw "$name service image exceeds the fixed 512 KiB bound"
+    if ($file.Length -eq 0 -or $file.Length -gt 2048KB) {
+        throw "$name service image exceeds the bounded 2048 KiB runtime limit"
     }
     $magic = [System.IO.File]::ReadAllBytes($destination)[0..3]
     if ([BitConverter]::ToString($magic) -ne '7F-45-4C-46') {

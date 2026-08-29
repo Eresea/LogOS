@@ -176,7 +176,12 @@ pub enum UefiImageError {
 /// identity-mapped and is represented by `ServiceImageBundle` after the UEFI
 /// handle is dropped.
 pub fn load_from_esp() -> Result<ServiceImageBundle, UefiImageError> {
-    use uefi::boot;
+    use uefi::{
+        boot,
+        proto::media::file::{File, FileAttribute, FileInfo, FileMode},
+    };
+    #[repr(align(8))]
+    struct FileInfoBuffer([u8; 512]);
 
     let mut filesystem = boot::get_image_file_system(boot::image_handle())
         .map_err(|error| UefiImageError::Firmware(error.status()))?;
@@ -184,7 +189,48 @@ pub fn load_from_esp() -> Result<ServiceImageBundle, UefiImageError> {
         filesystem.open_volume().map_err(|error| UefiImageError::Firmware(error.status()))?;
     let mut bundle = ServiceImageBundle::new();
     for spec in SERVICE_IMAGES {
-        let pages = MAX_SERVICE_IMAGE_BYTES / PAGE_SIZE;
+        let path = spec.path();
+        let mut path_buffer = [0u16; 64];
+        if path.len() + 1 > path_buffer.len() || path.iter().any(|byte| *byte > 0x7f) {
+            free_bundle(&mut bundle);
+            return Err(UefiImageError::Path);
+        }
+        for (index, byte) in path.iter().enumerate() {
+            path_buffer[index] = *byte as u16;
+        }
+        let path = uefi::CStr16::from_u16_with_nul(&path_buffer[..=path.len()]).map_err(|_| {
+            free_bundle(&mut bundle);
+            UefiImageError::Path
+        })?;
+        let file = root.open(path, FileMode::Read, FileAttribute::empty()).map_err(|error| {
+            free_bundle(&mut bundle);
+            UefiImageError::Firmware(error.status())
+        })?;
+        let mut file = file.into_regular_file().ok_or_else(|| {
+            free_bundle(&mut bundle);
+            UefiImageError::NotRegularFile
+        })?;
+        let mut info = FileInfoBuffer([0; 512]);
+        let file_size = file
+            .get_info::<FileInfo>(&mut info.0)
+            .map_err(|error| {
+                free_bundle(&mut bundle);
+                UefiImageError::Firmware(error.status())
+            })?
+            .file_size();
+        let file_size = usize::try_from(file_size).map_err(|_| {
+            free_bundle(&mut bundle);
+            UefiImageError::Service(ServiceLoadError::TooLarge)
+        })?;
+        if file_size == 0 || file_size > MAX_SERVICE_IMAGE_BYTES {
+            free_bundle(&mut bundle);
+            return Err(if file_size == 0 {
+                UefiImageError::Service(ServiceLoadError::Empty)
+            } else {
+                UefiImageError::Service(ServiceLoadError::TooLarge)
+            });
+        }
+        let pages = file_size.div_ceil(PAGE_SIZE);
         let allocation = boot::allocate_pages(
             boot::AllocateType::AnyPages,
             boot::MemoryType::LOADER_DATA,
@@ -195,7 +241,7 @@ pub fn load_from_esp() -> Result<ServiceImageBundle, UefiImageError> {
             UefiImageError::Firmware(error.status())
         })?;
         let allocation_bytes = pages * PAGE_SIZE;
-        let result = read_one_image(&mut root, spec, allocation, allocation_bytes);
+        let result = read_one_image(file, spec, allocation, allocation_bytes);
         match result {
             Ok(location) => {
                 bundle.records[spec.service().index()] = Some(location);
@@ -213,30 +259,11 @@ pub fn load_from_esp() -> Result<ServiceImageBundle, UefiImageError> {
 
 #[cfg(target_os = "uefi")]
 fn read_one_image(
-    root: &mut uefi::proto::media::file::Directory,
+    mut file: uefi::proto::media::file::RegularFile,
     spec: ServiceImageSpec,
     allocation: core::ptr::NonNull<u8>,
     allocation_bytes: usize,
 ) -> Result<ServiceImageLocation, UefiImageError> {
-    use uefi::{
-        CStr16,
-        proto::media::file::{File, FileAttribute, FileMode},
-    };
-
-    let mut path = [0u16; 64];
-    let path_bytes = spec.path();
-    if path_bytes.len() + 1 > path.len() || path_bytes.iter().any(|byte| *byte > 0x7f) {
-        return Err(UefiImageError::Path);
-    }
-    for (index, byte) in path_bytes.iter().enumerate() {
-        path[index] = *byte as u16;
-    }
-    let path =
-        CStr16::from_u16_with_nul(&path[..=path_bytes.len()]).map_err(|_| UefiImageError::Path)?;
-    let file = root
-        .open(path, FileMode::Read, FileAttribute::empty())
-        .map_err(|error| UefiImageError::Firmware(error.status()))?;
-    let mut file = file.into_regular_file().ok_or(UefiImageError::NotRegularFile)?;
     let buffer = unsafe { core::slice::from_raw_parts_mut(allocation.as_ptr(), allocation_bytes) };
     let bytes = file.read(buffer).map_err(|error| UefiImageError::Firmware(error.status()))?;
     if bytes == 0 {

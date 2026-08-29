@@ -10,6 +10,7 @@ use core::{mem, ptr};
 use logos_abi::IpcStatus;
 
 const SERVICE_PAGE_BYTES: usize = 4096;
+const HEAP_GROWTH_PAGES: usize = 64;
 const ALLOCATION_MAGIC: u64 = 0x4c4f_474f_5348_4541;
 
 #[repr(C)]
@@ -405,7 +406,7 @@ impl ServiceAllocator {
                 return pointer;
             }
             let guard = self.lock();
-            if !unsafe { (&mut *guard.allocator.state.get()).extend(1) } {
+            if !unsafe { (&mut *guard.allocator.state.get()).extend(HEAP_GROWTH_PAGES) } {
                 // Core has already mapped and charged this page. If the
                 // private allocator cannot publish the matching span, return
                 // the page immediately so the two ownership ledgers agree.
@@ -963,7 +964,7 @@ fn request_heap_growth(capability: logos_abi::CapabilityHandle) -> bool {
                 "int 49",
                 inout("rax") raw,
                 in("rdi") capability.raw() as usize,
-                in("rsi") 1usize,
+                in("rsi") HEAP_GROWTH_PAGES,
                 options(preserves_flags),
             );
         }
@@ -1082,8 +1083,7 @@ static mut CAPABILITY_DIRECTORY: Option<Vec<logos_abi::DirectoryRecord>> = None;
 static mut SERVICE_DIRECTORY: Option<Vec<logos_abi::DirectoryRecord>> = None;
 static NEXT_EVENT_REQUEST: AtomicU32 = AtomicU32::new(0x4000);
 
-#[allow(dead_code)]
-fn current_ticks() -> u64 {
+pub fn current_ticks() -> u64 {
     #[cfg(target_os = "none")]
     {
         let mut raw = logos_abi::CURRENT_TICKS_SYSCALL;

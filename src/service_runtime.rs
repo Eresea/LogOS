@@ -1,10 +1,7 @@
 //! Post-UEFI service image and address-space ownership.
 
-use alloc::vec::Vec;
-use core::{
-    mem::MaybeUninit,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use alloc::{boxed::Box, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use logos_abi::{ServiceHandle, ServiceId};
 
@@ -28,6 +25,7 @@ use crate::{
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
 const MAX_PROGRAMS: usize = crate::service_manager::MAX_PROGRAM_SLOTS;
 const MAX_ACTIVE_PAGE_TABLE_FRAMES: usize = 4096;
+const MAX_HEAP_GROWTH_PAGES: usize = 64;
 const CORE_SERVICE_HANDLE_INDEX: u32 = u32::MAX;
 const PROGRAM_CLIENT_HANDLE_BASE: u32 = 0x8000_0000;
 const PROGRAM_SURFACE_REQUEST_QUEUE: usize = 1;
@@ -214,8 +212,8 @@ pub(crate) enum ServiceFaultOutcome {
 
 pub struct ServiceRuntime {
     frame_pool: FramePool,
-    images: Vec<LoadedImage>,
-    tables: Vec<MaybeUninit<PageTableBuilder>>,
+    images: Vec<Box<LoadedImage>>,
+    tables: Vec<Option<Box<PageTableBuilder>>>,
     table_ready: Vec<bool>,
     processes: crate::process::ProcessTable,
     launches: Vec<Option<(ProcessHandle, UserLaunch)>>,
@@ -276,7 +274,7 @@ pub struct ServiceRuntime {
 struct PreparedServiceImage {
     handle: ServiceHandle,
     plan: crate::process::ElfLoadPlan,
-    image: LoadedImage,
+    image: Box<LoadedImage>,
 }
 
 #[derive(Clone, Copy)]
@@ -300,8 +298,8 @@ struct ProgramRuntime {
     bootstrap: Option<FrameAddress>,
     process: Option<ProcessHandle>,
     task: Option<crate::TaskHandle>,
-    image: LoadedImage,
-    table: MaybeUninit<PageTableBuilder>,
+    image: Option<Box<LoadedImage>>,
+    table: Option<Box<PageTableBuilder>>,
     table_ready: bool,
 }
 
@@ -322,8 +320,8 @@ impl ProgramRuntime {
             bootstrap: None,
             process: None,
             task: None,
-            image: LoadedImage::empty(),
-            table: MaybeUninit::uninit(),
+            image: None,
+            table: None,
             table_ready: false,
         }
     }
@@ -660,8 +658,8 @@ impl ServiceRuntime {
 
         self.service_handles.push(handle);
         if add_resources {
-            self.images.push(LoadedImage::empty());
-            self.tables.push(MaybeUninit::uninit());
+            self.images.push(Box::new(LoadedImage::empty()));
+            self.tables.push(None);
             self.table_ready.push(false);
             self.launches.push(None);
             self.ipc_staging_frames.push(None);
@@ -1005,10 +1003,19 @@ impl ServiceRuntime {
             crate::memory::bind_kernel_global_allocator(self.frame_pool.allocator())
                 .map_err(|_| ServiceRuntimeError::Resources)?;
         }
+        self.start_after_memory(bundle, resources)
+    }
+
+    #[inline(never)]
+    fn start_after_memory(
+        &mut self,
+        bundle: &ServiceImageBundle,
+        resources: &crate::boot_resources::BootResources,
+    ) -> Result<(), ServiceRuntimeError> {
         // Dynamic runtime storage must be allocated only after Core owns a
         // live heap; before this point the global allocator has no backend.
-        self.images.resize_with(SERVICE_COUNT, LoadedImage::empty);
-        self.tables.resize_with(SERVICE_COUNT, MaybeUninit::uninit);
+        self.images.resize_with(SERVICE_COUNT, || Box::new(LoadedImage::empty()));
+        self.tables.resize_with(SERVICE_COUNT, || None);
         self.table_ready.resize(SERVICE_COUNT, false);
         self.launches.resize(SERVICE_COUNT, None);
         self.prepared_packages.resize_with(SERVICE_COUNT, || None);
@@ -1076,7 +1083,7 @@ impl ServiceRuntime {
                     loaded.reclaim(&mut self.frame_pool);
                     return Err(ServiceRuntimeError::Populate(error));
                 }
-                (plan, loaded)
+                (plan, Box::new(loaded))
             };
             let mut tables = match if uses_prepared {
                 PageTableBuilder::new_for_owner(
@@ -1175,7 +1182,7 @@ impl ServiceRuntime {
                 };
             self.launches[index] = Some((process, launch));
             self.images[index] = loaded;
-            self.tables[index].write(tables);
+            self.tables[index] = Some(Box::new(tables));
             self.table_ready[index] = true;
         }
         self.initialize_dynamic_ipc()?;
@@ -1297,7 +1304,7 @@ impl ServiceRuntime {
             let image_frames = match source {
                 ServiceImageSource::FilesystemPackage => {
                     image.page_count()
-                        + unsafe { self.tables[service.index()].assume_init_ref().table_count() }
+                        + self.tables[service.index()].as_ref().unwrap().table_count()
                 }
                 ServiceImageSource::Builtin => 0,
             };
@@ -1314,7 +1321,7 @@ impl ServiceRuntime {
         }
         // SAFETY: `table_ready` is set only after the corresponding builder is
         // initialized and remains true for the runtime lifetime.
-        Some(unsafe { self.tables[index].assume_init_ref().root().raw() as usize })
+        Some(self.tables[index].as_ref().unwrap().root().raw() as usize)
     }
 
     pub fn launch(&self, service: ServiceId) -> Option<(ProcessHandle, UserLaunch)> {
@@ -1363,7 +1370,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::FramebufferProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let tables = self.tables[index].as_mut().unwrap();
         for page in 0..pages {
             let offset = (page as u64)
                 .checked_mul(crate::boot_resources::PAGE_SIZE)
@@ -1399,7 +1406,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::KeyboardProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let tables = self.tables[index].as_mut().unwrap();
         tables
             .map_raw_page(
                 logos_abi::INPUT_KEYBOARD_RING_BASE,
@@ -1426,7 +1433,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::PointerProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let tables = self.tables[index].as_mut().unwrap();
         tables
             .map_raw_page(
                 logos_abi::INPUT_POINTER_RING_BASE,
@@ -1457,7 +1464,9 @@ impl ServiceRuntime {
             .service_slot_for_process(process)
             .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle))?;
         let mut memory = IdentityPageTableMemory;
-        unsafe { self.tables[index].assume_init_mut() }
+        self.tables[index]
+            .as_mut()
+            .unwrap()
             .map_raw_page(virtual_address, frame, flags, &mut self.frame_pool, &mut memory)
             .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         let mapping = VirtualMapping::new(virtual_address, frame.raw() as usize, 1, flags)
@@ -1587,7 +1596,7 @@ impl ServiceRuntime {
         capability_raw: u64,
         pages: usize,
     ) -> logos_abi::IpcStatus {
-        if pages != 1 {
+        if pages == 0 || pages > MAX_HEAP_GROWTH_PAGES {
             return logos_abi::IpcStatus::Malformed;
         }
         let Some(service_slot) = self.service_slot_for_process(process) else {
@@ -1618,31 +1627,66 @@ impl ServiceRuntime {
             .as_ref()
             .and_then(|registry| registry.heap_quota_pages(service_handle).ok())
             .unwrap_or(self.service_heaps[index].quota_pages);
-        if page >= quota_pages {
+        if page >= quota_pages || pages > quota_pages - page {
             return logos_abi::IpcStatus::Full;
         }
-        if self.service_heaps[index].frames.try_reserve(1).is_err() {
+        if self.service_heaps[index].frames.try_reserve(pages).is_err() {
             return logos_abi::IpcStatus::Full;
         }
-        let frame = match self.frame_pool.allocate_for(owner) {
-            Ok(frame) => frame,
-            Err(_) => return logos_abi::IpcStatus::Full,
-        };
+        let mut frames = [None; MAX_HEAP_GROWTH_PAGES];
         let mut memory = IdentityPageTableMemory;
-        if memory.clear(frame).is_err() {
-            let _ = self.frame_pool.release(frame);
-            return logos_abi::IpcStatus::Full;
+        for (offset, frame_slot) in frames.iter_mut().enumerate().take(pages) {
+            let frame = match self.frame_pool.allocate_for(owner) {
+                Ok(frame) => frame,
+                Err(_) => {
+                    for rollback in 0..offset {
+                        let address = logos_abi::SERVICE_HEAP_BASE
+                            + (page + rollback) * crate::loader::PAGE_SIZE;
+                        let _ =
+                            self.tables[index].as_mut().unwrap().unmap_page(address, &mut memory);
+                    }
+                    for frame in frames[..offset].iter().flatten().copied() {
+                        let _ = self.frame_pool.release(frame);
+                    }
+                    return logos_abi::IpcStatus::Full;
+                }
+            };
+            if memory.clear(frame).is_err() {
+                for rollback in 0..offset {
+                    let address =
+                        logos_abi::SERVICE_HEAP_BASE + (page + rollback) * crate::loader::PAGE_SIZE;
+                    let _ = self.tables[index].as_mut().unwrap().unmap_page(address, &mut memory);
+                }
+                let _ = self.frame_pool.release(frame);
+                for frame in frames[..offset].iter().flatten().copied() {
+                    let _ = self.frame_pool.release(frame);
+                }
+                return logos_abi::IpcStatus::Full;
+            }
+            let address = logos_abi::SERVICE_HEAP_BASE + (page + offset) * crate::loader::PAGE_SIZE;
+            if self.tables[index]
+                .as_mut()
+                .unwrap()
+                .map_raw_page(address, frame, MappingFlags::DATA, &mut self.frame_pool, &mut memory)
+                .is_err()
+            {
+                for rollback in 0..offset {
+                    let rollback_address =
+                        logos_abi::SERVICE_HEAP_BASE + (page + rollback) * crate::loader::PAGE_SIZE;
+                    let _ = self.tables[index]
+                        .as_mut()
+                        .unwrap()
+                        .unmap_page(rollback_address, &mut memory);
+                }
+                let _ = self.frame_pool.release(frame);
+                for frame in frames[..offset].iter().flatten().copied() {
+                    let _ = self.frame_pool.release(frame);
+                }
+                return logos_abi::IpcStatus::Full;
+            }
+            *frame_slot = Some(frame);
         }
-        let address = logos_abi::SERVICE_HEAP_BASE + page * crate::loader::PAGE_SIZE;
-        let tables = unsafe { self.tables[index].assume_init_mut() };
-        if tables
-            .map_raw_page(address, frame, MappingFlags::DATA, &mut self.frame_pool, &mut memory)
-            .is_err()
-        {
-            let _ = self.frame_pool.release(frame);
-            return logos_abi::IpcStatus::Full;
-        }
-        self.service_heaps[index].frames.push(frame);
+        self.service_heaps[index].frames.extend(frames[..pages].iter().flatten().copied());
         if self
             .dynamic_services
             .as_mut()
@@ -1651,10 +1695,18 @@ impl ServiceRuntime {
             })
             .is_none()
         {
-            let _ = self.service_heaps[index].frames.pop();
-            let _ = unsafe { self.tables[index].assume_init_mut() }
-                .unmap_page(address, &mut IdentityPageTableMemory);
-            let _ = self.frame_pool.release(frame);
+            for (offset, frame) in frames.iter().enumerate().take(pages) {
+                let address =
+                    logos_abi::SERVICE_HEAP_BASE + (page + offset) * crate::loader::PAGE_SIZE;
+                let _ = self.tables[index]
+                    .as_mut()
+                    .unwrap()
+                    .unmap_page(address, &mut IdentityPageTableMemory);
+                let _ = self.service_heaps[index].frames.pop();
+                if let Some(frame) = *frame {
+                    let _ = self.frame_pool.release(frame);
+                }
+            }
             return logos_abi::IpcStatus::Stale;
         }
         logos_abi::IpcStatus::Ok
@@ -1696,7 +1748,7 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Full;
         }
         let address = logos_abi::SERVICE_HEAP_BASE + (page - 1) * crate::loader::PAGE_SIZE;
-        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let tables = self.tables[index].as_mut().unwrap();
         let mut memory = IdentityPageTableMemory;
         let frame = match tables.unmap_page(address, &mut memory) {
             Ok(frame) => frame,
@@ -1726,7 +1778,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::FramebufferConfigProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let tables = self.tables[index].as_mut().unwrap();
         tables
             .map_raw_page(
                 logos_abi::DISPLAY_CONFIG_BASE,
@@ -1755,7 +1807,7 @@ impl ServiceRuntime {
             ));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let tables = self.tables[index].as_mut().unwrap();
         tables
             .map_raw_page(
                 logos_abi::DISPLAY_PRESENT_BASE,
@@ -2229,8 +2281,8 @@ impl ServiceRuntime {
                 });
             }
         };
-        self.images[index] = loaded;
-        self.tables[index].write(tables);
+        *self.images[index] = loaded;
+        self.tables[index] = Some(Box::new(tables));
         self.table_ready[index] = true;
         self.launches[index] = Some((process, launch));
         self.ipc_staging_frames[index] = Some(staging);
@@ -2567,7 +2619,7 @@ impl ServiceRuntime {
         self.prepared_packages[service.index()] = Some(PreparedServiceImage {
             handle: self.runtime_service_handle(service)?,
             plan,
-            image,
+            image: Box::new(image),
         });
         if let Err(error) = self.restart(bundle, runtime_guard) {
             self.reclaim_prepared_packages();
@@ -2610,7 +2662,7 @@ impl ServiceRuntime {
             if !self.table_ready[index] {
                 return Err(ServiceRuntimeError::Image);
             }
-            let image = core::mem::replace(&mut self.images[index], LoadedImage::empty());
+            let image = core::mem::replace(&mut self.images[index], Box::new(LoadedImage::empty()));
             self.prepared_packages[index] =
                 Some(PreparedServiceImage { handle: active.handle, plan: active.plan, image });
         }
@@ -5454,7 +5506,7 @@ impl ServiceRuntime {
                     let _ = self.frame_pool.release(frame);
                     return Err(ProcessError::AddressSpace);
                 }
-                let mapped = unsafe { self.tables[index].assume_init_mut() }.map_raw_page(
+                let mapped = self.tables[index].as_mut().unwrap().map_raw_page(
                     address,
                     frame,
                     MappingFlags::DATA,
@@ -5498,7 +5550,7 @@ impl ServiceRuntime {
         if !self.table_ready[index] {
             return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
         }
-        let tables = unsafe { self.tables[index].assume_init_mut() };
+        let tables = self.tables[index].as_mut().unwrap();
         let mut memory = IdentityPageTableMemory;
         for page in 0..mapping.pages() {
             let address = mapping
@@ -5549,7 +5601,7 @@ impl ServiceRuntime {
         if !self.table_ready[service.index()] {
             return Err(PageTableError::InvalidMapping);
         }
-        let tables = unsafe { self.tables[service.index()].assume_init_mut() };
+        let tables = self.tables[service.index()].as_mut().unwrap();
         let mut memory = IdentityPageTableMemory;
         for page in 0..request.pages as usize {
             let virtual_address = request.target_page as usize + page * crate::loader::PAGE_SIZE;
@@ -5851,11 +5903,14 @@ impl ServiceRuntime {
             }
             if self.programs[slot].table_ready {
                 let mut memory = IdentityPageTableMemory;
-                unsafe { self.programs[slot].table.assume_init_mut() }
-                    .reclaim(&mut self.frame_pool, &mut memory);
+                if let Some(mut table) = self.programs[slot].table.take() {
+                    table.reclaim(&mut self.frame_pool, &mut memory);
+                }
                 self.programs[slot].table_ready = false;
             }
-            self.programs[slot].image.reclaim(&mut self.frame_pool);
+            if let Some(mut image) = self.programs[slot].image.take() {
+                image.reclaim(&mut self.frame_pool);
+            }
             self.programs[slot].task = None;
             self.programs[slot].manager_slot = u8::MAX;
         }
@@ -6025,8 +6080,9 @@ impl ServiceRuntime {
         }
         if self.table_ready[index] {
             let mut memory = IdentityPageTableMemory;
-            unsafe { self.tables[index].assume_init_mut() }
-                .reclaim(&mut self.frame_pool, &mut memory);
+            if let Some(mut tables) = self.tables[index].take() {
+                tables.reclaim(&mut self.frame_pool, &mut memory);
+            }
             self.table_ready[index] = false;
         }
         self.images[index].reclaim(&mut self.frame_pool);
@@ -6570,8 +6626,8 @@ impl ServiceRuntime {
         program.bootstrap = Some(bootstrap);
         program.process = Some(process);
         program.task = Some(task);
-        program.image = image;
-        program.table.write(tables);
+        program.image = Some(Box::new(image));
+        program.table = Some(Box::new(tables));
         program.table_ready = true;
         if !self.manager.mark_program_running(slot, program.generation) {
             return Err(ServiceRuntimeError::StaleGeneration);
@@ -6631,11 +6687,14 @@ impl ServiceRuntime {
             self.reclaim_program_surface_resources(slot);
             if self.programs[slot].table_ready {
                 let mut memory = IdentityPageTableMemory;
-                unsafe { self.programs[slot].table.assume_init_mut() }
-                    .reclaim(&mut self.frame_pool, &mut memory);
+                if let Some(mut table) = self.programs[slot].table.take() {
+                    table.reclaim(&mut self.frame_pool, &mut memory);
+                }
                 self.programs[slot].table_ready = false;
             }
-            self.programs[slot].image.reclaim(&mut self.frame_pool);
+            if let Some(mut image) = self.programs[slot].image.take() {
+                image.reclaim(&mut self.frame_pool);
+            }
             self.programs[slot].task = None;
             let generation = self.programs[slot].generation;
             let _ = self.manager.mark_program_stopped(slot, generation);
@@ -6768,8 +6827,9 @@ impl ServiceRuntime {
             }
             if self.table_ready[index] {
                 let mut memory = IdentityPageTableMemory;
-                unsafe { self.tables[index].assume_init_mut() }
-                    .reclaim(&mut self.frame_pool, &mut memory);
+                if let Some(mut tables) = self.tables[index].take() {
+                    tables.reclaim(&mut self.frame_pool, &mut memory);
+                }
                 self.table_ready[index] = false;
             }
             self.images[index].reclaim(&mut self.frame_pool);
@@ -6788,11 +6848,14 @@ impl ServiceRuntime {
             self.reclaim_program_surface_resources(slot);
             if self.programs[slot].table_ready {
                 let mut memory = IdentityPageTableMemory;
-                unsafe { self.programs[slot].table.assume_init_mut() }
-                    .reclaim(&mut self.frame_pool, &mut memory);
+                if let Some(mut table) = self.programs[slot].table.take() {
+                    table.reclaim(&mut self.frame_pool, &mut memory);
+                }
                 self.programs[slot].table_ready = false;
             }
-            self.programs[slot].image.reclaim(&mut self.frame_pool);
+            if let Some(mut image) = self.programs[slot].image.take() {
+                image.reclaim(&mut self.frame_pool);
+            }
             self.programs[slot].task = None;
             self.programs[slot].manager_slot = u8::MAX;
         }

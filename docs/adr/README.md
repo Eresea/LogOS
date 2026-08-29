@@ -80,3 +80,4 @@
 | [0077](0077-bounded-display-present-sequence.md) | Accepted | One Core-owned atomic sequence lets Display publish completed framebuffer presents without repeated idle GPU transfers |
 | [0078](0078-bounded-gpu-cursor.md) | Accepted | Core-owned bounded VirtIO-GPU hardware cursor with Display-owned image publication and software fallback |
 | [0079](0079-async-gpu-frame-submission.md) | Accepted | Core-owned double-buffered GPU resources with nonblocking dirty-region submission and bounded fence polling |
+| [0080](0080-service-image-memory-budget.md) | Accepted | Service ELF and aggregate load-plan budgets rise to 2048 KiB while preserving bounded admission and recommending smaller images |

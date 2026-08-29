@@ -6,7 +6,7 @@ pub const MAX_MAPPINGS_PER_ADDRESS_SPACE: usize = 64;
 pub const USER_STACK_PAGES: usize = 8;
 /// Runtime-owned upper bound for lazy service-stack commitment.
 pub const MAX_SERVICE_STACK_PAGES: usize = 256;
-pub const MAX_IMAGE_BYTES: usize = 512 * 1024;
+pub const MAX_IMAGE_BYTES: usize = 2048 * 1024;
 pub const MAX_PROGRAM_HEADERS: usize = 16;
 
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";

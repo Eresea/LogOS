@@ -746,8 +746,10 @@ fn publish_boot_resources(
 }
 
 #[allow(dead_code)]
-pub(crate) fn boot_resources() -> Option<BootResources> {
-    unsafe { BOOT_RESOURCES }
+pub(crate) fn boot_resources() -> Option<&'static BootResources> {
+    // SAFETY: boot resources are published once before runtime starts and
+    // remain immutable for the rest of the kernel lifetime.
+    unsafe { (*core::ptr::addr_of!(BOOT_RESOURCES)).as_ref() }
 }
 
 pub(crate) fn framebuffer_present_snapshot()
