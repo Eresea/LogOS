@@ -63,6 +63,31 @@ const SHELL_RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_con
 );
 const CURSOR_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 400);
 static mut LOCKSCREEN: logos_lockscreen::LockScreen = logos_lockscreen::LockScreen::new();
+static mut LOGIN_UI_BUILD: logos_ui_compiler::UiBuild =
+    logos_ui_compiler::UiBuild::from_document(logos_ui::UiDocument::EMPTY);
+static mut REGISTER_UI_BUILD: logos_ui_compiler::UiBuild =
+    logos_ui_compiler::UiBuild::from_document(logos_ui::UiDocument::EMPTY);
+static mut UI_BUILDS_READY: bool = false;
+
+fn initialize_ui_builds() {
+    unsafe {
+        if !UI_BUILDS_READY {
+            LOGIN_UI_BUILD = login_ui::build();
+            REGISTER_UI_BUILD = register_ui::build();
+            UI_BUILDS_READY = true;
+        }
+    }
+}
+
+fn ui_build(claim: bool) -> &'static logos_ui_compiler::UiBuild {
+    unsafe {
+        if claim {
+            &*core::ptr::addr_of!(REGISTER_UI_BUILD)
+        } else {
+            &*core::ptr::addr_of!(LOGIN_UI_BUILD)
+        }
+    }
+}
 
 #[cfg(feature = "qemu-proof")]
 fn proof_line(message: &[u8]) {
@@ -79,16 +104,12 @@ fn draw_ui(
     sequence: u32,
     _include_static: bool,
 ) -> IpcStatus {
-    let build = if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
-        register_ui::build()
-    } else {
-        login_ui::build()
-    };
+    let build = ui_build(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
     let mut router = UiEventRouter::new();
     let Ok(mut tree) = UiComponentTree::from_document(&build.document, &mut router) else {
         return IpcStatus::Malformed;
     };
-    let Some(layout) = logos_shell::LoginLayout::from_build(&build, CURSOR_BOUNDS) else {
+    let Some(layout) = logos_shell::LoginLayout::from_build(build, CURSOR_BOUNDS) else {
         return IpcStatus::Malformed;
     };
 
@@ -117,7 +138,7 @@ fn draw_ui(
             .tree_mut()
             .set_focused(
                 handle,
-                field_for_node(&build, index as u16).is_some_and(|field| field == lock.field()),
+                field_for_node(build, index as u16).is_some_and(|field| field == lock.field()),
             )
             .is_err()
         {
@@ -156,13 +177,13 @@ fn draw_ui(
     }
 
     let (username, password) = lock.credentials();
-    if !set_named_value(&mut tree, &build, b"username", username, false)
-        || !set_named_value(&mut tree, &build, b"password", password, true)
+    if !set_named_value(&mut tree, build, b"username", username, false)
+        || !set_named_value(&mut tree, build, b"password", password, true)
     {
         return IpcStatus::Malformed;
     }
     if lock.mode() == logos_lockscreen::LockScreenMode::Claim
-        && !set_named_value(&mut tree, &build, b"confirmPassword", lock.confirmation(), true)
+        && !set_named_value(&mut tree, build, b"confirmPassword", lock.confirmation(), true)
     {
         return IpcStatus::Malformed;
     }
@@ -271,6 +292,7 @@ fn destroy_surface(display: logos_abi::CapabilityHandle, surface: SurfaceHandle,
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
+    initialize_ui_builds();
     let input = common::capability_handle(INPUT_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display = common::capability_handle(DISPLAY_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display_control =
