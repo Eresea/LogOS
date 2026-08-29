@@ -274,6 +274,41 @@ const fn cursor_mask_has(row: i32, column: i32) -> bool {
         && POINTER_CURSOR_MASK[row as usize] & (1u32 << column) != 0
 }
 
+const fn cursor_outline_mask() -> [u32; (POINTER_CURSOR_HEIGHT + 2) as usize] {
+    let mut outline = [0; (POINTER_CURSOR_HEIGHT + 2) as usize];
+    let mut row = 0;
+    while row < POINTER_CURSOR_HEIGHT + 2 {
+        let actual_row = row - 1;
+        let mut column = 0;
+        while column < POINTER_CURSOR_WIDTH + 2 {
+            let actual_column = column - 1;
+            if !cursor_mask_has(actual_row, actual_column) {
+                let mut neighbor_row = -1;
+                let mut adjacent = false;
+                while neighbor_row <= 1 {
+                    let mut neighbor_column = -1;
+                    while neighbor_column <= 1 {
+                        adjacent |= cursor_mask_has(
+                            actual_row + neighbor_row,
+                            actual_column + neighbor_column,
+                        );
+                        neighbor_column += 1;
+                    }
+                    neighbor_row += 1;
+                }
+                if adjacent {
+                    outline[row as usize] |= 1u32 << column as u32;
+                }
+            }
+            column += 1;
+        }
+        row += 1;
+    }
+    outline
+}
+
+const POINTER_CURSOR_OUTLINE: [u32; (POINTER_CURSOR_HEIGHT + 2) as usize] = cursor_outline_mask();
+
 #[allow(clippy::too_many_arguments)]
 fn draw_cursor_pixel(
     framebuffer: &mut [u8],
@@ -308,6 +343,52 @@ fn draw_cursor_pixel(
         | (u32::from(blend_channel(green, ((color >> 8) & 0xff) as u8, alpha)) << 8)
         | u32::from(blend_channel(blue, color as u8, alpha));
     framebuffer[offset..offset + 4].copy_from_slice(&pixel_bytes(blended, format));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_cursor_span(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: PixelFormat,
+    left: i32,
+    right: i32,
+    y: i32,
+    color: u32,
+    alpha: u8,
+    clip: GuiRect,
+) {
+    if y < clip.y || y >= clip.y.saturating_add(clip.height as i32) || y < 0 {
+        return;
+    }
+    let left = left.max(clip.x).max(0).min(width as i32) as usize;
+    let right =
+        right.min(clip.x.saturating_add(clip.width as i32)).min(width as i32).max(0) as usize;
+    if left >= right || y as usize >= height {
+        return;
+    }
+    if alpha == u8::MAX {
+        let pixel = pixel_bytes(color, format);
+        let start = y as usize * stride + left * 4;
+        let end = y as usize * stride + right * 4;
+        fill_row(&mut framebuffer[start..end], pixel);
+    } else {
+        for x in left..right {
+            draw_cursor_pixel(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                x as i32,
+                y,
+                color,
+                alpha,
+                clip,
+            );
+        }
+    }
 }
 
 fn fill_row(row: &mut [u8], pixel: [u8; 4]) {
@@ -643,61 +724,55 @@ impl Display {
                 continue;
             }
             for row in 0..POINTER_CURSOR_HEIGHT {
-                for column in 0..POINTER_CURSOR_WIDTH {
-                    if !cursor_mask_has(row, column) {
-                        continue;
-                    }
-                    let x = layer.x.saturating_add(column);
-                    let y = layer.y.saturating_add(row);
+                let mask = POINTER_CURSOR_MASK[row as usize];
+                if mask == 0 {
+                    continue;
+                }
+                let left = mask.trailing_zeros() as i32;
+                let right = (32 - mask.leading_zeros()) as i32;
+                draw_cursor_span(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    layer.x.saturating_add(left + 1),
+                    layer.x.saturating_add(right + 1),
+                    layer.y.saturating_add(row + 2),
+                    0x000000,
+                    150,
+                    clip,
+                );
+                let mut outline = POINTER_CURSOR_OUTLINE[(row + 1) as usize];
+                while outline != 0 {
+                    let column = outline.trailing_zeros() as i32 - 1;
+                    outline &= outline - 1;
                     draw_cursor_pixel(
                         framebuffer,
                         width,
                         height,
                         stride,
                         format,
-                        x.saturating_add(1),
-                        y.saturating_add(2),
-                        0x000000,
-                        150,
+                        layer.x.saturating_add(column),
+                        layer.y.saturating_add(row),
+                        0x101820,
+                        u8::MAX,
                         clip,
                     );
-                    for offset_y in -1..=1 {
-                        for offset_x in -1..=1 {
-                            if !cursor_mask_has(row + offset_y, column + offset_x) {
-                                draw_cursor_pixel(
-                                    framebuffer,
-                                    width,
-                                    height,
-                                    stride,
-                                    format,
-                                    x.saturating_add(offset_x),
-                                    y.saturating_add(offset_y),
-                                    0x101820,
-                                    u8::MAX,
-                                    clip,
-                                );
-                            }
-                        }
-                    }
                 }
-            }
-            for row in 0..POINTER_CURSOR_HEIGHT {
-                for column in 0..POINTER_CURSOR_WIDTH {
-                    if cursor_mask_has(row, column) {
-                        draw_cursor_pixel(
-                            framebuffer,
-                            width,
-                            height,
-                            stride,
-                            format,
-                            layer.x.saturating_add(column),
-                            layer.y.saturating_add(row),
-                            0xffffff,
-                            u8::MAX,
-                            clip,
-                        );
-                    }
-                }
+                draw_cursor_span(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    layer.x.saturating_add(left),
+                    layer.x.saturating_add(right),
+                    layer.y.saturating_add(row),
+                    0xffffff,
+                    u8::MAX,
+                    clip,
+                );
             }
         }
     }
