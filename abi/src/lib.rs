@@ -155,6 +155,8 @@ pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
 pub const IPC_ENDPOINT_COUNT: usize = 65;
+pub const FRAMEBUFFER_CURSOR_WIDTH: usize = 24;
+pub const FRAMEBUFFER_CURSOR_HEIGHT: usize = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -223,6 +225,10 @@ pub struct FramebufferPresentState {
     full: AtomicBool,
     count: AtomicU32,
     rects: [FramebufferPresentRect; MAX_DISPLAY_PRESENT_RECTS],
+    cursor_sequence: AtomicU32,
+    cursor_position: AtomicU32,
+    cursor_visible: AtomicBool,
+    hardware_cursor: AtomicBool,
 }
 
 impl FramebufferPresentState {
@@ -232,7 +238,42 @@ impl FramebufferPresentState {
             full: AtomicBool::new(false),
             count: AtomicU32::new(0),
             rects: [const { FramebufferPresentRect::new() }; MAX_DISPLAY_PRESENT_RECTS],
+            cursor_sequence: AtomicU32::new(0),
+            cursor_position: AtomicU32::new(0),
+            cursor_visible: AtomicBool::new(false),
+            hardware_cursor: AtomicBool::new(false),
         }
+    }
+
+    pub fn publish_cursor(&self, visible: bool, x: i16, y: i16) {
+        self.cursor_position
+            .store((x as u16 as u32) | (u32::from(y as u16) << 16), Ordering::Relaxed);
+        self.cursor_visible.store(visible, Ordering::Relaxed);
+        self.cursor_sequence.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn cursor_snapshot(&self) -> (u32, bool, i16, i16) {
+        for _ in 0..4 {
+            let sequence = self.cursor_sequence.load(Ordering::Acquire);
+            let position = self.cursor_position.load(Ordering::Relaxed);
+            let visible = self.cursor_visible.load(Ordering::Relaxed);
+            if self.cursor_sequence.load(Ordering::Acquire) == sequence {
+                return (sequence, visible, position as u16 as i16, (position >> 16) as u16 as i16);
+            }
+        }
+        (self.cursor_sequence(), false, 0, 0)
+    }
+
+    pub fn cursor_sequence(&self) -> u32 {
+        self.cursor_sequence.load(Ordering::Acquire)
+    }
+
+    pub fn set_hardware_cursor(&self, active: bool) {
+        self.hardware_cursor.store(active, Ordering::Release);
+    }
+
+    pub fn hardware_cursor(&self) -> bool {
+        self.hardware_cursor.load(Ordering::Acquire)
     }
 
     pub fn publish(&self, full: bool, rects: &[GuiRect]) {
@@ -2468,6 +2509,18 @@ mod tests {
         assert_eq!(rects[0], rect);
         state.publish(true, &[]);
         assert_eq!(state.sequence(), 2);
+    }
+
+    #[test]
+    fn framebuffer_cursor_publication_is_bounded_and_consistent() {
+        let state = FramebufferPresentState::new();
+        state.publish_cursor(true, -12, 34);
+        let (sequence, visible, x, y) = state.cursor_snapshot();
+        assert_eq!(sequence, 1);
+        assert!(visible);
+        assert_eq!((x, y), (-12, 34));
+        state.set_hardware_cursor(true);
+        assert!(state.hardware_cursor());
     }
 
     #[test]

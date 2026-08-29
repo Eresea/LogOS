@@ -760,6 +760,26 @@ pub(crate) fn framebuffer_present_snapshot()
     }
 }
 
+pub(crate) fn framebuffer_cursor_snapshot() -> Option<(u32, bool, i16, i16)> {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe {
+        (*core::ptr::addr_of!(SERVICE_RUNTIME)).framebuffer_present_frame().map(|frame| {
+            let state = &*(frame.raw() as usize as *const logos_abi::FramebufferPresentState);
+            state.cursor_snapshot()
+        })
+    }
+}
+
+pub(crate) fn set_hardware_cursor(active: bool) {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe {
+        if let Some(frame) = (*core::ptr::addr_of!(SERVICE_RUNTIME)).framebuffer_present_frame() {
+            (&*(frame.raw() as usize as *const logos_abi::FramebufferPresentState))
+                .set_hardware_cursor(active);
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn service_images() -> Option<&'static ServiceImageBundle> {
     unsafe { (*core::ptr::addr_of!(SERVICE_IMAGES)).as_ref() }
