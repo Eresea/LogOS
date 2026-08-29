@@ -24,8 +24,8 @@ pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_TILE_SIZE: u32 = 64;
-// Keep incremental GUI slices short enough for input and watchdog progress.
-const GUI_TILES_PER_STEP: usize = 4;
+// Keep incremental GUI slices bounded while avoiding excess scheduler overhead.
+const GUI_TILES_PER_STEP: usize = 8;
 const CURSOR_LAYERS: usize = 2;
 const CURSOR_DAMAGE_RECTS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
@@ -903,6 +903,10 @@ impl Display {
             self.gui.invalidate_rect(Self::cursor_bounds(layer.x, layer.y));
         }
         self.hardware_cursor = active;
+    }
+
+    pub fn hardware_cursor_enabled(&self) -> bool {
+        self.hardware_cursor
     }
 
     pub fn cursor_position(&self) -> Option<(i16, i16)> {

@@ -489,52 +489,60 @@ pub extern "C" fn _start() -> ! {
         let mut cursor_presented = false;
         if ready_mask & READY_ATRIUM_GUI != 0 {
             let mut atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
+            let mut cursor_dirty = false;
             while common::ipc_receive_handle(atrium_gui_capability, &mut atrium_op) == IpcStatus::Ok
             {
                 progressed = true;
                 if display.apply_cursor_scene_op(atrium_op) {
-                    if display.repaint_cursor(
-                        framebuffer,
-                        config.width as usize,
-                        config.height as usize,
-                        config.stride as usize * 4,
-                        format,
-                    ) {
-                        cursor_presented = true;
-                    } else {
-                        gui_dirty = true;
-                    }
+                    cursor_dirty = true;
                 } else {
                     let _ = display.gui_mut().apply_scene_op(13, atrium_op);
                     gui_dirty = true;
                 }
                 atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
             }
+            if cursor_dirty {
+                let painted = display.repaint_cursor(
+                    framebuffer,
+                    config.width as usize,
+                    config.height as usize,
+                    config.stride as usize * 4,
+                    format,
+                );
+                cursor_presented = painted;
+                if !painted && !display.hardware_cursor_enabled() {
+                    gui_dirty = true;
+                }
+            }
             ready_mask &= !READY_ATRIUM_GUI;
         }
         if ready_mask & READY_LOCKSCREEN_GUI != 0 {
             let mut lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
+            let mut cursor_dirty = false;
             while common::ipc_receive_handle(lockscreen_gui_capability, &mut lockscreen_op)
                 == IpcStatus::Ok
             {
                 progressed = true;
                 if display.apply_cursor_scene_op(lockscreen_op) {
-                    if display.repaint_cursor(
-                        framebuffer,
-                        config.width as usize,
-                        config.height as usize,
-                        config.stride as usize * 4,
-                        format,
-                    ) {
-                        cursor_presented = true;
-                    } else {
-                        gui_dirty = true;
-                    }
+                    cursor_dirty = true;
                 } else {
                     let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
                     gui_dirty = true;
                 }
                 lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
+            }
+            if cursor_dirty {
+                let painted = display.repaint_cursor(
+                    framebuffer,
+                    config.width as usize,
+                    config.height as usize,
+                    config.stride as usize * 4,
+                    format,
+                );
+                cursor_presented |= painted;
+                if !painted && !display.hardware_cursor_enabled() {
+                    gui_dirty = true;
+                }
             }
             ready_mask &= !READY_LOCKSCREEN_GUI;
         }
