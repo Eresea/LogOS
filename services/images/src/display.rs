@@ -531,7 +531,6 @@ pub extern "C" fn _start() -> ! {
                 config.stride as usize * 4,
                 format,
             );
-            common::heartbeat();
             let complete = !display.render_pending();
             let fps_changed = publish_render(
                 display,
