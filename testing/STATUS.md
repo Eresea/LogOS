@@ -57,11 +57,11 @@ The enabled-profile Network and dedicated Fetch QEMU proofs are not yet PR gates
   congestion-control/high-throughput work remains outside this milestone.
 
 The bounded pointer proof is wired through IRQ12, the dedicated Input wake event, semantic cursor
-updates, LockScreen left-button hit targets, and Atrium hit-test/capture/local routing. QEMU proves
-a fresh pointer wake after relative motion/button injection and a native cursor rendered on the
-live LockScreen framebuffer at GUI startup. Semantic delivery, movement coordinates, and
-hit-test/capture/local routing remain covered by bounded host tests; this QEMU build accepts the
-relative QMP events but does not produce a moved PS/2 cursor in the framebuffer proof.
+updates, LockScreen left-button hit targets, and Atrium hit-test/capture/local routing. The VGA QEMU
+path proves the software cursor raster; the VirtIO-GPU path proves hardware-cursor publication and
+movement through the separate cursor plane. Semantic delivery, movement coordinates, and
+hit-test/capture/local routing remain covered by bounded host tests because QEMU framebuffer dumps
+exclude the hardware cursor plane.
 
 - Storage v3 package host coverage passes variable-sized extent allocation/reuse, atomic replacement,
   abort, incomplete-write non-publication after reopen, stale handles, ordinary-file limits, and v1/v2

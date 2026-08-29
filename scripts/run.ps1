@@ -353,7 +353,7 @@ function Framebuffer-HasNativeCursor {
     $bytes = [IO.File]::ReadAllBytes($Path)
     # Check the fixed arrow tip/body rather than the old solid 3x14 cursor bar.
     foreach ($point in @(@(0, 0), @(1, 1), @(4, 4), @(8, 8), @(12, 12))) {
-        $index = 15 + (((($Y + $point[1]) * 640) + $X + $point[0]) * 3)
+        $index = 15 + (((($Y + 2 + $point[1]) * 640) + $X + 1 + $point[0]) * 3)
         if ($bytes[$index] -ne 255 -or $bytes[$index + 1] -ne 255 -or $bytes[$index + 2] -ne 255) {
             return $false
         }
@@ -490,11 +490,16 @@ try {
         if (-not (Wait-QmpFramebufferStable $qmp $pointerBefore $TimeoutSeconds)) {
         throw 'QEMU pointer proof did not observe a rendered framebuffer.'
         }
-        if (-not (Framebuffer-HasNativeCursor $pointerBefore 320 200)) {
+        if (-not $VirtioGpu -and -not (Framebuffer-HasNativeCursor $pointerBefore 320 200)) {
         throw 'QEMU pointer proof did not observe the native cursor on LockScreen.'
         }
-    # PS/2 reports positive Y upward; the decoder converts it to screen-down.
+        if ($VirtioGpu -and -not (Wait-ProofMarker 'LogOS vNext: VirtIO GPU cursor ready' $TimeoutSeconds)) {
+        throw 'QEMU VirtIO-GPU proof did not publish the hardware cursor.'
+        }
+    # QEMU's relative Y axis is converted by the PS/2 device before the
+    # decoder applies its screen-down convention.
         Start-Sleep -Seconds 2
+        $cursorPublishCount = Get-ProofMarkerCount 'LogOS vNext: Display cursor published'
         Send-QmpPointerMotion $qmp 40 -20
         Start-Sleep -Milliseconds 250
         Send-QmpPointerButton $qmp $true
@@ -502,6 +507,9 @@ try {
         Send-QmpPointerButton $qmp $false
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: pointer event wake' $pointerWakeCount $TimeoutSeconds)) {
         throw 'QEMU pointer input did not wake a blocked Input service.'
+        }
+        if (-not $VirtioGpu -and -not (Wait-ProofMarkerAfter 'LogOS vNext: Display cursor published' $cursorPublishCount $TimeoutSeconds)) {
+        throw 'QEMU pointer input did not publish the moved software cursor.'
         }
         if (-not (Wait-QmpFramebufferStable $qmp $pointerAfter $TimeoutSeconds)) {
         throw 'QEMU pointer proof did not settle on a rendered framebuffer.'
@@ -512,7 +520,11 @@ try {
         if (-not (Framebuffer-HasPixels $pointerAfter)) {
         throw 'QEMU pointer proof lost the rendered framebuffer after input.'
         }
-        if (-not (Framebuffer-HasNativeCursor $pointerAfter 360 220)) {
+        if ($VirtioGpu) {
+        if (-not (Wait-ProofMarker 'LogOS vNext: VirtIO GPU cursor moved' $TimeoutSeconds)) {
+            throw 'QEMU pointer motion did not move the VirtIO-GPU cursor plane.'
+        }
+        } elseif (-not (Framebuffer-HasNativeCursor $pointerAfter 360 180)) {
         throw 'QEMU pointer motion did not move the native cursor to the decoded position.'
         }
     }

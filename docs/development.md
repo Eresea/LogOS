@@ -36,8 +36,10 @@ files also fail closed to Disabled:
 ```
 
 `-VirtioGpu` replaces the proof VGA device with QEMU's VirtIO-GPU device and
-exercises the Core-owned scanout path; without it, the existing VGA proof path
-remains unchanged.
+exercises the Core-owned scanout and hardware cursor path; the proof checks
+cursor-plane publication and movement markers because QEMU framebuffer dumps
+do not include the separate hardware cursor plane. Without it, the existing
+VGA proof path remains unchanged.
 
 Network v1 host tests cover the fixed ABI, configuration fallback, socket generations, packet-page
 copying, checksums, DHCP fallback, PCI capability parsing, and the bounded VirtIO queue model. The
