@@ -487,7 +487,9 @@ pub extern "C" fn _start() -> ! {
             ready_mask &= !READY_GUI;
         }
         let mut cursor_presented = false;
-        if ready_mask & READY_ATRIUM_GUI != 0 {
+        let mut cursor_activity = false;
+        // Poll cursor IPC independently so a busy render producer cannot delay motion.
+        {
             let mut atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
             let mut cursor_dirty = false;
             while common::ipc_receive_handle(atrium_gui_capability, &mut atrium_op) == IpcStatus::Ok
@@ -502,6 +504,7 @@ pub extern "C" fn _start() -> ! {
                 atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
             }
             if cursor_dirty {
+                cursor_activity = true;
                 let painted = display.repaint_cursor(
                     framebuffer,
                     config.width as usize,
@@ -514,9 +517,8 @@ pub extern "C" fn _start() -> ! {
                     gui_dirty = true;
                 }
             }
-            ready_mask &= !READY_ATRIUM_GUI;
         }
-        if ready_mask & READY_LOCKSCREEN_GUI != 0 {
+        {
             let mut lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
             let mut cursor_dirty = false;
             while common::ipc_receive_handle(lockscreen_gui_capability, &mut lockscreen_op)
@@ -532,6 +534,7 @@ pub extern "C" fn _start() -> ! {
                 lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
             }
             if cursor_dirty {
+                cursor_activity = true;
                 let painted = display.repaint_cursor(
                     framebuffer,
                     config.width as usize,
@@ -544,11 +547,14 @@ pub extern "C" fn _start() -> ! {
                     gui_dirty = true;
                 }
             }
-            ready_mask &= !READY_LOCKSCREEN_GUI;
         }
         if cursor_presented {
             publish_present(display, present_state);
         }
+        if cursor_activity {
+            publish_cursor(display, present_state, &mut published_cursor);
+        }
+        ready_mask &= !(READY_ATRIUM_GUI | READY_LOCKSCREEN_GUI);
         if render_pending && render_complete && !gui_render_pending {
             let fps_changed = render(
                 display,
