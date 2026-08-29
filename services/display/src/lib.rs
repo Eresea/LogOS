@@ -24,8 +24,10 @@ pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_TILE_SIZE: u32 = 64;
-// Keep incremental GUI slices bounded while avoiding excess scheduler overhead.
+// Software-cursor VGA favors short slices; hardware-cursor VirtIO favors
+// fewer frame submissions. Both paths remain bounded to eight tiles.
 const GUI_TILES_PER_STEP: usize = 8;
+const GUI_SOFTWARE_CURSOR_TILES_PER_STEP: usize = 4;
 const CURSOR_LAYERS: usize = 2;
 const CURSOR_DAMAGE_RECTS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
@@ -1382,7 +1384,12 @@ impl Display {
         let mut damage_count = 0;
         let mut presented_tiles = [GuiRect::EMPTY; GUI_TILES_PER_STEP];
         let mut presented_tile_count = 0;
-        for _ in 0..GUI_TILES_PER_STEP {
+        let tiles_per_step = if self.hardware_cursor {
+            GUI_TILES_PER_STEP
+        } else {
+            GUI_SOFTWARE_CURSOR_TILES_PER_STEP
+        };
+        for _ in 0..tiles_per_step {
             if self.gui_tile_index >= self.gui_damage_count {
                 break;
             }
