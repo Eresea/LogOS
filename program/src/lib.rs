@@ -204,6 +204,7 @@ impl ProgramClient {
         self.require_surface(first.surface)?;
         if first.operation != logos_abi::GuiNodeOperation::Clear
             || first.flags & GUI_DRAW_FLAG_MORE == 0
+            || operations[operations.len() - 1].flags & GUI_DRAW_FLAG_MORE != 0
         {
             return Err(ProgramClientError::InvalidPayload);
         }
