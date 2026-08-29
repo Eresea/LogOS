@@ -1181,7 +1181,7 @@ impl Display {
             let bottom = rect.y.saturating_add(rect.height as i32);
             let tile = intersect(
                 GuiRect::new(self.gui_tile_x, self.gui_tile_y, GUI_TILE_SIZE, GUI_TILE_SIZE),
-                screen,
+                intersect(rect, screen),
             );
             if tile.is_empty() {
                 self.advance_gui_tile(rect, right, bottom);
