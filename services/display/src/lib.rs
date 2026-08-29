@@ -552,7 +552,7 @@ impl Display {
         if !self.hardware_cursor {
             let old_bounds = Self::cursor_bounds(old.x, old.y);
             let new_bounds = Self::cursor_bounds(op.command.x, op.command.y);
-            if self.can_repaint_cursor_now() {
+            if self.can_repaint_cursor() {
                 self.queue_cursor_damage(old_bounds);
                 self.queue_cursor_damage(new_bounds);
             } else {
@@ -565,14 +565,11 @@ impl Display {
         true
     }
 
-    fn can_repaint_cursor_now(&self) -> bool {
-        self.backbuffer.is_some()
-            && self.surface_initialized
-            && !self.gui_background_pending
-            && self.gui_damage_count == 0
-            && !self.gui.has_damage()
-            && self.dirty.iter().all(|word| *word == 0)
-            && self.cursor_damage_count == 0
+    fn can_repaint_cursor(&self) -> bool {
+        // The framebuffer is updated in this same display task, so cursor
+        // repainting remains safe while GUI tiles are being composed. Later
+        // GUI tiles restore their own pixels before drawing the current cursor.
+        self.backbuffer.is_some() && self.surface_initialized && !self.gui_background_pending
     }
 
     fn queue_cursor_damage(&mut self, rect: GuiRect) {
