@@ -8,6 +8,8 @@ license = "MIT"
 [dependencies]
 logos-abi = { path = "../../abi" }
 logos-program = { path = "../../program" }
+logos-ui = { path = "../../ui" }
+logos-ui-graphics = { path = "../../ui-graphics" }
 
 [[bin]]
 name = "logos-program-demo"

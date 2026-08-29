@@ -225,6 +225,8 @@ version = "0.1.0"
 dependencies = [
  "logos-abi",
  "logos-program",
+ "logos-ui",
+ "logos-ui-graphics",
 ]
 
 [[package]]

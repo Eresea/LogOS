@@ -196,6 +196,32 @@ impl ProgramClient {
         Ok(())
     }
 
+    pub fn send_scene(&mut self, operations: &[GuiSceneOp]) -> Result<(), ProgramClientError> {
+        if operations.is_empty() || operations.len() > logos_abi::MAX_GUI_NODES + 1 {
+            return Err(ProgramClientError::InvalidPayload);
+        }
+        let first = operations[0];
+        self.require_surface(first.surface)?;
+        if first.operation != logos_abi::GuiNodeOperation::Clear
+            || first.flags & GUI_DRAW_FLAG_MORE == 0
+        {
+            return Err(ProgramClientError::InvalidPayload);
+        }
+        for operation in operations {
+            if !operation.is_valid()
+                || operation.surface != first.surface
+                || operation.frame != first.frame
+            {
+                return Err(ProgramClientError::InvalidPayload);
+            }
+        }
+        for operation in operations {
+            send(self.surface_draw, operation)?;
+        }
+        self.draw_frame = first.frame;
+        Ok(())
+    }
+
     pub fn send_render(&self, message: RenderMessage) -> Result<(), ProgramClientError> {
         self.require_surface(message.surface)?;
         if !matches!(message.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
@@ -354,5 +380,19 @@ mod tests {
         assert!(response.is_valid_for(request));
         assert_eq!(client.accept_surface_response(response), Ok(SurfaceEvent::Created(surface)));
         assert_eq!(client.surface(), surface);
+    }
+
+    #[test]
+    fn retained_scene_requires_one_atomic_frame_for_the_admitted_surface() {
+        let mut client = ProgramClient::from_bootstrap(bootstrap()).unwrap();
+        let surface = SurfaceHandle::new(2, 1, 13).unwrap();
+        client.surface = surface;
+        let mut clear = GuiSceneOp::clear(surface, 1);
+        clear.flags = GUI_DRAW_FLAG_MORE;
+        let wrong_surface = GuiSceneOp::commit(SurfaceHandle::new(3, 1, 13).unwrap(), 1);
+        assert_eq!(
+            client.send_scene(&[clear, wrong_surface]),
+            Err(ProgramClientError::InvalidPayload)
+        );
     }
 }
