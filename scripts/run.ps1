@@ -1,5 +1,6 @@
 param(
     [switch]$Release,
+    [switch]$Debug,
     [switch]$Headless,
     [switch]$Interactive,
     [switch]$Proof,
@@ -23,6 +24,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Release -and $Debug) { throw 'Choose either -Release or -Debug, not both.' }
 if ($FetchProof -and -not $Proof) { throw '-FetchProof requires -Proof.' }
 if ($LockScreenProof -and -not $Proof) { throw '-LockScreenProof requires -Proof.' }
 if ($LockScreenProof -and -not $DiskImage) {
@@ -42,7 +44,8 @@ $disk = if ($DiskImage) { [System.IO.Path]::GetFullPath($DiskImage) } else {
 if ($LockScreenProof -and (Test-Path $disk)) {
     throw "-LockScreenProof requires a new disk image; already exists: $disk"
 }
-$profile = if ($Release) { 'release' } else { 'debug' }
+$releaseBuild = $Release -or -not $Debug
+$profile = if ($releaseBuild) { 'release' } else { 'debug' }
 $efi = Join-Path $repoRoot "target\x86_64-unknown-uefi\$profile\logos-vnext.efi"
 $esp = Join-Path $repoRoot 'target\esp'
 $log = Join-Path $repoRoot "target\qemu-proof-$Cpus.log"
@@ -68,7 +71,7 @@ if ($Proof) {
     if ($FetchProof) { $features += 'fetch-proof' }
     $buildArgs += @('--features', ($features -join ','))
 }
-if ($Release) { $buildArgs += '--release' }
+if ($releaseBuild) { $buildArgs += '--release' }
 cargo @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "Kernel build failed with exit code $LASTEXITCODE." }
 

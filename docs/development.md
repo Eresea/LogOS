@@ -21,7 +21,9 @@ allocator. The bounded regression proof runner accepts `-Cpus 1`, `-Cpus 2`, or 
 .\scripts\run.ps1 -Proof -Cpus 1 -TimeoutSeconds 60
 ```
 
-Networking is enabled by default for normal boots. Regression proof runs are offline unless
+`scripts/run.ps1` uses the optimized release kernel by default; pass `-Debug` when an
+unoptimized kernel is specifically needed. Networking is enabled by default for normal boots.
+Regression proof runs are offline unless
 `-NetworkProof` is explicitly supplied. The enabled Network proof currently remains a post-merge
 TCP follow-up; DHCP fallback proof is also deferred. Use `-NoNetwork` for any offline boot; it
 removes the profile and keeps Network Disabled. Missing, malformed, or oversized `NETWORK.CFG`
