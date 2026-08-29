@@ -1374,6 +1374,10 @@ impl Display {
         if background_filled {
             self.present_all(framebuffer, width, height, stride);
         }
+        let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        let mut damage_count = 0;
+        let mut presented_tiles = [GuiRect::EMPTY; GUI_TILES_PER_STEP];
+        let mut presented_tile_count = 0;
         for _ in 0..GUI_TILES_PER_STEP {
             if self.gui_tile_index >= self.gui_damage_count {
                 break;
@@ -1396,9 +1400,16 @@ impl Display {
                 let start = row * stride + tile.x as usize * 4;
                 fill_row(&mut backbuffer[start..start + row_bytes], pixel);
             }
+            if damage_count < MAX_GUI_DAMAGE_RECTS {
+                damage[damage_count] = tile;
+                damage_count += 1;
+            }
+            presented_tiles[presented_tile_count] = tile;
+            presented_tile_count += 1;
+            self.advance_gui_tile(rect, right, bottom);
+        }
+        if damage_count != 0 {
             let backbuffer = self.backbuffer.as_mut().unwrap();
-            let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
-            damage[0] = tile;
             let terminal = self
                 .gui
                 .terminal_bounds()
@@ -1418,7 +1429,7 @@ impl Display {
                         format,
                         surface,
                         &damage,
-                        1,
+                        damage_count,
                     )
                 })
                 .unwrap_or(0);
@@ -1431,11 +1442,18 @@ impl Display {
                     stride,
                     format,
                     &damage,
-                    1,
+                    damage_count,
                 );
-            self.present_damage(framebuffer, width, height, stride, &[tile]);
-            self.render_cursor_layers(framebuffer, width, height, stride, format, tile);
-            self.advance_gui_tile(rect, right, bottom);
+            self.present_damage(
+                framebuffer,
+                width,
+                height,
+                stride,
+                &presented_tiles[..presented_tile_count],
+            );
+            for tile in presented_tiles[..presented_tile_count].iter().copied() {
+                self.render_cursor_layers(framebuffer, width, height, stride, format, tile);
+            }
         }
         if self.gui_tile_index >= self.gui_damage_count {
             let (next_damage, next_count) = self.gui.take_damage();
