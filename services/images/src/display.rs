@@ -14,6 +14,14 @@ const FPS_SURFACE_BOUNDS: GuiRect = GuiRect::new(8, 8, 72, 24);
 const FPS_NODE_ID: u32 = u32::MAX - 1;
 const FPS_Z_ORDER: i16 = i16::MAX;
 const FPS_WINDOW_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
+const READY_SURFACE: usize = 1 << 0;
+const READY_LOCKSCREEN_SURFACE: usize = 1 << 1;
+const READY_INPUT: usize = 1 << 2;
+const READY_ATRIUM_RENDER: usize = 1 << 3;
+const READY_GUI: usize = 1 << 4;
+const READY_ATRIUM_GUI: usize = 1 << 5;
+const READY_LOCKSCREEN_GUI: usize = 1 << 6;
+const READY_ALL: usize = (1 << 7) - 1;
 
 struct FpsCounter {
     window_start: Option<u64>,
@@ -303,6 +311,7 @@ pub extern "C" fn _start() -> ! {
     let mut fps_enabled = true;
     let mut fps = FpsCounter::new();
     let mut published_cursor = None;
+    let mut ready_mask = READY_ALL;
     loop {
         if render_pending && render_complete || gui_dirty || gui_render_pending {
             // Rendering is intentionally resumed across loop iterations, but it
@@ -334,174 +343,200 @@ pub extern "C" fn _start() -> ! {
             gui_dirty = true;
         }
         let mut progressed = false;
-        let mut surface_request = GuiSurfaceRequest::new(GuiSurfaceOperation::Update, 1);
-        while common::ipc_receive_handle(surface_capability, &mut surface_request) == IpcStatus::Ok
-        {
-            progressed = true;
-            let mut response = GuiSurfaceResponse::new(surface_request, GuiStatus::Malformed);
-            let cursor_request =
-                is_cursor_surface_request(surface_request, 13, config.width, config.height);
-            let fps_toggle = surface_request.operation == GuiSurfaceOperation::ToggleFps;
-            let cursor_destroy = display.is_cursor_surface(surface_request.surface);
-            let result = match surface_request.operation {
-                GuiSurfaceOperation::ToggleFps => Ok(()),
-                GuiSurfaceOperation::CreateRoot | GuiSurfaceOperation::CreateModal => {
-                    display.gui_mut().create(13, surface_request).map(|created| {
-                        response.surface = created.surface;
-                    })
-                }
-                GuiSurfaceOperation::Update => display.gui_mut().set_bounds(
-                    13,
-                    surface_request.surface,
-                    surface_request.bounds,
-                ),
-                GuiSurfaceOperation::Focus => display.gui_mut().focus(13, surface_request.surface),
-                GuiSurfaceOperation::Destroy => {
-                    display.gui_mut().destroy(13, surface_request.surface)
-                }
-            };
-            response.status = match result {
-                Ok(()) => GuiStatus::Ok,
-                Err(error) => gui_status(error),
-            };
-            if result.is_ok() && fps_toggle {
-                fps_enabled = !fps_enabled;
-                fps_scene_frame = fps_scene_frame.wrapping_add(1).max(1);
-                let op = if fps_enabled {
-                    fps_command(fps_surface, fps_scene_frame, fps.value)
-                } else {
-                    GuiSceneOp::remove(fps_surface, fps_scene_frame, FPS_NODE_ID)
+        if ready_mask & READY_SURFACE != 0 {
+            let mut surface_request = GuiSurfaceRequest::new(GuiSurfaceOperation::Update, 1);
+            while common::ipc_receive_handle(surface_capability, &mut surface_request)
+                == IpcStatus::Ok
+            {
+                progressed = true;
+                let mut response = GuiSurfaceResponse::new(surface_request, GuiStatus::Malformed);
+                let cursor_request =
+                    is_cursor_surface_request(surface_request, 13, config.width, config.height);
+                let fps_toggle = surface_request.operation == GuiSurfaceOperation::ToggleFps;
+                let cursor_destroy = display.is_cursor_surface(surface_request.surface);
+                let result = match surface_request.operation {
+                    GuiSurfaceOperation::ToggleFps => Ok(()),
+                    GuiSurfaceOperation::CreateRoot | GuiSurfaceOperation::CreateModal => {
+                        display.gui_mut().create(13, surface_request).map(|created| {
+                            response.surface = created.surface;
+                        })
+                    }
+                    GuiSurfaceOperation::Update => display.gui_mut().set_bounds(
+                        13,
+                        surface_request.surface,
+                        surface_request.bounds,
+                    ),
+                    GuiSurfaceOperation::Focus => {
+                        display.gui_mut().focus(13, surface_request.surface)
+                    }
+                    GuiSurfaceOperation::Destroy => {
+                        display.gui_mut().destroy(13, surface_request.surface)
+                    }
                 };
-                let _ = display.gui_mut().apply_scene_op(11, op);
-            }
-            if result.is_ok() && cursor_request && response.surface.is_valid() {
-                display.register_cursor_surface(13, response.surface);
-            } else if result.is_ok() && cursor_destroy {
-                display.unregister_cursor_surface(surface_request.surface);
-            }
-            let _ = common::ipc_send_handle(surface_response_capability, &response);
-            gui_dirty = true;
-        }
-        let mut lockscreen_surface_request = GuiSurfaceRequest::new(GuiSurfaceOperation::Update, 1);
-        while common::ipc_receive_handle(
-            lockscreen_surface_capability,
-            &mut lockscreen_surface_request,
-        ) == IpcStatus::Ok
-        {
-            progressed = true;
-            let mut response =
-                GuiSurfaceResponse::new(lockscreen_surface_request, GuiStatus::Malformed);
-            let cursor_request = is_cursor_surface_request(
-                lockscreen_surface_request,
-                12,
-                config.width,
-                config.height,
-            );
-            let cursor_destroy = display.is_cursor_surface(lockscreen_surface_request.surface);
-            let result = match lockscreen_surface_request.operation {
-                GuiSurfaceOperation::CreateRoot | GuiSurfaceOperation::CreateModal => {
-                    display.gui_mut().create(12, lockscreen_surface_request).map(|created| {
-                        response.surface = created.surface;
-                    })
+                response.status = match result {
+                    Ok(()) => GuiStatus::Ok,
+                    Err(error) => gui_status(error),
+                };
+                if result.is_ok() && fps_toggle {
+                    fps_enabled = !fps_enabled;
+                    fps_scene_frame = fps_scene_frame.wrapping_add(1).max(1);
+                    let op = if fps_enabled {
+                        fps_command(fps_surface, fps_scene_frame, fps.value)
+                    } else {
+                        GuiSceneOp::remove(fps_surface, fps_scene_frame, FPS_NODE_ID)
+                    };
+                    let _ = display.gui_mut().apply_scene_op(11, op);
                 }
-                GuiSurfaceOperation::Update => display.gui_mut().set_bounds(
+                if result.is_ok() && cursor_request && response.surface.is_valid() {
+                    display.register_cursor_surface(13, response.surface);
+                } else if result.is_ok() && cursor_destroy {
+                    display.unregister_cursor_surface(surface_request.surface);
+                }
+                let _ = common::ipc_send_handle(surface_response_capability, &response);
+                gui_dirty = true;
+            }
+            ready_mask &= !READY_SURFACE;
+        }
+        if ready_mask & READY_LOCKSCREEN_SURFACE != 0 {
+            let mut lockscreen_surface_request =
+                GuiSurfaceRequest::new(GuiSurfaceOperation::Update, 1);
+            while common::ipc_receive_handle(
+                lockscreen_surface_capability,
+                &mut lockscreen_surface_request,
+            ) == IpcStatus::Ok
+            {
+                progressed = true;
+                let mut response =
+                    GuiSurfaceResponse::new(lockscreen_surface_request, GuiStatus::Malformed);
+                let cursor_request = is_cursor_surface_request(
+                    lockscreen_surface_request,
                     12,
-                    lockscreen_surface_request.surface,
-                    lockscreen_surface_request.bounds,
-                ),
-                GuiSurfaceOperation::Focus => {
-                    display.gui_mut().focus(12, lockscreen_surface_request.surface)
+                    config.width,
+                    config.height,
+                );
+                let cursor_destroy = display.is_cursor_surface(lockscreen_surface_request.surface);
+                let result = match lockscreen_surface_request.operation {
+                    GuiSurfaceOperation::CreateRoot | GuiSurfaceOperation::CreateModal => {
+                        display.gui_mut().create(12, lockscreen_surface_request).map(|created| {
+                            response.surface = created.surface;
+                        })
+                    }
+                    GuiSurfaceOperation::Update => display.gui_mut().set_bounds(
+                        12,
+                        lockscreen_surface_request.surface,
+                        lockscreen_surface_request.bounds,
+                    ),
+                    GuiSurfaceOperation::Focus => {
+                        display.gui_mut().focus(12, lockscreen_surface_request.surface)
+                    }
+                    GuiSurfaceOperation::Destroy => {
+                        display.gui_mut().destroy(12, lockscreen_surface_request.surface)
+                    }
+                    GuiSurfaceOperation::ToggleFps => {
+                        Err(logos_display::GuiRegistryError::InvalidRequest)
+                    }
+                };
+                response.status = match result {
+                    Ok(()) => GuiStatus::Ok,
+                    Err(error) => gui_status(error),
+                };
+                if result.is_ok() && cursor_request && response.surface.is_valid() {
+                    display.register_cursor_surface(12, response.surface);
+                } else if result.is_ok() && cursor_destroy {
+                    display.unregister_cursor_surface(lockscreen_surface_request.surface);
                 }
-                GuiSurfaceOperation::Destroy => {
-                    display.gui_mut().destroy(12, lockscreen_surface_request.surface)
+                let _ = common::ipc_send_handle(lockscreen_response_capability, &response);
+                gui_dirty = true;
+            }
+            ready_mask &= !READY_LOCKSCREEN_SURFACE;
+        }
+        if ready_mask & READY_INPUT != 0 {
+            let mut message = RenderMessage::empty(MessageKind::RenderCells);
+            while common::ipc_receive_handle(input_capability, &mut message) == IpcStatus::Ok {
+                progressed = true;
+                if display.apply(generation, &message).is_ok() {
+                    let more = message.flags & RENDER_FLAG_MORE != 0;
+                    render_pending = true;
+                    render_complete = !more;
                 }
-                GuiSurfaceOperation::ToggleFps => {
-                    Err(logos_display::GuiRegistryError::InvalidRequest)
+            }
+            ready_mask &= !READY_INPUT;
+        }
+        if ready_mask & READY_ATRIUM_RENDER != 0 {
+            let mut atrium_render = RenderMessage::empty(MessageKind::RenderCells);
+            while common::ipc_receive_handle(atrium_render_capability, &mut atrium_render)
+                == IpcStatus::Ok
+            {
+                progressed = true;
+                if display.apply(generation, &atrium_render).is_ok() {
+                    let more = atrium_render.flags & RENDER_FLAG_MORE != 0;
+                    render_pending = true;
+                    render_complete = !more;
                 }
-            };
-            response.status = match result {
-                Ok(()) => GuiStatus::Ok,
-                Err(error) => gui_status(error),
-            };
-            if result.is_ok() && cursor_request && response.surface.is_valid() {
-                display.register_cursor_surface(12, response.surface);
-            } else if result.is_ok() && cursor_destroy {
-                display.unregister_cursor_surface(lockscreen_surface_request.surface);
             }
-            let _ = common::ipc_send_handle(lockscreen_response_capability, &response);
-            gui_dirty = true;
+            ready_mask &= !READY_ATRIUM_RENDER;
         }
-        let mut message = RenderMessage::empty(MessageKind::RenderCells);
-        while common::ipc_receive_handle(input_capability, &mut message) == IpcStatus::Ok {
-            progressed = true;
-            if display.apply(generation, &message).is_ok() {
-                let more = message.flags & RENDER_FLAG_MORE != 0;
-                render_pending = true;
-                render_complete = !more;
+        if ready_mask & READY_GUI != 0 {
+            let mut gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
+            while common::ipc_receive_handle(gui_capability, &mut gui_op) == IpcStatus::Ok {
+                progressed = true;
+                let _ = display.gui_mut().apply_scene_op(11, gui_op);
+                gui_dirty = true;
+                gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
             }
-        }
-        let mut atrium_render = RenderMessage::empty(MessageKind::RenderCells);
-        while common::ipc_receive_handle(atrium_render_capability, &mut atrium_render)
-            == IpcStatus::Ok
-        {
-            progressed = true;
-            if display.apply(generation, &atrium_render).is_ok() {
-                let more = atrium_render.flags & RENDER_FLAG_MORE != 0;
-                render_pending = true;
-                render_complete = !more;
-            }
-        }
-        let mut gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
-        while common::ipc_receive_handle(gui_capability, &mut gui_op) == IpcStatus::Ok {
-            progressed = true;
-            let _ = display.gui_mut().apply_scene_op(11, gui_op);
-            gui_dirty = true;
-            gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
+            ready_mask &= !READY_GUI;
         }
         let mut cursor_presented = false;
-        let mut atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
-        while common::ipc_receive_handle(atrium_gui_capability, &mut atrium_op) == IpcStatus::Ok {
-            progressed = true;
-            if display.apply_cursor_scene_op(atrium_op) {
-                if display.repaint_cursor(
-                    framebuffer,
-                    config.width as usize,
-                    config.height as usize,
-                    config.stride as usize * 4,
-                    format,
-                ) {
-                    cursor_presented = true;
-                } else if display.render_pending() {
+        if ready_mask & READY_ATRIUM_GUI != 0 {
+            let mut atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
+            while common::ipc_receive_handle(atrium_gui_capability, &mut atrium_op) == IpcStatus::Ok
+            {
+                progressed = true;
+                if display.apply_cursor_scene_op(atrium_op) {
+                    if display.repaint_cursor(
+                        framebuffer,
+                        config.width as usize,
+                        config.height as usize,
+                        config.stride as usize * 4,
+                        format,
+                    ) {
+                        cursor_presented = true;
+                    } else if display.render_pending() {
+                        gui_dirty = true;
+                    }
+                } else {
+                    let _ = display.gui_mut().apply_scene_op(13, atrium_op);
                     gui_dirty = true;
                 }
-            } else {
-                let _ = display.gui_mut().apply_scene_op(13, atrium_op);
-                gui_dirty = true;
+                atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
             }
-            atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
+            ready_mask &= !READY_ATRIUM_GUI;
         }
-        let mut lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
-        while common::ipc_receive_handle(lockscreen_gui_capability, &mut lockscreen_op)
-            == IpcStatus::Ok
-        {
-            progressed = true;
-            if display.apply_cursor_scene_op(lockscreen_op) {
-                if display.repaint_cursor(
-                    framebuffer,
-                    config.width as usize,
-                    config.height as usize,
-                    config.stride as usize * 4,
-                    format,
-                ) {
-                    cursor_presented = true;
-                } else if display.render_pending() {
+        if ready_mask & READY_LOCKSCREEN_GUI != 0 {
+            let mut lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
+            while common::ipc_receive_handle(lockscreen_gui_capability, &mut lockscreen_op)
+                == IpcStatus::Ok
+            {
+                progressed = true;
+                if display.apply_cursor_scene_op(lockscreen_op) {
+                    if display.repaint_cursor(
+                        framebuffer,
+                        config.width as usize,
+                        config.height as usize,
+                        config.stride as usize * 4,
+                        format,
+                    ) {
+                        cursor_presented = true;
+                    } else if display.render_pending() {
+                        gui_dirty = true;
+                    }
+                } else {
+                    let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
                     gui_dirty = true;
                 }
-            } else {
-                let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
-                gui_dirty = true;
+                lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
             }
-            lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
+            ready_mask &= !READY_LOCKSCREEN_GUI;
         }
         if cursor_presented {
             publish_present(display, present_state);
@@ -549,15 +584,23 @@ pub extern "C" fn _start() -> ! {
             publish_cursor(display, present_state, &mut published_cursor);
         }
         if !progressed {
-            common::wait_on_capabilities(&[
+            let capabilities = [
+                surface_capability,
+                lockscreen_surface_capability,
                 input_capability,
                 atrium_render_capability,
                 gui_capability,
                 atrium_gui_capability,
-                surface_capability,
                 lockscreen_gui_capability,
-                lockscreen_surface_capability,
-            ]);
+            ];
+            ready_mask = common::wait_on_capabilities_ready(&capabilities)
+                .and_then(|ready| {
+                    capabilities
+                        .iter()
+                        .position(|capability| *capability == ready)
+                        .map(|index| 1usize << index)
+                })
+                .unwrap_or(READY_ALL);
         }
     }
 }

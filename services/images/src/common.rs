@@ -1127,7 +1127,7 @@ pub fn wait_on_capability_or_input(capability: logos_abi::CapabilityHandle) {
             }
         }
         if count != 0 {
-            wait_on_event_handles(&events[..count]);
+            let _ = wait_on_event_handles(&events[..count]);
             return;
         }
     }
@@ -1136,38 +1136,51 @@ pub fn wait_on_capability_or_input(capability: logos_abi::CapabilityHandle) {
 
 #[allow(dead_code)]
 pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle]) {
+    let _ = wait_on_capabilities_ready(capabilities);
+}
+
+pub fn wait_on_capabilities_ready(
+    capabilities: &[logos_abi::CapabilityHandle],
+) -> Option<logos_abi::CapabilityHandle> {
     #[cfg(target_os = "none")]
     {
         if capabilities.is_empty() {
             heartbeat();
-            return;
+            return None;
         }
         let mut events = Vec::new();
         if events.try_reserve(capabilities.len()).is_err() {
             heartbeat();
-            return;
+            return None;
         }
         for capability in capabilities.iter().copied() {
             let event = match discover_event_for_capability(capability) {
                 Ok(event) => event,
                 Err(_) => {
                     heartbeat();
-                    return;
+                    return None;
                 }
             };
             events.push(event);
         }
-        wait_on_event_handles(&events);
+        let ready = wait_on_event_handles(&events);
+        return ready.and_then(|event| {
+            events
+                .iter()
+                .position(|candidate| *candidate == event)
+                .and_then(|index| capabilities.get(index).copied())
+        });
     }
     #[cfg(not(target_os = "none"))]
     {
         let _ = capabilities;
         heartbeat();
+        None
     }
 }
 
 #[allow(dead_code)]
-fn wait_on_event_handles(events: &[logos_abi::EventHandle]) {
+fn wait_on_event_handles(events: &[logos_abi::EventHandle]) -> Option<logos_abi::EventHandle> {
     #[cfg(target_os = "none")]
     {
         let cached = unsafe { &*EVENT_SET_CACHE.0.get() };
@@ -1204,7 +1217,7 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle]) {
             {
                 unsafe { *EVENT_SET_CACHE.0.get() = EventSetCacheState::empty() };
                 heartbeat();
-                return;
+                return None;
             }
             let set = response.event_set;
             for event in events {
@@ -1226,7 +1239,7 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle]) {
                     destroy.event_set = set;
                     let _ = event_call(&destroy, &mut add_response);
                     heartbeat();
-                    return;
+                    return None;
                 }
             }
             unsafe {
@@ -1241,6 +1254,7 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle]) {
         let mut response =
             logos_abi::EventResponse::empty(logos_abi::EventStatus::Malformed, wait.request_id);
         let status = event_call(&wait, &mut response);
+        let ready = (status == logos_abi::EventStatus::Ready).then_some(response.event);
         if status != logos_abi::EventStatus::Pending {
             let mut destroy = logos_abi::EventRequest::new(
                 logos_abi::EventOperation::DestroySet,
@@ -1251,11 +1265,13 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle]) {
             unsafe { *EVENT_SET_CACHE.0.get() = EventSetCacheState::empty() };
         }
         heartbeat();
+        return ready;
     }
     #[cfg(not(target_os = "none"))]
     {
         let _ = events;
         heartbeat();
+        None
     }
 }
 
@@ -1280,7 +1296,7 @@ pub fn sleep_on_input() {
             }
         }
         if count != 0 {
-            wait_on_event_handles(&events[..count]);
+            let _ = wait_on_event_handles(&events[..count]);
             return;
         }
     }
