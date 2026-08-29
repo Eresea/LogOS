@@ -691,6 +691,15 @@ fn render_one<B: GuiRenderBackend>(
     }
     let command_clip = intersect(*clip, bounds);
     let mut rendered = 0;
+    if occluder_count == 0 {
+        for damage_rect in damage[..damage_count].iter().copied() {
+            let damage_clip = intersect(command_clip, damage_rect);
+            if !damage_clip.is_empty() {
+                rendered += backend.draw(command, damage_clip);
+            }
+        }
+        return rendered;
+    }
     for damage_rect in damage[..damage_count].iter().copied() {
         let damage_clip = intersect(command_clip, damage_rect);
         if damage_clip.is_empty() {
