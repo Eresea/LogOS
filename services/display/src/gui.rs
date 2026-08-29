@@ -706,10 +706,10 @@ fn render_one<B: GuiRenderBackend>(
             continue;
         }
         let mut visible = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS * 4];
-        let mut next = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS * 4];
         visible[0] = damage_clip;
         let mut visible_count = 1;
         for occluder in occluders[..occluder_count].iter().copied() {
+            let mut next = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS * 4];
             let mut next_count = 0;
             for rect in visible[..visible_count].iter().copied() {
                 let mut pieces = [GuiRect::EMPTY; 4];
@@ -722,7 +722,7 @@ fn render_one<B: GuiRenderBackend>(
                     next_count += 1;
                 }
             }
-            core::mem::swap(&mut visible, &mut next);
+            visible = next;
             visible_count = next_count;
             if visible_count == 0 {
                 break;

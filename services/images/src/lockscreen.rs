@@ -299,6 +299,7 @@ fn destroy_surface(display: logos_abi::CapabilityHandle, surface: SurfaceHandle,
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
+    initialize_ui_build(false);
     let input = common::capability_handle(INPUT_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display = common::capability_handle(DISPLAY_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display_control =
