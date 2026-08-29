@@ -24,10 +24,8 @@ pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_TILE_SIZE: u32 = 64;
-// Finish full-screen damage in a few bounded turns while keeping each turn
-// short enough for input and watchdog progress.
-const GUI_TILES_PER_STEP: usize = 8;
-const GUI_FULL_DAMAGE_TILES_PER_STEP: usize = 32;
+// Keep incremental GUI slices short enough for input and watchdog progress.
+const GUI_TILES_PER_STEP: usize = 4;
 const CURSOR_LAYERS: usize = 2;
 const CURSOR_DAMAGE_RECTS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
@@ -77,10 +75,11 @@ struct CursorLayer {
     surface: SurfaceHandle,
     x: i32,
     y: i32,
+    order: u32,
 }
 
 impl CursorLayer {
-    const EMPTY: Self = Self { surface: SurfaceHandle::EMPTY, x: 0, y: 0 };
+    const EMPTY: Self = Self { surface: SurfaceHandle::EMPTY, x: 0, y: 0, order: 0 };
 
     const fn active(self) -> bool {
         self.surface.is_valid()
@@ -497,6 +496,7 @@ pub struct Display {
     gui_tile_x: i32,
     gui_tile_y: i32,
     cursor_layers: [CursorLayer; CURSOR_LAYERS],
+    cursor_order: u32,
     cursor_damage: [GuiRect; CURSOR_DAMAGE_RECTS],
     cursor_damage_count: usize,
     hardware_cursor: bool,
@@ -530,6 +530,7 @@ impl Display {
             gui_tile_x: 0,
             gui_tile_y: 0,
             cursor_layers: [CursorLayer::EMPTY; CURSOR_LAYERS],
+            cursor_order: 0,
             cursor_damage: [GuiRect::EMPTY; CURSOR_DAMAGE_RECTS],
             cursor_damage_count: 0,
             hardware_cursor: false,
@@ -586,7 +587,9 @@ impl Display {
         if old.active() {
             self.gui.invalidate_rect(Self::cursor_bounds(old.x, old.y));
         }
-        self.cursor_layers[index] = CursorLayer { surface, x: 320, y: 200 };
+        self.cursor_order = self.cursor_order.wrapping_add(1).max(1);
+        self.cursor_layers[index] =
+            CursorLayer { surface, x: 320, y: 200, order: self.cursor_order };
         self.gui.invalidate_rect(Self::cursor_bounds(320, 200));
     }
 
@@ -646,6 +649,8 @@ impl Display {
         }
         self.cursor_layers[index].x = op.command.x;
         self.cursor_layers[index].y = op.command.y;
+        self.cursor_order = self.cursor_order.wrapping_add(1).max(1);
+        self.cursor_layers[index].order = self.cursor_order;
         true
     }
 
@@ -669,6 +674,13 @@ impl Display {
         if self.cursor_damage_count < CURSOR_DAMAGE_RECTS {
             self.cursor_damage[self.cursor_damage_count] = rect;
             self.cursor_damage_count += 1;
+        } else {
+            let mut combined = rect;
+            for existing in self.cursor_damage[..self.cursor_damage_count].iter().copied() {
+                combined = union_rect(combined, existing);
+            }
+            self.cursor_damage[0] = combined;
+            self.cursor_damage_count = 1;
         }
     }
 
@@ -720,8 +732,7 @@ impl Display {
         if self.hardware_cursor {
             return;
         }
-        let Some(layer) = self.cursor_layers.iter().rev().copied().find(|layer| layer.active())
-        else {
+        let Some(layer) = self.active_cursor_layer() else {
             return;
         };
         let bounds = Self::cursor_bounds(layer.x, layer.y);
@@ -865,6 +876,7 @@ impl Display {
         self.gui_tile_x = 0;
         self.gui_tile_y = 0;
         self.cursor_layers = [CursorLayer::EMPTY; CURSOR_LAYERS];
+        self.cursor_order = 0;
         self.cursor_damage = [GuiRect::EMPTY; CURSOR_DAMAGE_RECTS];
         self.cursor_damage_count = 0;
         self.hardware_cursor = false;
@@ -894,8 +906,18 @@ impl Display {
     }
 
     pub fn cursor_position(&self) -> Option<(i16, i16)> {
-        let layer = self.cursor_layers.iter().rev().copied().find(|layer| layer.active())?;
+        let layer = self.active_cursor_layer()?;
         Some((layer.x as i16, layer.y as i16))
+    }
+
+    fn active_cursor_layer(&self) -> Option<CursorLayer> {
+        let mut active = None;
+        for layer in self.cursor_layers.iter().copied().filter(|layer| layer.active()) {
+            if active.is_none_or(|current: CursorLayer| layer.order > current.order) {
+                active = Some(layer);
+            }
+        }
+        active
     }
 
     pub fn apply(&mut self, generation: u16, message: &RenderMessage) -> Result<(), DisplayError> {
@@ -1294,12 +1316,52 @@ impl Display {
         }
         let mut rendered = 0;
         let screen = GuiRect::new(0, 0, width as u32, height as u32);
-        let tiles_per_step = if self.gui_damage_count == 1 && self.gui_damage[0] == screen {
-            GUI_FULL_DAMAGE_TILES_PER_STEP
-        } else {
-            GUI_TILES_PER_STEP
-        };
-        for _ in 0..tiles_per_step {
+        if self.gui_damage_count == 1 && self.gui_damage[0] == screen {
+            let damage = self.gui_damage;
+            let pixel = pixel_bytes(self.surface_background, format);
+            let row_bytes = width * 4;
+            let backbuffer = self.backbuffer.as_mut().unwrap();
+            for row in 0..height {
+                let start = row * stride;
+                fill_row(&mut backbuffer[start..start + row_bytes], pixel);
+            }
+            let backbuffer = self.backbuffer.as_mut().unwrap();
+            if let Some(surface) = self.gui.terminal_bounds() {
+                rendered += Self::render_terminal_surface(
+                    &self.cells,
+                    self.columns,
+                    self.rows,
+                    self.cursor_column,
+                    self.cursor_row,
+                    self.cursor_visible,
+                    &mut self.glyph_cache,
+                    backbuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    surface,
+                    &damage,
+                    1,
+                );
+            }
+            rendered += self.gui.render(
+                &mut self.glyph_cache,
+                backbuffer,
+                width,
+                height,
+                stride,
+                format,
+                &damage,
+                1,
+            );
+            self.present_all(framebuffer, width, height, stride);
+            self.render_cursor_layers(framebuffer, width, height, stride, format, screen);
+            self.gui_damage_count = 0;
+            self.gui_tile_index = 0;
+            return Ok(rendered);
+        }
+        for _ in 0..GUI_TILES_PER_STEP {
             if self.gui_tile_index >= self.gui_damage_count {
                 break;
             }
@@ -1616,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_composition_is_bounded_to_row_sized_passes() {
+    fn gui_composition_finishes_full_screen_in_one_bounded_pass() {
         let mut display = Display::new(1);
         let mut root =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
@@ -1631,7 +1693,7 @@ mod tests {
         display.gui_mut().update(11, batch).unwrap();
         let mut framebuffer = std::vec![0; 640 * 400 * 4];
         display.render_gui(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8).unwrap();
-        assert!(display.render_pending());
+        assert!(!display.render_pending());
         let mut replacement =
             logos_abi::GuiDrawBatch::new(handle, 2, logos_abi::GuiRect::new(24, 24, 16, 16));
         assert!(replacement.push(logos_abi::GuiDrawCommand::fill_rect(
@@ -1639,15 +1701,8 @@ mod tests {
             0xff0000,
         )));
         display.gui_mut().update(11, replacement).unwrap();
-        let mut passes = 1;
-        loop {
-            passes += 1;
-            display.render_gui(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8).unwrap();
-            if !display.render_pending() {
-                break;
-            }
-        }
-        assert!(passes > 1);
+        display.render_gui(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8).unwrap();
+        assert!(!display.render_pending());
         let pixel = (24 * 640 + 24) * 4;
         assert_eq!(&framebuffer[pixel..pixel + 4], &[0, 0, 255, 0]);
     }
@@ -1802,12 +1857,17 @@ mod tests {
         draw.frame = 2;
         draw.command.x = 32;
         assert!(display.apply_cursor_scene_op(draw));
+        draw.frame = 3;
+        draw.command.x = 56;
+        assert!(display.apply_cursor_scene_op(draw));
         assert!(!display.render_pending());
         assert!(display.repaint_cursor(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8));
         assert!(!display.render_pending());
         let new_pixel = (8 * 64 + 32) * 4;
         assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0x30, 0x20, 0x10]);
-        assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0xff, 0xff, 0xff]);
+        assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0x30, 0x20, 0x10]);
+        let latest_pixel = (8 * 64 + 56) * 4;
+        assert_eq!(&framebuffer[latest_pixel..latest_pixel + 3], &[0xff, 0xff, 0xff]);
     }
 
     #[test]
@@ -1817,9 +1877,14 @@ mod tests {
             surface: SurfaceHandle::new(1, 1, LOCKSCREEN_OWNER).unwrap(),
             x: 8,
             y: 4,
+            order: 2,
         };
-        display.cursor_layers[1] =
-            CursorLayer { surface: SurfaceHandle::new(2, 1, ATRIUM_OWNER).unwrap(), x: 32, y: 4 };
+        display.cursor_layers[1] = CursorLayer {
+            surface: SurfaceHandle::new(2, 1, ATRIUM_OWNER).unwrap(),
+            x: 32,
+            y: 4,
+            order: 1,
+        };
         let mut framebuffer = std::vec![0; 64 * 32 * 4];
         for pixel in framebuffer.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[0x40, 0x30, 0x20, 0]);
@@ -1834,8 +1899,8 @@ mod tests {
             GuiRect::new(0, 0, 64, 32),
         );
 
-        assert_eq!(&framebuffer[(4 * 64 + 8) * 4..(4 * 64 + 8) * 4 + 4], &[0x40, 0x30, 0x20, 0]);
-        assert_eq!(&framebuffer[(4 * 64 + 32) * 4..(4 * 64 + 32) * 4 + 4], &[0xff, 0xff, 0xff, 0]);
+        assert_eq!(&framebuffer[(4 * 64 + 8) * 4..(4 * 64 + 8) * 4 + 4], &[0xff, 0xff, 0xff, 0]);
+        assert_eq!(&framebuffer[(4 * 64 + 32) * 4..(4 * 64 + 32) * 4 + 4], &[0x40, 0x30, 0x20, 0]);
     }
 
     #[test]
