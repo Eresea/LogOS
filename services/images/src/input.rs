@@ -14,6 +14,30 @@ static mut SENT_MASK: u8 = 0;
 static mut PENDING_POINTER: Option<InputMessage> = None;
 static mut POINTER_SENT_MASK: u8 = 0;
 
+fn flush_pointer(
+    capability: logos_abi::CapabilityHandle,
+    pending: &mut Option<InputMessage>,
+    sent_mask: &mut u8,
+) -> bool {
+    let Some(message) = *pending else { return false };
+    if *sent_mask == 0 {
+        match common::ipc_send_handle(capability, &message) {
+            IpcStatus::Ok
+            | IpcStatus::Stale
+            | IpcStatus::Disconnected
+            | IpcStatus::Unauthorized
+            | IpcStatus::Malformed
+            | IpcStatus::Empty => *sent_mask = 1,
+            IpcStatus::Full => common::wait_on_capability_or_input(capability),
+        }
+    }
+    if *sent_mask == 1 {
+        *pending = None;
+        *sent_mask = 0;
+    }
+    true
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
@@ -46,28 +70,14 @@ pub extern "C" fn _start() -> ! {
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
-        if let Some(message) = *pending_pointer {
-            if *pointer_sent_mask == 0 {
-                match common::ipc_send_handle(atrium_output, &message) {
-                    IpcStatus::Ok
-                    | IpcStatus::Stale
-                    | IpcStatus::Disconnected
-                    | IpcStatus::Unauthorized
-                    | IpcStatus::Malformed
-                    | IpcStatus::Empty => *pointer_sent_mask = 1,
-                    IpcStatus::Full => common::wait_on_capability_or_input(atrium_output),
-                }
-            }
-            if *pointer_sent_mask == 1 {
-                *pending_pointer = None;
-                *pointer_sent_mask = 0;
-            }
+        if flush_pointer(atrium_output, pending_pointer, pointer_sent_mask) {
             continue;
         }
         if let Some(byte) = pointer.pop() {
             if let Some(event) = pointer_decoder.feed(byte) {
                 *pending_pointer = Some(event);
                 *pointer_sent_mask = 0;
+                let _ = flush_pointer(atrium_output, pending_pointer, pointer_sent_mask);
             }
             continue;
         }
