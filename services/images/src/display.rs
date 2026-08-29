@@ -501,7 +501,7 @@ pub extern "C" fn _start() -> ! {
                         format,
                     ) {
                         cursor_presented = true;
-                    } else if display.render_pending() {
+                    } else {
                         gui_dirty = true;
                     }
                 } else {
@@ -527,7 +527,7 @@ pub extern "C" fn _start() -> ! {
                         format,
                     ) {
                         cursor_presented = true;
-                    } else if display.render_pending() {
+                    } else {
                         gui_dirty = true;
                     }
                 } else {
