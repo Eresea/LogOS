@@ -1295,7 +1295,6 @@ impl Display {
                 let start = row * stride;
                 fill_row(&mut backbuffer[start..start + row_bytes], pixel);
             }
-            self.present_all(framebuffer, width, height, stride);
             self.gui_background_pending = false;
             background_filled = true;
             self.surface_initialized = true;
@@ -1310,6 +1309,9 @@ impl Display {
             let (damage, count) = self.gui.take_damage();
             self.load_gui_damage(damage, count, width, height);
             if self.gui_damage_count == 0 {
+                if background_filled {
+                    self.present_all(framebuffer, width, height, stride);
+                }
                 return Ok(0);
             }
             self.gui_tile_index = 0;
@@ -1364,6 +1366,9 @@ impl Display {
             self.gui_damage_count = 0;
             self.gui_tile_index = 0;
             return Ok(rendered);
+        }
+        if background_filled {
+            self.present_all(framebuffer, width, height, stride);
         }
         for _ in 0..GUI_TILES_PER_STEP {
             if self.gui_tile_index >= self.gui_damage_count {
