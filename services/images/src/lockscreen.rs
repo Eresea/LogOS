@@ -13,7 +13,7 @@ mod register_ui {
 }
 
 use logos_abi::{
-    GuiDrawBatch, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSurfaceOperation,
+    GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSceneOp, GuiSurfaceOperation,
     GuiSurfaceRequest, GuiSurfaceResponse, InputMessage, IpcStatus, KeyCode, KeyState,
     SurfaceHandle, UserOperation, UserRequest, UserResponse, UserStatus,
 };
@@ -279,15 +279,13 @@ fn request_cursor_surface(
     (common::ipc_send_handle(display, &request) == IpcStatus::Ok).then_some(request)
 }
 
-fn cursor_batch(surface: SurfaceHandle, x: i16, y: i16, sequence: u32) -> GuiDrawBatch {
-    let x = i32::from(x);
-    let y = i32::from(y);
-    let rect = GuiRect::new(x, y, 11, 14);
-    let mut batch = GuiDrawBatch::new(surface, sequence, rect);
-    let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(x, y, 3, 14), 0xffffff));
-    let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(x, y + 8, 8, 3), 0xffffff));
-    let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(x, y + 11, 11, 3), 0xffffff));
-    batch
+fn cursor_op(surface: SurfaceHandle, x: i16, y: i16, sequence: u32) -> GuiSceneOp {
+    GuiSceneOp::upsert(
+        surface,
+        sequence,
+        1,
+        GuiDrawCommand::fill_rect(GuiRect::new(i32::from(x), i32::from(y), 3, 14), 0xffffff),
+    )
 }
 
 fn destroy_surface(display: logos_abi::CapabilityHandle, surface: SurfaceHandle, next: &mut u32) {
@@ -323,7 +321,7 @@ pub extern "C" fn _start() -> ! {
     let mut pending_cursor_surface = None;
     let mut cursor = (320i16, 200i16);
     let mut cursor_sequence = 1u32;
-    let mut pending_cursor_draw: Option<GuiDrawBatch> = None;
+    let mut pending_cursor_draw: Option<GuiSceneOp> = None;
     let mut pending_draw: Option<bool> = None;
     let mut pending_draw_sequence = 0u32;
     let mut pending_auth: Option<UserRequest> = None;
@@ -339,8 +337,8 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
-        if let Some(batch) = pending_cursor_draw {
-            match common::ipc_send_scene_batch(display, &batch, 1) {
+        if let Some(cursor) = pending_cursor_draw {
+            match common::ipc_send_handle(display, &cursor) {
                 IpcStatus::Ok => pending_cursor_draw = None,
                 IpcStatus::Full => {}
                 _ => {
@@ -419,7 +417,7 @@ pub extern "C" fn _start() -> ! {
                 {
                     cursor_surface = surface_response.surface;
                     pending_cursor_draw =
-                        Some(cursor_batch(cursor_surface, cursor.0, cursor.1, cursor_sequence));
+                        Some(cursor_op(cursor_surface, cursor.0, cursor.1, cursor_sequence));
                 }
                 continue;
             }
@@ -470,12 +468,11 @@ pub extern "C" fn _start() -> ! {
                     cursor = (pointer.x.clamp(0, 639), pointer.y.clamp(0, 399));
                     cursor_sequence = cursor_sequence.wrapping_add(1).max(1);
                     if cursor_surface.is_valid() {
-                        let cursor =
-                            cursor_batch(cursor_surface, cursor.0, cursor.1, cursor_sequence);
+                        let cursor = cursor_op(cursor_surface, cursor.0, cursor.1, cursor_sequence);
                         if cursor_sent_in_input || pending_cursor_draw.is_some() {
                             pending_cursor_draw = Some(cursor);
                         } else {
-                            match common::ipc_send_scene_batch(display, &cursor, 1) {
+                            match common::ipc_send_handle(display, &cursor) {
                                 IpcStatus::Ok => cursor_sent_in_input = true,
                                 IpcStatus::Full => pending_cursor_draw = Some(cursor),
                                 _ => {
@@ -507,8 +504,8 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        if let Some(batch) = pending_cursor_draw {
-            match common::ipc_send_scene_batch(display, &batch, 1) {
+        if let Some(cursor) = pending_cursor_draw {
+            match common::ipc_send_handle(display, &cursor) {
                 IpcStatus::Ok => pending_cursor_draw = None,
                 IpcStatus::Full => {}
                 _ => {
