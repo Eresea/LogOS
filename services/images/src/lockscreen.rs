@@ -488,6 +488,16 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
+        if let Some(batch) = pending_cursor_draw {
+            match common::ipc_send_scene_batch(display, &batch, 1) {
+                IpcStatus::Ok => pending_cursor_draw = None,
+                IpcStatus::Full => {}
+                _ => {
+                    pending_cursor_draw = None;
+                    cursor_surface = SurfaceHandle::EMPTY;
+                }
+            }
+        }
         common::wait_on_capabilities(&[
             input,
             display,

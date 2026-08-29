@@ -1513,6 +1513,16 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
+        if let Some(op) = pending_cursor_draw {
+            match common::ipc_send_handle(display, &op) {
+                IpcStatus::Ok => pending_cursor_draw = None,
+                IpcStatus::Full => {}
+                _ => {
+                    pending_cursor_draw = None;
+                    cursor_surface = SurfaceHandle::EMPTY;
+                }
+            }
+        }
         let mut wait_capabilities = [logos_abi::CapabilityHandle::EMPTY; 24];
         let mut wait_count = 0;
         for capability in [
