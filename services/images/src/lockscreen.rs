@@ -463,8 +463,16 @@ pub extern "C" fn _start() -> ! {
                     cursor = (pointer.x.clamp(0, 639), pointer.y.clamp(0, 399));
                     cursor_sequence = cursor_sequence.wrapping_add(1).max(1);
                     if cursor_surface.is_valid() {
-                        pending_cursor_draw =
-                            Some(cursor_batch(cursor_surface, cursor.0, cursor.1, cursor_sequence));
+                        let cursor =
+                            cursor_batch(cursor_surface, cursor.0, cursor.1, cursor_sequence);
+                        match common::ipc_send_scene_batch(display, &cursor, 1) {
+                            IpcStatus::Ok => pending_cursor_draw = None,
+                            IpcStatus::Full => pending_cursor_draw = Some(cursor),
+                            _ => {
+                                pending_cursor_draw = None;
+                                cursor_surface = SurfaceHandle::EMPTY;
+                            }
+                        }
                     }
                 }
                 let action = if event.pointer_event().is_some() {
