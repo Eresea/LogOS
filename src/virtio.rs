@@ -3,6 +3,9 @@ use logos_storage::{
     MAX_VIRTIO_QUEUE_DEPTH, TransportError, TransportRequestId, VirtioBlkChain, VirtioTransport,
 };
 
+#[cfg(any(target_os = "uefi", test))]
+mod frame_queue;
+
 #[cfg(target_os = "uefi")]
 pub(crate) mod gpu;
 
