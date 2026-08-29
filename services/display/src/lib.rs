@@ -7,9 +7,10 @@ extern crate std;
 
 use alloc::vec::Vec;
 use logos_abi::{
-    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, GuiRect, MAX_COLUMNS,
-    MAX_DISPLAY_PRESENT_RECTS, MAX_FRAMEBUFFER_BYTES, MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS,
-    MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
+    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, GuiDrawKind, GuiNodeOperation,
+    GuiRect, GuiSceneOp, MAX_COLUMNS, MAX_DISPLAY_PRESENT_RECTS, MAX_FRAMEBUFFER_BYTES,
+    MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
+    SurfaceHandle,
 };
 
 mod gui;
@@ -24,6 +25,16 @@ pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_TILE_SIZE: u32 = 32;
 const GUI_TILES_PER_STEP: usize = 8;
+const CURSOR_LAYERS: usize = 2;
+const LOCKSCREEN_OWNER: u32 = 12;
+const ATRIUM_OWNER: u32 = 13;
+const POINTER_CURSOR_WIDTH: i32 = 18;
+const POINTER_CURSOR_HEIGHT: i32 = 24;
+const POINTER_CURSOR_MASK: [u32; POINTER_CURSOR_HEIGHT as usize] = [
+    0x00001, 0x00003, 0x00007, 0x0000f, 0x0001f, 0x0003f, 0x0007f, 0x000ff, 0x001ff, 0x003ff,
+    0x007ff, 0x00fff, 0x01fff, 0x03fff, 0x07fff, 0x0ffff, 0x0ffff, 0x0fff8, 0x0fff8, 0x01ff0,
+    0x01ff0, 0x03fe0, 0x03fe0, 0x07fc0,
+];
 const GLYPH_CACHE_ENTRIES: usize = 32;
 const DIRTY_WORDS: usize = (MAX_COLUMNS * MAX_ROWS).div_ceil(usize::BITS as usize);
 const ASCII_FIRST: u32 = 0x20;
@@ -55,6 +66,21 @@ impl GlyphCacheEntry {
 struct GlyphCache {
     entries: [GlyphCacheEntry; GLYPH_CACHE_ENTRIES],
     next: usize,
+}
+
+#[derive(Clone, Copy)]
+struct CursorLayer {
+    surface: SurfaceHandle,
+    x: i32,
+    y: i32,
+}
+
+impl CursorLayer {
+    const EMPTY: Self = Self { surface: SurfaceHandle::EMPTY, x: 0, y: 0 };
+
+    const fn active(self) -> bool {
+        self.surface.is_valid()
+    }
 }
 
 impl GlyphCache {
@@ -235,6 +261,48 @@ fn pixel_bytes(color: u32, format: PixelFormat) -> [u8; 4] {
     }
 }
 
+fn cursor_mask_has(row: i32, column: i32) -> bool {
+    (0..POINTER_CURSOR_HEIGHT).contains(&row)
+        && (0..POINTER_CURSOR_WIDTH).contains(&column)
+        && POINTER_CURSOR_MASK[row as usize] & (1u32 << column) != 0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_cursor_pixel(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: PixelFormat,
+    x: i32,
+    y: i32,
+    color: u32,
+    alpha: u8,
+    clip: GuiRect,
+) {
+    if alpha == 0 || !clip.contains(x, y) || x < 0 || y < 0 {
+        return;
+    }
+    let (x, y) = (x as usize, y as usize);
+    if x >= width || y >= height {
+        return;
+    }
+    let offset = y * stride + x * 4;
+    if alpha == u8::MAX {
+        framebuffer[offset..offset + 4].copy_from_slice(&pixel_bytes(color, format));
+        return;
+    }
+    let existing = &framebuffer[offset..offset + 4];
+    let (red, green, blue) = match format {
+        PixelFormat::Rgb8 => (existing[0], existing[1], existing[2]),
+        PixelFormat::Bgr8 => (existing[2], existing[1], existing[0]),
+    };
+    let blended = (u32::from(blend_channel(red, ((color >> 16) & 0xff) as u8, alpha)) << 16)
+        | (u32::from(blend_channel(green, ((color >> 8) & 0xff) as u8, alpha)) << 8)
+        | u32::from(blend_channel(blue, color as u8, alpha));
+    framebuffer[offset..offset + 4].copy_from_slice(&pixel_bytes(blended, format));
+}
+
 fn fill_row(row: &mut [u8], pixel: [u8; 4]) {
     row[..pixel.len()].copy_from_slice(&pixel);
     let mut filled = pixel.len();
@@ -305,6 +373,7 @@ pub struct Display {
     gui_tile_index: usize,
     gui_tile_x: i32,
     gui_tile_y: i32,
+    cursor_layers: [CursorLayer; CURSOR_LAYERS],
     backbuffer: Option<Vec<u8>>,
     presented: bool,
     presented_full: bool,
@@ -334,6 +403,7 @@ impl Display {
             gui_tile_index: 0,
             gui_tile_x: 0,
             gui_tile_y: 0,
+            cursor_layers: [CursorLayer::EMPTY; CURSOR_LAYERS],
             backbuffer: None,
             presented: false,
             presented_full: false,
@@ -356,6 +426,159 @@ impl Display {
 
     fn set_all_dirty(&mut self, dirty: bool) {
         self.dirty.fill(if dirty { u64::MAX } else { 0 });
+    }
+
+    fn cursor_layer_index(owner: u32) -> Option<usize> {
+        match owner {
+            LOCKSCREEN_OWNER => Some(0),
+            ATRIUM_OWNER => Some(1),
+            _ => None,
+        }
+    }
+
+    fn cursor_bounds(x: i32, y: i32) -> GuiRect {
+        GuiRect::new(
+            x.saturating_sub(1),
+            y.saturating_sub(1),
+            POINTER_CURSOR_WIDTH as u32 + 3,
+            POINTER_CURSOR_HEIGHT as u32 + 3,
+        )
+    }
+
+    /// Register a compositor-owned cursor surface. Its retained scene stays
+    /// empty; motion is painted directly over the composed backbuffer.
+    pub fn register_cursor_surface(&mut self, owner: u32, surface: SurfaceHandle) {
+        let Some(index) = Self::cursor_layer_index(owner) else { return };
+        let old = self.cursor_layers[index];
+        if old.active() {
+            self.gui.invalidate_rect(Self::cursor_bounds(old.x, old.y));
+        }
+        self.cursor_layers[index] = CursorLayer { surface, x: 320, y: 200 };
+        self.gui.invalidate_rect(Self::cursor_bounds(320, 200));
+    }
+
+    pub fn is_cursor_surface(&self, surface: SurfaceHandle) -> bool {
+        self.cursor_layers.iter().any(|layer| layer.active() && layer.surface == surface)
+    }
+
+    pub fn unregister_cursor_surface(&mut self, surface: SurfaceHandle) {
+        for layer in &mut self.cursor_layers {
+            if layer.active() && layer.surface == surface {
+                let old = *layer;
+                self.gui.invalidate_rect(Self::cursor_bounds(old.x, old.y));
+                *layer = CursorLayer::EMPTY;
+            }
+        }
+    }
+
+    /// Apply the existing cursor scene message without sending it through the
+    /// retained-scene compositor. Returns whether the surface is a cursor.
+    pub fn apply_cursor_scene_op(&mut self, op: GuiSceneOp) -> bool {
+        let index = if let Some(index) = self
+            .cursor_layers
+            .iter()
+            .position(|layer| layer.active() && layer.surface == op.surface)
+        {
+            index
+        } else {
+            let is_cursor_shape = op.operation == GuiNodeOperation::Upsert
+                && op.node_id == 1
+                && op.command.kind == GuiDrawKind::FillRect
+                && op.command.width == 3
+                && op.command.height == 14;
+            if !is_cursor_shape || !self.gui.contains(op.surface) {
+                return false;
+            }
+            let Some(index) = Self::cursor_layer_index(op.surface.owner) else { return false };
+            self.register_cursor_surface(op.surface.owner, op.surface);
+            index
+        };
+        if !op.is_valid() {
+            return true;
+        }
+        if op.operation != GuiNodeOperation::Upsert || op.node_id != 1 {
+            return true;
+        }
+        let old = self.cursor_layers[index];
+        self.gui.invalidate_rect(Self::cursor_bounds(old.x, old.y));
+        self.cursor_layers[index].x = op.command.x;
+        self.cursor_layers[index].y = op.command.y;
+        self.gui.invalidate_rect(Self::cursor_bounds(op.command.x, op.command.y));
+        true
+    }
+
+    fn render_cursor_layers(
+        &self,
+        framebuffer: &mut [u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+        format: PixelFormat,
+        clip: GuiRect,
+    ) {
+        for layer in self.cursor_layers.iter().copied().filter(|layer| layer.active()) {
+            let bounds = Self::cursor_bounds(layer.x, layer.y);
+            if intersect(bounds, clip).is_empty() {
+                continue;
+            }
+            for row in 0..POINTER_CURSOR_HEIGHT {
+                for column in 0..POINTER_CURSOR_WIDTH {
+                    if !cursor_mask_has(row, column) {
+                        continue;
+                    }
+                    let x = layer.x.saturating_add(column);
+                    let y = layer.y.saturating_add(row);
+                    draw_cursor_pixel(
+                        framebuffer,
+                        width,
+                        height,
+                        stride,
+                        format,
+                        x.saturating_add(1),
+                        y.saturating_add(2),
+                        0x000000,
+                        150,
+                        clip,
+                    );
+                    for offset_y in -1..=1 {
+                        for offset_x in -1..=1 {
+                            if !cursor_mask_has(row + offset_y, column + offset_x) {
+                                draw_cursor_pixel(
+                                    framebuffer,
+                                    width,
+                                    height,
+                                    stride,
+                                    format,
+                                    x.saturating_add(offset_x),
+                                    y.saturating_add(offset_y),
+                                    0x101820,
+                                    u8::MAX,
+                                    clip,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            for row in 0..POINTER_CURSOR_HEIGHT {
+                for column in 0..POINTER_CURSOR_WIDTH {
+                    if cursor_mask_has(row, column) {
+                        draw_cursor_pixel(
+                            framebuffer,
+                            width,
+                            height,
+                            stride,
+                            format,
+                            layer.x.saturating_add(column),
+                            layer.y.saturating_add(row),
+                            0xffffff,
+                            u8::MAX,
+                            clip,
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn ensure_backbuffer(&mut self, bytes: usize) -> Result<(), DisplayError> {
@@ -441,6 +664,7 @@ impl Display {
         self.gui_tile_index = 0;
         self.gui_tile_x = 0;
         self.gui_tile_y = 0;
+        self.cursor_layers = [CursorLayer::EMPTY; CURSOR_LAYERS];
         self.presented = false;
         self.presented_full = false;
         self.presented_damage_count = 0;
@@ -889,6 +1113,7 @@ impl Display {
                     1,
                 );
             self.present_damage(framebuffer, width, height, stride, &[tile]);
+            self.render_cursor_layers(framebuffer, width, height, stride, format, tile);
             self.advance_gui_tile(rect, right, bottom);
         }
         if self.gui_tile_index >= self.gui_damage_count {
@@ -1259,6 +1484,62 @@ mod tests {
         }
         let pixel = (10 * 64 + 20) * 4;
         assert_eq!(&framebuffer[pixel..pixel + 4], &[0xff, 0xff, 0xff, 0]);
+    }
+
+    #[test]
+    fn compositor_cursor_moves_without_retaining_cursor_pixels() {
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
+        display.gui_mut().create(11, root).unwrap();
+
+        let mut lockscreen =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        lockscreen.bounds = root.bounds;
+        lockscreen.z_order = 1;
+        let lockscreen_handle = display.gui_mut().create(12, lockscreen).unwrap().surface;
+        let mut background =
+            logos_abi::GuiDrawBatch::new(lockscreen_handle, 1, logos_abi::GuiRect::SURFACE);
+        assert!(background.push(logos_abi::GuiDrawCommand::fill_surface(0x102030)));
+        display.gui_mut().update(12, background).unwrap();
+
+        let mut cursor =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 3);
+        cursor.bounds = root.bounds;
+        cursor.z_order = 3;
+        let cursor_handle = display.gui_mut().create(13, cursor).unwrap().surface;
+        display.register_cursor_surface(13, cursor_handle);
+
+        let mut framebuffer = std::vec![0; 64 * 32 * 4];
+        let mut draw = logos_abi::GuiSceneOp::upsert(
+            cursor_handle,
+            1,
+            1,
+            logos_abi::GuiDrawCommand::fill_rect(logos_abi::GuiRect::new(8, 8, 3, 14), 0xffffff),
+        );
+        assert!(display.apply_cursor_scene_op(draw));
+        loop {
+            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+            if !display.render_pending() {
+                break;
+            }
+        }
+        let old_pixel = (8 * 64 + 8) * 4;
+        assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0xff, 0xff, 0xff]);
+
+        draw.frame = 2;
+        draw.command.x = 32;
+        assert!(display.apply_cursor_scene_op(draw));
+        loop {
+            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+            if !display.render_pending() {
+                break;
+            }
+        }
+        let new_pixel = (8 * 64 + 32) * 4;
+        assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0x30, 0x20, 0x10]);
+        assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0xff, 0xff, 0xff]);
     }
 
     #[test]

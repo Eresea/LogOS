@@ -365,9 +365,7 @@ impl GuiSurfaceRegistry {
             return;
         }
         for index in 0..MAX_GUI_SURFACES {
-            if !self.slots[index].occupied()
-                || (self.slots[index].batch_count == 0 && self.slots[index].active_frame == 0)
-            {
+            if !self.slots[index].occupied() {
                 continue;
             }
             let overlap = intersect(rect, self.slots[index].bounds);

@@ -351,12 +351,11 @@ function Framebuffer-HasNativeCursor {
     param([string]$Path, [int]$X, [int]$Y)
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [IO.File]::ReadAllBytes($Path)
-    for ($row = 0; $row -lt 14; $row++) {
-        for ($column = 0; $column -lt 3; $column++) {
-            $index = 15 + (((($Y + $row) * 640) + $X + $column) * 3)
-            if ($bytes[$index] -ne 255 -or $bytes[$index + 1] -ne 255 -or $bytes[$index + 2] -ne 255) {
-                return $false
-            }
+    # Check the fixed arrow tip/body rather than the old solid 3x14 cursor bar.
+    foreach ($point in @(@(0, 0), @(1, 1), @(4, 4), @(8, 8), @(12, 12))) {
+        $index = 15 + (((($Y + $point[1]) * 640) + $X + $point[0]) * 3)
+        if ($bytes[$index] -ne 255 -or $bytes[$index + 1] -ne 255 -or $bytes[$index + 2] -ne 255) {
+            return $false
         }
     }
     return $true
@@ -513,7 +512,7 @@ try {
         if (-not (Framebuffer-HasPixels $pointerAfter)) {
         throw 'QEMU pointer proof lost the rendered framebuffer after input.'
         }
-        if (-not (Framebuffer-HasNativeCursor $pointerAfter 40 0)) {
+        if (-not (Framebuffer-HasNativeCursor $pointerAfter 360 220)) {
         throw 'QEMU pointer motion did not move the native cursor to the decoded position.'
         }
     }

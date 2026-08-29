@@ -10,7 +10,9 @@ Atrium keeps the signed 16-bit pointer position clamped to the fixed 640x400
 GUI profile and maintains its Home cursor surface. While LockScreen is visible,
 LockScreen owns a second cursor surface and updates it with the existing
 bounded GuiDrawBatch adapter; Display remains the sole framebuffer writer and
-rasterizes the cursor above retained GUI surfaces.
+keeps cursor pixels out of the retained backbuffer. It paints a fixed 18x24
+arrow sprite directly over only the damaged old/new cursor regions, restoring
+the underlying composition from the backbuffer before each move.
 
 LockScreen consumes the existing semantic InputMessage pointer shape and
 maps bounded pointer movement and left-button down events to fixed username,
@@ -25,7 +27,8 @@ ID, ELF image, ring, or payload ABI is added.
 
 - A native pointer is visible when the GUI starts; the LockScreen surface is
   destroyed when LockScreen hides and Atrium's Home surface remains available.
-- Cursor movement damages only the old and new fixed cursor rectangles.
+- Cursor movement damages only the old and new fixed cursor rectangles; cursor
+  pixels never become part of the retained scene or backbuffer.
 - LockScreen can focus fields and submit through mouse input while keyboard
   behavior remains unchanged.
 - Cursor rendering and lockscreen pointer proof remain dependent on the live

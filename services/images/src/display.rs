@@ -77,6 +77,22 @@ fn gui_status(error: logos_display::GuiRegistryError) -> logos_abi::GuiStatus {
     }
 }
 
+fn is_cursor_surface_request(
+    request: GuiSurfaceRequest,
+    owner: u32,
+    width: u32,
+    height: u32,
+) -> bool {
+    let expected_z = match owner {
+        12 => 2,
+        13 => 3,
+        _ => return false,
+    };
+    request.operation == GuiSurfaceOperation::CreateModal
+        && request.bounds == GuiRect::new(0, 0, width, height)
+        && request.z_order == expected_z
+}
+
 fn render(
     display: &mut logos_display::Display,
     framebuffer: &mut [u8],
@@ -192,6 +208,9 @@ pub extern "C" fn _start() -> ! {
         {
             progressed = true;
             let mut response = GuiSurfaceResponse::new(surface_request, GuiStatus::Malformed);
+            let cursor_request =
+                is_cursor_surface_request(surface_request, 13, config.width, config.height);
+            let cursor_destroy = display.is_cursor_surface(surface_request.surface);
             let result = match surface_request.operation {
                 GuiSurfaceOperation::CreateRoot | GuiSurfaceOperation::CreateModal => {
                     display.gui_mut().create(13, surface_request).map(|created| {
@@ -212,6 +231,11 @@ pub extern "C" fn _start() -> ! {
                 Ok(()) => GuiStatus::Ok,
                 Err(error) => gui_status(error),
             };
+            if result.is_ok() && cursor_request && response.surface.is_valid() {
+                display.register_cursor_surface(13, response.surface);
+            } else if result.is_ok() && cursor_destroy {
+                display.unregister_cursor_surface(surface_request.surface);
+            }
             let _ = common::ipc_send_handle(surface_response_capability, &response);
             gui_dirty = true;
         }
@@ -224,6 +248,13 @@ pub extern "C" fn _start() -> ! {
             progressed = true;
             let mut response =
                 GuiSurfaceResponse::new(lockscreen_surface_request, GuiStatus::Malformed);
+            let cursor_request = is_cursor_surface_request(
+                lockscreen_surface_request,
+                12,
+                config.width,
+                config.height,
+            );
+            let cursor_destroy = display.is_cursor_surface(lockscreen_surface_request.surface);
             let result = match lockscreen_surface_request.operation {
                 GuiSurfaceOperation::CreateRoot | GuiSurfaceOperation::CreateModal => {
                     display.gui_mut().create(12, lockscreen_surface_request).map(|created| {
@@ -246,6 +277,11 @@ pub extern "C" fn _start() -> ! {
                 Ok(()) => GuiStatus::Ok,
                 Err(error) => gui_status(error),
             };
+            if result.is_ok() && cursor_request && response.surface.is_valid() {
+                display.register_cursor_surface(12, response.surface);
+            } else if result.is_ok() && cursor_destroy {
+                display.unregister_cursor_surface(lockscreen_surface_request.surface);
+            }
             let _ = common::ipc_send_handle(lockscreen_response_capability, &response);
             gui_dirty = true;
         }
@@ -279,7 +315,9 @@ pub extern "C" fn _start() -> ! {
         let mut atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
         while common::ipc_receive_handle(atrium_gui_capability, &mut atrium_op) == IpcStatus::Ok {
             progressed = true;
-            let _ = display.gui_mut().apply_scene_op(13, atrium_op);
+            if !display.apply_cursor_scene_op(atrium_op) {
+                let _ = display.gui_mut().apply_scene_op(13, atrium_op);
+            }
             gui_dirty = true;
             atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
         }
@@ -288,7 +326,9 @@ pub extern "C" fn _start() -> ! {
             == IpcStatus::Ok
         {
             progressed = true;
-            let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
+            if !display.apply_cursor_scene_op(lockscreen_op) {
+                let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
+            }
             gui_dirty = true;
             lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
         }
