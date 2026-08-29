@@ -952,6 +952,10 @@ pub(super) fn notify_reschedule_cpus(source_cpu: usize) {
     }
     if let Some((_, apic_id)) = fallback {
         send_ipi(apic_id, u32::from(RESCHEDULE_VECTOR));
+    } else if cpu_count == 1 && SCHEDULER.current_task(source_cpu).is_some() {
+        // With one CPU there is no remote target to prompt after an IPC wake.
+        // A self-IPI lets the newly runnable receiver preempt the sender.
+        send_ipi(APIC_IDS[source_cpu].load(Ordering::Acquire), u32::from(RESCHEDULE_VECTOR));
     }
 }
 
