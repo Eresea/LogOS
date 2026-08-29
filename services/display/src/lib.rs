@@ -261,9 +261,11 @@ fn pixel_bytes(color: u32, format: PixelFormat) -> [u8; 4] {
     }
 }
 
-fn cursor_mask_has(row: i32, column: i32) -> bool {
-    (0..POINTER_CURSOR_HEIGHT).contains(&row)
-        && (0..POINTER_CURSOR_WIDTH).contains(&column)
+const fn cursor_mask_has(row: i32, column: i32) -> bool {
+    row >= 0
+        && row < POINTER_CURSOR_HEIGHT
+        && column >= 0
+        && column < POINTER_CURSOR_WIDTH
         && POINTER_CURSOR_MASK[row as usize] & (1u32 << column) != 0
 }
 
@@ -374,6 +376,7 @@ pub struct Display {
     gui_tile_x: i32,
     gui_tile_y: i32,
     cursor_layers: [CursorLayer; CURSOR_LAYERS],
+    hardware_cursor: bool,
     backbuffer: Option<Vec<u8>>,
     presented: bool,
     presented_full: bool,
@@ -404,6 +407,7 @@ impl Display {
             gui_tile_x: 0,
             gui_tile_y: 0,
             cursor_layers: [CursorLayer::EMPTY; CURSOR_LAYERS],
+            hardware_cursor: false,
             backbuffer: None,
             presented: false,
             presented_full: false,
@@ -500,10 +504,14 @@ impl Display {
             return true;
         }
         let old = self.cursor_layers[index];
-        self.gui.invalidate_rect(Self::cursor_bounds(old.x, old.y));
+        if !self.hardware_cursor {
+            self.gui.invalidate_rect(Self::cursor_bounds(old.x, old.y));
+        }
         self.cursor_layers[index].x = op.command.x;
         self.cursor_layers[index].y = op.command.y;
-        self.gui.invalidate_rect(Self::cursor_bounds(op.command.x, op.command.y));
+        if !self.hardware_cursor {
+            self.gui.invalidate_rect(Self::cursor_bounds(op.command.x, op.command.y));
+        }
         true
     }
 
@@ -516,6 +524,9 @@ impl Display {
         format: PixelFormat,
         clip: GuiRect,
     ) {
+        if self.hardware_cursor {
+            return;
+        }
         for layer in self.cursor_layers.iter().copied().filter(|layer| layer.active()) {
             let bounds = Self::cursor_bounds(layer.x, layer.y);
             if intersect(bounds, clip).is_empty() {
@@ -665,6 +676,7 @@ impl Display {
         self.gui_tile_x = 0;
         self.gui_tile_y = 0;
         self.cursor_layers = [CursorLayer::EMPTY; CURSOR_LAYERS];
+        self.hardware_cursor = false;
         self.presented = false;
         self.presented_full = false;
         self.presented_damage_count = 0;
@@ -678,6 +690,21 @@ impl Display {
         self.cursor_visible = !self.cursor_visible;
         self.mark_dirty(self.cursor_row * MAX_COLUMNS + self.cursor_column);
         true
+    }
+
+    pub fn set_hardware_cursor(&mut self, active: bool) {
+        if self.hardware_cursor == active {
+            return;
+        }
+        for layer in self.cursor_layers.iter().copied().filter(|layer| layer.active()) {
+            self.gui.invalidate_rect(Self::cursor_bounds(layer.x, layer.y));
+        }
+        self.hardware_cursor = active;
+    }
+
+    pub fn cursor_position(&self) -> Option<(i16, i16)> {
+        let layer = self.cursor_layers.iter().rev().copied().find(|layer| layer.active())?;
+        Some((layer.x as i16, layer.y as i16))
     }
 
     pub fn apply(&mut self, generation: u16, message: &RenderMessage) -> Result<(), DisplayError> {

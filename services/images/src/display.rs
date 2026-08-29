@@ -120,6 +120,22 @@ fn publish_present(display: &mut logos_display::Display, present_state: &Framebu
     }
 }
 
+fn publish_cursor(
+    display: &logos_display::Display,
+    present_state: &FramebufferPresentState,
+    published: &mut Option<(bool, i16, i16)>,
+) {
+    let (visible, x, y) =
+        display.cursor_position().map(|(x, y)| (true, x, y)).unwrap_or((false, 0, 0));
+    if *published == Some((visible, x, y)) {
+        return;
+    }
+    present_state.publish_cursor(visible, x, y);
+    *published = Some((visible, x, y));
+    #[cfg(feature = "qemu-proof")]
+    common::proof_line(b"LogOS vNext: Display cursor published");
+}
+
 static mut DISPLAY: logos_display::Display = logos_display::Display::new(1);
 
 #[unsafe(no_mangle)]
@@ -183,6 +199,7 @@ pub extern "C" fn _start() -> ! {
     let mut render_complete = false;
     let mut gui_render_pending = false;
     let mut gui_dirty = false;
+    let mut published_cursor = None;
     loop {
         if render_pending && render_complete || gui_dirty || gui_render_pending {
             // Rendering is intentionally resumed across loop iterations, but it
@@ -191,6 +208,7 @@ pub extern "C" fn _start() -> ! {
         } else {
             common::heartbeat_tick(&mut heartbeat_ticks);
         }
+        display.set_hardware_cursor(present_state.hardware_cursor());
         let generation = common::bootstrap_page().service.generation() as u16;
         if display.generation() != generation {
             display.replace_generation(generation);
@@ -351,6 +369,9 @@ pub extern "C" fn _start() -> ! {
             gui_render_pending = display.render_pending();
             gui_dirty = false;
             progressed = true;
+        }
+        if progressed {
+            publish_cursor(display, present_state, &mut published_cursor);
         }
         if !progressed {
             common::wait_on_capabilities(&[
