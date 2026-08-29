@@ -363,6 +363,28 @@ fn rects_touch(left: GuiRect, right: GuiRect) -> bool {
         && right.y <= left_bottom
 }
 
+fn append_present_rect(
+    damage: &mut [GuiRect; MAX_DISPLAY_PRESENT_RECTS],
+    count: &mut usize,
+    rect: GuiRect,
+) -> bool {
+    if rect.is_empty() {
+        return true;
+    }
+    for existing in damage[..*count].iter_mut() {
+        if rects_touch(*existing, rect) {
+            *existing = union_rect(*existing, rect);
+            return true;
+        }
+    }
+    if *count == damage.len() {
+        return false;
+    }
+    damage[*count] = rect;
+    *count += 1;
+    true
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisplayError {
     InvalidMessage,
@@ -884,6 +906,9 @@ impl Display {
         let backbuffer = self.backbuffer.as_mut().unwrap();
         let mut rendered = 0;
         let first_render = !self.surface_initialized;
+        let mut present_damage = [GuiRect::EMPTY; MAX_DISPLAY_PRESENT_RECTS];
+        let mut present_damage_count = 0;
+        let mut present_full = first_render;
         if first_render {
             self.surface_background = self.gui_background.unwrap_or(self.cells[0].background);
             let pixel = pixel_bytes(self.surface_background, format);
@@ -926,17 +951,21 @@ impl Display {
                 }
                 let row = index / MAX_COLUMNS;
                 let column = index % MAX_COLUMNS;
+                let cell_rect = GuiRect::new(
+                    (column * GLYPH_WIDTH) as i32,
+                    (row * GLYPH_HEIGHT) as i32,
+                    GLYPH_WIDTH as u32,
+                    GLYPH_HEIGHT as u32,
+                );
+                if !append_present_rect(&mut present_damage, &mut present_damage_count, cell_rect) {
+                    present_full = true;
+                }
                 if self.gui_background.is_some() {
                     *word &= !(1u64 << bit);
                     rendered += 1;
                     continue;
                 }
-                self.gui.invalidate_rect(logos_abi::GuiRect::new(
-                    (column * GLYPH_WIDTH) as i32,
-                    (row * GLYPH_HEIGHT) as i32,
-                    GLYPH_WIDTH as u32,
-                    GLYPH_HEIGHT as u32,
-                ));
+                self.gui.invalidate_rect(cell_rect);
                 let cell = self.cells[index];
                 let is_cursor = row == self.cursor_row && column == self.cursor_column;
                 if first_render
@@ -980,6 +1009,11 @@ impl Display {
         }
         if rendered != 0 {
             let (damage, damage_count) = self.gui.take_damage();
+            for rect in damage[..damage_count].iter().copied() {
+                if !append_present_rect(&mut present_damage, &mut present_damage_count, rect) {
+                    present_full = true;
+                }
+            }
             rendered += self.gui.render(
                 &mut self.glyph_cache,
                 backbuffer,
@@ -993,7 +1027,17 @@ impl Display {
         }
         let present = first_render || rendered != 0;
         if present {
-            self.present_all(framebuffer, width, height, stride);
+            if present_full {
+                self.present_all(framebuffer, width, height, stride);
+            } else {
+                self.present_damage(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    &present_damage[..present_damage_count],
+                );
+            }
         }
         Ok(rendered)
     }
@@ -1357,6 +1401,31 @@ mod tests {
         assert!(!full);
         assert_eq!(count, 1);
         assert_eq!(rects[0], damage[0]);
+    }
+
+    #[test]
+    fn legacy_cell_render_presents_only_changed_cells() {
+        let mut display = Display::new(1);
+        let mut message = RenderMessage::empty(MessageKind::RenderCells);
+        message.columns = 3;
+        message.rows = 1;
+        message.count = 1;
+        message.positions[0] = 0;
+        message.cells[0] = Cell { background: 0x102030, ..Cell::EMPTY };
+        let mut framebuffer = std::vec![0; 24 * 16 * 4];
+        display.apply(1, &message).unwrap();
+        display.render(&mut framebuffer, 24, 16, 24 * 4, PixelFormat::Bgr8).unwrap();
+        let _ = display.take_presented_damage();
+
+        message.positions[0] = 2;
+        message.cells[0] = Cell { background: 0x304050, ..Cell::EMPTY };
+        display.apply(1, &message).unwrap();
+        display.render(&mut framebuffer, 24, 16, 24 * 4, PixelFormat::Bgr8).unwrap();
+        let (full, rects, count) = display.take_presented_damage();
+        assert!(!full);
+        assert_eq!(count, 2);
+        assert_eq!(rects[0], GuiRect::new(0, 0, 8, 16));
+        assert_eq!(rects[1], GuiRect::new(16, 0, 8, 16));
     }
 
     #[test]
