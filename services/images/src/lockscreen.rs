@@ -17,7 +17,7 @@ use logos_abi::{
     GuiSurfaceRequest, GuiSurfaceResponse, InputMessage, IpcStatus, KeyCode, KeyState,
     SurfaceHandle, UserOperation, UserRequest, UserResponse, UserStatus,
 };
-use logos_ui::{UiComponentTree, UiEventRouter, UiExpression, UiStyleConditions, UiText};
+use logos_ui::{UiComponentTree, UiExpression, UiStyleConditions, UiText};
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_INPUT,
@@ -68,6 +68,7 @@ static mut LOGIN_UI_BUILD: logos_ui_compiler::UiBuild =
 static mut REGISTER_UI_BUILD: logos_ui_compiler::UiBuild =
     logos_ui_compiler::UiBuild::from_document(logos_ui::UiDocument::EMPTY);
 static mut UI_BUILDS_READY: bool = false;
+static mut UI_TREE: UiComponentTree = UiComponentTree::new();
 
 fn initialize_ui_builds() {
     unsafe {
@@ -105,10 +106,10 @@ fn draw_ui(
     _include_static: bool,
 ) -> IpcStatus {
     let build = ui_build(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
-    let mut router = UiEventRouter::new();
-    let Ok(mut tree) = UiComponentTree::from_document(&build.document, &mut router) else {
+    let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
+    if tree.reset_from_document(&build.document).is_err() {
         return IpcStatus::Malformed;
-    };
+    }
     let Some(layout) = logos_shell::LoginLayout::from_build(build, CURSOR_BOUNDS) else {
         return IpcStatus::Malformed;
     };
@@ -164,7 +165,7 @@ fn draw_ui(
     };
     if lock.failure()
         && !set_named_text(
-            &mut tree,
+            tree,
             b"title",
             if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
                 b"Retry setup"
@@ -177,13 +178,13 @@ fn draw_ui(
     }
 
     let (username, password) = lock.credentials();
-    if !set_named_value(&mut tree, build, b"username", username, false)
-        || !set_named_value(&mut tree, build, b"password", password, true)
+    if !set_named_value(tree, build, b"username", username, false)
+        || !set_named_value(tree, build, b"password", password, true)
     {
         return IpcStatus::Malformed;
     }
     if lock.mode() == logos_lockscreen::LockScreenMode::Claim
-        && !set_named_value(&mut tree, build, b"confirmPassword", lock.confirmation(), true)
+        && !set_named_value(tree, build, b"confirmPassword", lock.confirmation(), true)
     {
         return IpcStatus::Malformed;
     }
@@ -200,7 +201,7 @@ fn draw_ui(
     let scene = match logos_ui_graphics::emit(
         surface,
         sequence,
-        &tree,
+        tree,
         logos_ui_graphics::UiSceneTheme::DEFAULT,
     ) {
         Ok(scene) => scene,

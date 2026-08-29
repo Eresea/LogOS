@@ -213,8 +213,8 @@ impl UiComponentTree {
         document: &crate::UiDocument,
         router: &mut UiEventRouter,
     ) -> Result<Self, UiComponentTreeError> {
-        let blueprint = document.to_blueprint().map_err(map_tree_error)?;
-        let host = Self::from_blueprint(&blueprint)?;
+        let mut host = Self::new();
+        host.reset_from_document(document)?;
         host.install_document_hooks(document, router)?;
         Ok(host)
     }
@@ -229,12 +229,29 @@ impl UiComponentTree {
         Ok(Self { tree, components, focused: UiNodeHandle::EMPTY })
     }
 
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             tree: UiTree::new(),
             components: [UiComponentSlot::EMPTY; MAX_UI_COMPONENTS],
             focused: UiNodeHandle::EMPTY,
         }
+    }
+
+    pub fn reset_from_document(
+        &mut self,
+        document: &crate::UiDocument,
+    ) -> Result<(), UiComponentTreeError> {
+        let blueprint = document.to_blueprint().map_err(map_tree_error)?;
+        let tree = UiTree::from_blueprint(&blueprint).map_err(map_tree_error)?;
+        let mut components = [UiComponentSlot::EMPTY; MAX_UI_COMPONENTS];
+        for (index, component) in components.iter_mut().enumerate().take(blueprint.len()) {
+            let spec = blueprint.spec(index).ok_or(UiComponentTreeError::Stale)?;
+            *component = UiComponentSlot::from_kind(spec.kind);
+        }
+        self.tree = tree;
+        self.components = components;
+        self.focused = UiNodeHandle::EMPTY;
+        Ok(())
     }
 
     pub fn insert(
