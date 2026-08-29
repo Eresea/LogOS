@@ -481,6 +481,10 @@ impl GuiSurfaceRegistry {
         (damage, count)
     }
 
+    pub const fn has_damage(&self) -> bool {
+        self.damage_count != 0
+    }
+
     pub fn contains(&self, handle: SurfaceHandle) -> bool {
         self.lookup(handle).is_ok()
     }

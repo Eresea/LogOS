@@ -458,13 +458,26 @@ pub extern "C" fn _start() -> ! {
             gui_dirty = true;
             gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
         }
+        let mut cursor_presented = false;
         let mut atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
         while common::ipc_receive_handle(atrium_gui_capability, &mut atrium_op) == IpcStatus::Ok {
             progressed = true;
-            if !display.apply_cursor_scene_op(atrium_op) {
+            if display.apply_cursor_scene_op(atrium_op) {
+                if display.repaint_cursor(
+                    framebuffer,
+                    config.width as usize,
+                    config.height as usize,
+                    config.stride as usize * 4,
+                    format,
+                ) {
+                    cursor_presented = true;
+                } else {
+                    gui_dirty = true;
+                }
+            } else {
                 let _ = display.gui_mut().apply_scene_op(13, atrium_op);
+                gui_dirty = true;
             }
-            gui_dirty = true;
             atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
         }
         let mut lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
@@ -472,11 +485,26 @@ pub extern "C" fn _start() -> ! {
             == IpcStatus::Ok
         {
             progressed = true;
-            if !display.apply_cursor_scene_op(lockscreen_op) {
+            if display.apply_cursor_scene_op(lockscreen_op) {
+                if display.repaint_cursor(
+                    framebuffer,
+                    config.width as usize,
+                    config.height as usize,
+                    config.stride as usize * 4,
+                    format,
+                ) {
+                    cursor_presented = true;
+                } else {
+                    gui_dirty = true;
+                }
+            } else {
                 let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
+                gui_dirty = true;
             }
-            gui_dirty = true;
             lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
+        }
+        if cursor_presented {
+            publish_present(display, present_state);
         }
         if render_pending && render_complete && !gui_render_pending {
             let fps_changed = render(

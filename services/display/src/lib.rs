@@ -28,6 +28,7 @@ const GUI_TILE_SIZE: u32 = 64;
 // short enough for input and watchdog progress.
 const GUI_TILES_PER_STEP: usize = 8;
 const CURSOR_LAYERS: usize = 2;
+const CURSOR_DAMAGE_RECTS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
 const ATRIUM_OWNER: u32 = 13;
 const POINTER_CURSOR_WIDTH: i32 = 18;
@@ -350,6 +351,17 @@ fn union_rect(left: GuiRect, right: GuiRect) -> GuiRect {
     GuiRect::new(x, y, right_edge.saturating_sub(x) as u32, bottom.saturating_sub(y) as u32)
 }
 
+fn rects_touch(left: GuiRect, right: GuiRect) -> bool {
+    let left_right = left.x.saturating_add(left.width as i32);
+    let right_right = right.x.saturating_add(right.width as i32);
+    let left_bottom = left.y.saturating_add(left.height as i32);
+    let right_bottom = right.y.saturating_add(right.height as i32);
+    left.x <= right_right
+        && right.x <= left_right
+        && left.y <= right_bottom
+        && right.y <= left_bottom
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DisplayError {
     InvalidMessage,
@@ -378,6 +390,8 @@ pub struct Display {
     gui_tile_x: i32,
     gui_tile_y: i32,
     cursor_layers: [CursorLayer; CURSOR_LAYERS],
+    cursor_damage: [GuiRect; CURSOR_DAMAGE_RECTS],
+    cursor_damage_count: usize,
     hardware_cursor: bool,
     backbuffer: Option<Vec<u8>>,
     presented: bool,
@@ -409,6 +423,8 @@ impl Display {
             gui_tile_x: 0,
             gui_tile_y: 0,
             cursor_layers: [CursorLayer::EMPTY; CURSOR_LAYERS],
+            cursor_damage: [GuiRect::EMPTY; CURSOR_DAMAGE_RECTS],
+            cursor_damage_count: 0,
             hardware_cursor: false,
             backbuffer: None,
             presented: false,
@@ -511,12 +527,79 @@ impl Display {
         }
         let old = self.cursor_layers[index];
         if !self.hardware_cursor {
-            self.gui.invalidate_rect(Self::cursor_bounds(old.x, old.y));
+            let old_bounds = Self::cursor_bounds(old.x, old.y);
+            let new_bounds = Self::cursor_bounds(op.command.x, op.command.y);
+            if self.can_repaint_cursor_now() {
+                self.queue_cursor_damage(old_bounds);
+                self.queue_cursor_damage(new_bounds);
+            } else {
+                self.gui.invalidate_rect(old_bounds);
+                self.gui.invalidate_rect(new_bounds);
+            }
         }
         self.cursor_layers[index].x = op.command.x;
         self.cursor_layers[index].y = op.command.y;
-        if !self.hardware_cursor {
-            self.gui.invalidate_rect(Self::cursor_bounds(op.command.x, op.command.y));
+        true
+    }
+
+    fn can_repaint_cursor_now(&self) -> bool {
+        self.backbuffer.is_some()
+            && self.surface_initialized
+            && !self.gui_background_pending
+            && self.gui_damage_count == 0
+            && !self.gui.has_damage()
+            && self.dirty.iter().all(|word| *word == 0)
+            && self.cursor_damage_count == 0
+    }
+
+    fn queue_cursor_damage(&mut self, rect: GuiRect) {
+        if rect.is_empty() {
+            return;
+        }
+        for existing in self.cursor_damage[..self.cursor_damage_count].iter_mut() {
+            if rects_touch(*existing, rect) {
+                *existing = union_rect(*existing, rect);
+                return;
+            }
+        }
+        if self.cursor_damage_count < CURSOR_DAMAGE_RECTS {
+            self.cursor_damage[self.cursor_damage_count] = rect;
+            self.cursor_damage_count += 1;
+        }
+    }
+
+    /// Repaints only queued software-cursor rectangles over the current
+    /// backbuffer, avoiding the tiled GUI path for pointer motion.
+    pub fn repaint_cursor(
+        &mut self,
+        framebuffer: &mut [u8],
+        width: usize,
+        height: usize,
+        stride: usize,
+        format: PixelFormat,
+    ) -> bool {
+        if self.hardware_cursor || self.cursor_damage_count == 0 {
+            return false;
+        }
+        let required = match stride.checked_mul(height) {
+            Some(required) if stride >= width * 4 && framebuffer.len() >= required => required,
+            _ => return false,
+        };
+        if self.backbuffer.as_ref().is_none_or(|backbuffer| backbuffer.len() < required) {
+            return false;
+        }
+        let screen = GuiRect::new(0, 0, width as u32, height as u32);
+        let damage = self.cursor_damage;
+        let count = self.cursor_damage_count;
+        self.cursor_damage = [GuiRect::EMPTY; CURSOR_DAMAGE_RECTS];
+        self.cursor_damage_count = 0;
+        for rect in damage[..count].iter().copied() {
+            let rect = intersect(rect, screen);
+            if rect.is_empty() {
+                continue;
+            }
+            self.present_damage(framebuffer, width, height, stride, &[rect]);
+            self.render_cursor_layers(framebuffer, width, height, stride, format, rect);
         }
         true
     }
@@ -682,6 +765,8 @@ impl Display {
         self.gui_tile_x = 0;
         self.gui_tile_y = 0;
         self.cursor_layers = [CursorLayer::EMPTY; CURSOR_LAYERS];
+        self.cursor_damage = [GuiRect::EMPTY; CURSOR_DAMAGE_RECTS];
+        self.cursor_damage_count = 0;
         self.hardware_cursor = false;
         self.presented = false;
         self.presented_full = false;
@@ -1564,12 +1649,9 @@ mod tests {
         draw.frame = 2;
         draw.command.x = 32;
         assert!(display.apply_cursor_scene_op(draw));
-        loop {
-            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
-            if !display.render_pending() {
-                break;
-            }
-        }
+        assert!(!display.render_pending());
+        assert!(display.repaint_cursor(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8));
+        assert!(!display.render_pending());
         let new_pixel = (8 * 64 + 32) * 4;
         assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0x30, 0x20, 0x10]);
         assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0xff, 0xff, 0xff]);
