@@ -247,6 +247,7 @@ dependencies = [
  "logos-terminal",
  "logos-ui",
  "logos-ui-compiler",
+ "logos-ui-graphics",
  "logos-user",
 ]
 

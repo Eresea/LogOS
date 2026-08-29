@@ -29,6 +29,7 @@ logos-fetch = { path = "../fetch" }
 logos-shell = { path = "../shell" }
 logos-ui-compiler = { path = "../../ui-compiler" }
 logos-ui = { path = "../../ui" }
+logos-ui-graphics = { path = "../../ui-graphics" }
 logos-lockscreen = { path = "../lockscreen" }
 logos-atrium = { path = "../atrium" }
 

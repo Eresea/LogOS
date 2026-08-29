@@ -4,10 +4,21 @@
 
 mod common;
 
+mod login_ui {
+    include!(concat!(env!("OUT_DIR"), "/login_ui.rs"));
+}
+
+mod register_ui {
+    include!(concat!(env!("OUT_DIR"), "/register_ui.rs"));
+}
+
 use logos_abi::{
     GuiDrawBatch, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSurfaceOperation,
     GuiSurfaceRequest, GuiSurfaceResponse, InputMessage, IpcStatus, KeyCode, KeyState,
     SurfaceHandle, UserOperation, UserRequest, UserResponse, UserStatus,
+};
+use logos_ui::{
+    UiComponentTree, UiEventRouter, UiExpression, UiNodeKind, UiStyleConditions, UiText,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -210,6 +221,162 @@ fn draw(
     common::ipc_send_scene_batch(display, &button_text, if claim { 15 } else { 13 })
 }
 
+fn draw_ui(
+    display: logos_abi::CapabilityHandle,
+    surface: SurfaceHandle,
+    lock: &logos_lockscreen::LockScreen,
+    sequence: u32,
+    _include_static: bool,
+) -> IpcStatus {
+    let build = if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
+        register_ui::build()
+    } else {
+        login_ui::build()
+    };
+    let mut router = UiEventRouter::new();
+    let Ok(mut tree) = UiComponentTree::from_document(&build.document, &mut router) else {
+        return IpcStatus::Malformed;
+    };
+    let Some(layout) = logos_shell::LoginLayout::from_build(&build, CURSOR_BOUNDS) else {
+        return IpcStatus::Malformed;
+    };
+
+    for index in 0..build.document.node_count() {
+        let Ok(handle) = tree.tree().handle_at(index) else { return IpcStatus::Malformed };
+        let Some(layout_node) = layout.node(index as u16) else { return IpcStatus::Malformed };
+        let bounds = if index == 0 {
+            logos_ui::UiRect::new(
+                CURSOR_BOUNDS.x,
+                CURSOR_BOUNDS.y,
+                CURSOR_BOUNDS.width,
+                CURSOR_BOUNDS.height,
+            )
+        } else {
+            logos_ui::UiRect::new(
+                layout_node.bounds.x,
+                layout_node.bounds.y,
+                layout_node.bounds.width,
+                layout_node.bounds.height,
+            )
+        };
+        if tree.tree_mut().set_bounds(handle, bounds).is_err() {
+            return IpcStatus::Malformed;
+        }
+        if tree
+            .tree_mut()
+            .set_focused(
+                handle,
+                field_for_node(&build, index as u16).is_some_and(|field| field == lock.field()),
+            )
+            .is_err()
+        {
+            return IpcStatus::Malformed;
+        }
+    }
+
+    let mut conditions = UiStyleConditions::EMPTY;
+    if let Some(failure) = UiExpression::from_bytes(b"failure") {
+        let _ = conditions.set(failure, lock.failure());
+    }
+    for index in 0..build.document.node_count() {
+        if tree.apply_document_styles(&build.document, index as u16, &conditions).is_err() {
+            return IpcStatus::Malformed;
+        }
+    }
+
+    let set_named_text = |tree: &mut UiComponentTree, name: &[u8], text: &[u8]| {
+        let Some(index) = build.document.node_index_by_name(name) else { return false };
+        let Ok(handle) = tree.tree().handle_at(usize::from(index)) else { return false };
+        let Some(text) = UiText::from_bytes(text) else { return false };
+        tree.set_text(handle, text).is_ok()
+    };
+    if lock.failure()
+        && !set_named_text(
+            &mut tree,
+            b"title",
+            if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
+                b"Retry setup"
+            } else {
+                b"Retry login"
+            },
+        )
+    {
+        return IpcStatus::Malformed;
+    }
+
+    let (username, password) = lock.credentials();
+    if !set_named_value(&mut tree, &build, b"username", username, false)
+        || !set_named_value(&mut tree, &build, b"password", password, true)
+    {
+        return IpcStatus::Malformed;
+    }
+    if lock.mode() == logos_lockscreen::LockScreenMode::Claim
+        && !set_named_value(&mut tree, &build, b"confirmPassword", lock.confirmation(), true)
+    {
+        return IpcStatus::Malformed;
+    }
+    let Some(submit_index) = build.document.node_index_by_name(b"submit") else {
+        return IpcStatus::Malformed;
+    };
+    let Ok(submit) = tree.tree().handle_at(usize::from(submit_index)) else {
+        return IpcStatus::Malformed;
+    };
+    if tree.set_disabled(submit, !lock.form().can_submit()).is_err() {
+        return IpcStatus::Malformed;
+    }
+
+    let scene = match logos_ui_graphics::emit(
+        surface,
+        sequence,
+        &tree,
+        logos_ui_graphics::UiSceneTheme::DEFAULT,
+    ) {
+        Ok(scene) => scene,
+        Err(_) => return IpcStatus::Malformed,
+    };
+    for operation in scene.as_slice() {
+        let status = common::ipc_send_handle(display, operation);
+        if status != IpcStatus::Ok {
+            return status;
+        }
+    }
+    IpcStatus::Ok
+}
+
+fn field_for_node(
+    build: &logos_ui_compiler::UiBuild,
+    index: u16,
+) -> Option<logos_lockscreen::LockScreenField> {
+    let node = build.document.node(usize::from(index))?;
+    match node.key.as_bytes() {
+        b"username" => Some(logos_lockscreen::LockScreenField::Username),
+        b"password" => Some(logos_lockscreen::LockScreenField::Password),
+        b"confirmPassword" => Some(logos_lockscreen::LockScreenField::ConfirmPassword),
+        b"submit" => Some(logos_lockscreen::LockScreenField::Submit),
+        _ => None,
+    }
+}
+
+fn set_named_value(
+    tree: &mut UiComponentTree,
+    build: &logos_ui_compiler::UiBuild,
+    name: &[u8],
+    value: &[u8],
+    masked: bool,
+) -> bool {
+    let Some(index) = build.document.node_index_by_name(name) else { return false };
+    let Ok(handle) = tree.tree().handle_at(usize::from(index)) else { return false };
+    let mut bytes = [0u8; logos_ui::MAX_UI_TEXT_BYTES];
+    let length = value.len().min(bytes.len());
+    if masked {
+        bytes[..length].fill(b'*');
+    } else {
+        bytes[..length].copy_from_slice(&value[..length]);
+    }
+    let Some(text) = UiText::from_bytes(&bytes[..length]) else { return false };
+    tree.set_value(handle, text).is_ok()
+}
+
 fn next_id(next: &mut u32) -> u32 {
     let value = *next;
     *next = next.wrapping_add(1).max(1);
@@ -307,7 +474,7 @@ pub extern "C" fn _start() -> ! {
                 sequence = sequence.wrapping_add(1).max(1);
                 pending_draw_sequence = sequence;
             }
-            match draw(display, surface, lock, pending_draw_sequence, include_static) {
+            match draw_ui(display, surface, lock, pending_draw_sequence, include_static) {
                 IpcStatus::Ok => {
                     pending_draw = None;
                     pending_draw_sequence = 0;
