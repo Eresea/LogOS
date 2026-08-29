@@ -17,9 +17,7 @@ use logos_abi::{
     GuiSurfaceRequest, GuiSurfaceResponse, InputMessage, IpcStatus, KeyCode, KeyState,
     SurfaceHandle, UserOperation, UserRequest, UserResponse, UserStatus,
 };
-use logos_ui::{
-    UiComponentTree, UiEventRouter, UiExpression, UiNodeKind, UiStyleConditions, UiText,
-};
+use logos_ui::{UiComponentTree, UiEventRouter, UiExpression, UiStyleConditions, UiText};
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_INPUT,
@@ -66,12 +64,6 @@ const SHELL_RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_con
 const CURSOR_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 400);
 static mut LOCKSCREEN: logos_lockscreen::LockScreen = logos_lockscreen::LockScreen::new();
 
-fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) {
-    if let Some(command) = GuiDrawCommand::glyph_run(x, y, color, text) {
-        let _ = batch.push(command);
-    }
-}
-
 #[cfg(feature = "qemu-proof")]
 fn proof_line(message: &[u8]) {
     common::proof_line(message);
@@ -79,147 +71,6 @@ fn proof_line(message: &[u8]) {
 
 #[cfg(not(feature = "qemu-proof"))]
 fn proof_line(_message: &[u8]) {}
-
-fn centered_text_origin(bounds: GuiRect, text: &[u8]) -> (i32, i32) {
-    let text_width = (text.len() as i32).saturating_mul(8);
-    let text_height = 16;
-    (
-        bounds.x.saturating_add((bounds.width as i32).saturating_sub(text_width).max(0) / 2),
-        bounds.y.saturating_add((bounds.height as i32).saturating_sub(text_height).max(0) / 2),
-    )
-}
-
-fn field_color(
-    lock: &logos_lockscreen::LockScreen,
-    field: logos_lockscreen::LockScreenField,
-) -> u32 {
-    if lock.field() == field {
-        0x355c8c
-    } else if lock.hovered() == Some(field) {
-        0x2d4562
-    } else {
-        0x263548
-    }
-}
-
-fn draw(
-    display: logos_abi::CapabilityHandle,
-    surface: SurfaceHandle,
-    lock: &logos_lockscreen::LockScreen,
-    sequence: u32,
-    include_static: bool,
-) -> IpcStatus {
-    let panel = GuiRect::new(150, 48, 340, 304);
-    if include_static {
-        let mut background = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
-        background.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-        let _ = background.push(GuiDrawCommand::fill_surface(0x101820));
-        let _ = background.push(GuiDrawCommand::fill_rounded_rect(panel, 0x182535, 16));
-        let status = common::ipc_send_scene_batch(display, &background, 1);
-        if status != IpcStatus::Ok {
-            return status;
-        }
-
-        let mut labels = GuiDrawBatch::new(surface, sequence, panel);
-        labels.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-        let _ = labels.push(GuiDrawCommand::stroke_rounded_rect(panel, 0x4b89dc, 16, 2));
-        push_text(
-            &mut labels,
-            176,
-            84,
-            0xffffff,
-            if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
-                b"Create admin"
-            } else {
-                b"Unlock LogOS"
-            },
-        );
-        push_text(&mut labels, 176, 116, 0xb8c7da, b"Username");
-        let status = common::ipc_send_scene_batch(display, &labels, 3);
-        if status != IpcStatus::Ok {
-            return status;
-        }
-    }
-
-    let (username, password) = lock.credentials();
-    let confirmation = lock.confirmation();
-    let mut masked = [0u8; logos_abi::MAX_GUI_TEXT_BYTES];
-    let password_len = password.len().min(masked.len());
-    masked[..password_len].fill(b'*');
-    let mut masked_confirmation = [0u8; logos_abi::MAX_GUI_TEXT_BYTES];
-    let confirmation_len = confirmation.len().min(masked_confirmation.len());
-    masked_confirmation[..confirmation_len].fill(b'*');
-    let mut fields = GuiDrawBatch::new(surface, sequence, GuiRect::new(170, 100, 300, 220));
-    fields.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = fields.push(GuiDrawCommand::fill_rounded_rect(
-        logos_lockscreen::USERNAME_BOUNDS,
-        field_color(lock, logos_lockscreen::LockScreenField::Username),
-        8,
-    ));
-    push_text(&mut fields, 184, 142, 0xffffff, username);
-    push_text(&mut fields, 176, 176, 0xb8c7da, b"Password");
-    let status = common::ipc_send_scene_batch(display, &fields, 6);
-    if status != IpcStatus::Ok {
-        return status;
-    }
-
-    let mut password_field = GuiDrawBatch::new(surface, sequence, GuiRect::new(170, 192, 300, 120));
-    password_field.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = password_field.push(GuiDrawCommand::fill_rounded_rect(
-        logos_lockscreen::PASSWORD_BOUNDS,
-        field_color(lock, logos_lockscreen::LockScreenField::Password),
-        8,
-    ));
-    push_text(&mut password_field, 184, 202, 0xffffff, &masked[..password_len]);
-    if lock.mode() == logos_lockscreen::LockScreenMode::Claim {
-        push_text(&mut password_field, 176, 236, 0xb8c7da, b"Confirm password");
-    }
-    let status = common::ipc_send_scene_batch(display, &password_field, 9);
-    if status != IpcStatus::Ok {
-        return status;
-    }
-
-    let claim = lock.mode() == logos_lockscreen::LockScreenMode::Claim;
-    let submit_bounds =
-        if claim { logos_lockscreen::CLAIM_SUBMIT_BOUNDS } else { logos_lockscreen::SUBMIT_BOUNDS };
-    let mut action = GuiDrawBatch::new(surface, sequence, GuiRect::new(170, 240, 300, 104));
-    action.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    if claim {
-        let _ = action.push(GuiDrawCommand::fill_rounded_rect(
-            logos_lockscreen::CONFIRM_PASSWORD_BOUNDS,
-            field_color(lock, logos_lockscreen::LockScreenField::ConfirmPassword),
-            8,
-        ));
-        push_text(
-            &mut action,
-            184,
-            262,
-            0xffffff,
-            if confirmation_len == 0 { b" " } else { &masked_confirmation[..confirmation_len] },
-        );
-    }
-    let _ = action.push(GuiDrawCommand::fill_rounded_rect(
-        submit_bounds,
-        if lock.hovered() == Some(logos_lockscreen::LockScreenField::Submit)
-            || lock.field() == logos_lockscreen::LockScreenField::Submit
-        {
-            0x4b82f2
-        } else {
-            0x356bd8
-        },
-        8,
-    ));
-    let status = common::ipc_send_scene_batch(display, &action, 12);
-    if status != IpcStatus::Ok {
-        return status;
-    }
-
-    let label = if claim { b"Create" } else { b"Unlock" };
-    let (text_x, text_y) = centered_text_origin(submit_bounds, label);
-    let mut button_text = GuiDrawBatch::new(surface, sequence, submit_bounds);
-    push_text(&mut button_text, text_x, text_y, 0xffffff, label);
-    common::ipc_send_scene_batch(display, &button_text, if claim { 15 } else { 13 })
-}
 
 fn draw_ui(
     display: logos_abi::CapabilityHandle,
