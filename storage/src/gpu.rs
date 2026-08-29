@@ -5,10 +5,13 @@ pub const VIRTIO_GPU_CMD_SET_SCANOUT: u32 = 0x0103;
 pub const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 pub const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 pub const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+pub const VIRTIO_GPU_CMD_UPDATE_CURSOR: u32 = 0x0300;
+pub const VIRTIO_GPU_CMD_MOVE_CURSOR: u32 = 0x0301;
 
 pub const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 pub const VIRTIO_GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
 pub const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
+pub const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 pub const VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM: u32 = 68;
 pub const VIRTIO_GPU_FLAG_FENCE: u32 = 1;
 pub const VIRTIO_GPU_CTRL_HEADER_BYTES: usize = 24;
@@ -42,6 +45,8 @@ pub enum VirtioGpuCommand {
     SetScanout { scanout_id: u32, resource_id: u32, rect: VirtioGpuRect },
     TransferToHost2d { resource_id: u32, rect: VirtioGpuRect },
     ResourceFlush { resource_id: u32, rect: VirtioGpuRect },
+    UpdateCursor { x: i16, y: i16, scanout_id: u32, resource_id: u32, hot_x: u32, hot_y: u32 },
+    MoveCursor { x: i16, y: i16, scanout_id: u32 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +65,7 @@ impl VirtioGpuCommand {
             Self::SetScanout { .. } => 56,
             Self::TransferToHost2d { .. } => 56,
             Self::ResourceFlush { .. } => 48,
+            Self::UpdateCursor { .. } | Self::MoveCursor { .. } => 56,
         }
     }
 
@@ -129,6 +135,24 @@ impl VirtioGpuCommand {
                 put_rect(buffer, 24, rect)?;
                 put_u32(buffer, 40, resource_id);
                 VIRTIO_GPU_CMD_RESOURCE_FLUSH
+            }
+            Self::UpdateCursor { x, y, scanout_id, resource_id, hot_x, hot_y } => {
+                if resource_id != 0 && (hot_x >= 24 || hot_y >= 24) {
+                    return Err(VirtioGpuEncodeError::InvalidResource);
+                }
+                put_u32(buffer, 24, scanout_id);
+                put_u32(buffer, 28, x as u16 as u32);
+                put_u32(buffer, 32, y as u16 as u32);
+                put_u32(buffer, 40, resource_id);
+                put_u32(buffer, 44, hot_x);
+                put_u32(buffer, 48, hot_y);
+                VIRTIO_GPU_CMD_UPDATE_CURSOR
+            }
+            Self::MoveCursor { x, y, scanout_id } => {
+                put_u32(buffer, 24, scanout_id);
+                put_u32(buffer, 28, x as u16 as u32);
+                put_u32(buffer, 32, y as u16 as u32);
+                VIRTIO_GPU_CMD_MOVE_CURSOR
             }
         };
         put_u32(buffer, 0, kind);
@@ -232,5 +256,47 @@ mod tests {
         );
         assert_eq!(VirtioGpuRect::new(0, 0, 0, 1), None);
         assert!(!response_is_ok(VIRTIO_GPU_RESP_ERR_UNSPEC));
+    }
+
+    #[test]
+    fn encodes_bounded_cursor_update_and_move_commands() {
+        let mut buffer = [0; VIRTIO_GPU_MAX_COMMAND_BYTES];
+        let update = VirtioGpuCommand::UpdateCursor {
+            x: -12,
+            y: 34,
+            scanout_id: 0,
+            resource_id: 2,
+            hot_x: 0,
+            hot_y: 0,
+        };
+        assert_eq!(update.encode(11, &mut buffer).unwrap(), 56);
+        assert_eq!(
+            u32::from_le_bytes(buffer[0..4].try_into().unwrap()),
+            VIRTIO_GPU_CMD_UPDATE_CURSOR
+        );
+        assert_eq!(u16::from_le_bytes(buffer[28..30].try_into().unwrap()), (-12i16) as u16);
+        assert_eq!(u32::from_le_bytes(buffer[40..44].try_into().unwrap()), 2);
+
+        let movement = VirtioGpuCommand::MoveCursor { x: 320, y: 200, scanout_id: 0 };
+        assert_eq!(movement.encode(12, &mut buffer).unwrap(), 56);
+        assert_eq!(
+            u32::from_le_bytes(buffer[0..4].try_into().unwrap()),
+            VIRTIO_GPU_CMD_MOVE_CURSOR
+        );
+        assert_eq!(u32::from_le_bytes(buffer[28..32].try_into().unwrap()), 320);
+        assert_eq!(u32::from_le_bytes(buffer[32..36].try_into().unwrap()), 200);
+
+        assert!(
+            VirtioGpuCommand::UpdateCursor {
+                x: 0,
+                y: 0,
+                scanout_id: 0,
+                resource_id: 2,
+                hot_x: 24,
+                hot_y: 0,
+            }
+            .encode(13, &mut buffer)
+            .is_err()
+        );
     }
 }
