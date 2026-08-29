@@ -1284,8 +1284,16 @@ pub extern "C" fn _start() -> ! {
                 cursor_x = pointer.x.clamp(0, 639);
                 cursor_y = pointer.y.clamp(0, 399);
                 if cursor_surface.is_valid() {
-                    pending_cursor_draw =
-                        Some(cursor_op(cursor_surface, cursor_x, cursor_y, &mut cursor_sequence));
+                    let cursor =
+                        cursor_op(cursor_surface, cursor_x, cursor_y, &mut cursor_sequence);
+                    match common::ipc_send_handle(display, &cursor) {
+                        IpcStatus::Ok => pending_cursor_draw = None,
+                        IpcStatus::Full => pending_cursor_draw = Some(cursor),
+                        _ => {
+                            pending_cursor_draw = None;
+                            cursor_surface = SurfaceHandle::EMPTY;
+                        }
+                    }
                 }
             }
             if is_fps_toggle(&event) {
