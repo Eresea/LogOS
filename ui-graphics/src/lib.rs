@@ -30,6 +30,7 @@ impl UiSceneTheme {
 pub enum UiSceneError {
     InvalidSurface,
     InvalidFrame,
+    InvalidCommand,
     Capacity,
 }
 
@@ -170,6 +171,9 @@ fn push_text(
     text: &[u8],
     text_color: u32,
 ) -> Result<(), UiSceneError> {
+    if text.is_empty() {
+        return Ok(());
+    }
     let Some(command) = GuiDrawCommand::glyph_run(
         node.bounds.x.saturating_add(4),
         node.bounds.y.saturating_add(4),
@@ -189,6 +193,9 @@ fn push_upsert(
     fragment: u32,
     command: GuiDrawCommand,
 ) -> Result<(), UiSceneError> {
+    if !command.is_valid() {
+        return Err(UiSceneError::InvalidCommand);
+    }
     let node_id = (index as u32).saturating_mul(2).saturating_add(fragment + 1);
     let mut op = GuiSceneOp::upsert(surface, frame, node_id, command);
     op.flags = GUI_DRAW_FLAG_MORE;
@@ -337,5 +344,22 @@ mod tests {
         let surface = SurfaceHandle::new(1, 1, 7).unwrap();
         let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
         assert_eq!(scene.as_slice()[1].command.width, 50);
+    }
+
+    #[test]
+    fn empty_input_value_does_not_create_an_invalid_glyph() {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let input = blueprint.push_child(UiNodeKind::TextInput, root, 2).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        for index in 0..tree.tree().len() {
+            let handle = tree.tree().handle_at(index).unwrap();
+            tree.tree_mut().set_bounds(handle, UiRect::new(0, 0, 40, 20)).unwrap();
+        }
+        let input_handle = tree.tree().handle_at(usize::from(input)).unwrap();
+        tree.tree_mut().set_focused(input_handle, true).unwrap();
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        assert!(scene.as_slice().iter().all(|op| op.is_valid()));
     }
 }
