@@ -76,6 +76,7 @@ pub enum GuiSurfaceOperation {
     Update = 3,
     Focus = 4,
     Destroy = 5,
+    ToggleFps = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,6 +138,20 @@ impl GuiSurfaceRequest {
             && self.flags & !GUI_SURFACE_FLAG_TERMINAL == 0
             && self.reserved == 0
             && self.reserved_tail == 0
+            && match self.operation {
+                GuiSurfaceOperation::ToggleFps => {
+                    self.flags == 0
+                        && self.surface.slot == u16::MAX
+                        && self.surface.generation == 0
+                        && self.surface.owner == 0
+                        && self.bounds.x == 0
+                        && self.bounds.y == 0
+                        && self.bounds.width == 0
+                        && self.bounds.height == 0
+                        && self.z_order == 0
+                }
+                _ => true,
+            }
     }
 }
 
@@ -774,6 +789,15 @@ mod tests {
         assert!(request.is_valid());
         request.flags = u8::MAX;
         assert!(!request.is_valid());
+    }
+
+    #[test]
+    fn fps_toggle_request_is_bounded_and_has_no_surface_payload() {
+        let request = GuiSurfaceRequest::new(GuiSurfaceOperation::ToggleFps, 1);
+        assert!(request.is_valid());
+        let mut malformed = request;
+        malformed.z_order = 1;
+        assert!(!malformed.is_valid());
     }
 
     #[test]

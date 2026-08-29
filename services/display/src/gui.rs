@@ -1630,6 +1630,17 @@ mod tests {
         }
     }
 
+    struct RecordingBackend {
+        commands: std::vec::Vec<GuiDrawCommand>,
+    }
+
+    impl GuiRenderBackend for RecordingBackend {
+        fn draw(&mut self, command: GuiDrawCommand, _clip: GuiRect) -> usize {
+            self.commands.push(command);
+            1
+        }
+    }
+
     fn request(operation: GuiSurfaceOperation, id: u32, bounds: GuiRect) -> GuiSurfaceRequest {
         let mut request = GuiSurfaceRequest::new(operation, id);
         request.bounds = bounds;
@@ -1787,6 +1798,44 @@ mod tests {
         assert_eq!(registry.destroy(8, root), Err(GuiRegistryError::Unauthorized));
         let stale = SurfaceHandle { generation: root.generation.wrapping_add(1), ..root };
         assert_eq!(registry.destroy(7, stale), Err(GuiRegistryError::Stale));
+    }
+
+    #[test]
+    fn max_z_diagnostic_surface_renders_above_opaque_modals() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(11, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 64, 32)))
+            .unwrap()
+            .surface;
+        let mut modal_request =
+            request(GuiSurfaceOperation::CreateModal, 2, GuiRect::new(0, 0, 64, 32));
+        let modal = registry.create(12, modal_request).unwrap().surface;
+        modal_request.z_order = i16::MAX;
+        let overlay = registry.create(11, modal_request).unwrap().surface;
+
+        let mut root_batch = GuiDrawBatch::new(root, 1, GuiRect::SURFACE);
+        assert!(root_batch.push(GuiDrawCommand::fill_surface(0x101820)));
+        registry.update(11, root_batch).unwrap();
+        let mut modal_batch = GuiDrawBatch::new(modal, 1, GuiRect::SURFACE);
+        assert!(modal_batch.push(GuiDrawCommand::fill_surface(0x203040)));
+        registry.update(12, modal_batch).unwrap();
+        registry
+            .apply_scene_op(
+                11,
+                GuiSceneOp::upsert(
+                    overlay,
+                    1,
+                    99,
+                    GuiDrawCommand::glyph_run(8, 8, 0xffffff, b"FPS:060").unwrap(),
+                ),
+            )
+            .unwrap();
+
+        let (damage, count) = registry.take_damage();
+        let mut backend = RecordingBackend { commands: std::vec::Vec::new() };
+        registry.compose(&mut backend, &damage, count);
+        assert_eq!(backend.commands.last().unwrap().text_len, 7);
+        assert_eq!(&backend.commands.last().unwrap().text[..7], b"FPS:060");
     }
 
     #[test]

@@ -6,10 +6,45 @@ mod common;
 
 use logos_abi::{
     DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, DISPLAY_PRESENT_BASE, FramebufferConfig,
-    FramebufferFormat, FramebufferPresentState, GuiRect, GuiSceneOp, GuiStatus,
-    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, IpcStatus, MessageKind,
+    FramebufferFormat, FramebufferPresentState, GuiDrawCommand, GuiDrawKind, GuiRect, GuiSceneOp,
+    GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, IpcStatus, MessageKind,
     RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
+const FPS_SURFACE_BOUNDS: GuiRect = GuiRect::new(8, 8, 72, 24);
+const FPS_NODE_ID: u32 = u32::MAX - 1;
+const FPS_Z_ORDER: i16 = i16::MAX;
+const FPS_WINDOW_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
+
+struct FpsCounter {
+    window_start: Option<u64>,
+    frames: u16,
+    value: u16,
+}
+
+impl FpsCounter {
+    const fn new() -> Self {
+        Self { window_start: None, frames: 0, value: 0 }
+    }
+
+    fn record(&mut self, ticks: u64) -> bool {
+        self.window_start.get_or_insert(ticks);
+        self.frames = self.frames.saturating_add(1);
+        self.refresh(ticks)
+    }
+
+    fn refresh(&mut self, ticks: u64) -> bool {
+        let Some(window_start) = self.window_start else {
+            return false;
+        };
+        if ticks.wrapping_sub(window_start) < FPS_WINDOW_TICKS {
+            return false;
+        }
+        self.value = self.frames;
+        self.window_start = Some(ticks);
+        self.frames = 0;
+        true
+    }
+}
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
     b"terminal",
@@ -93,12 +128,56 @@ fn is_cursor_surface_request(
         && request.z_order == expected_z
 }
 
+fn fps_command(surface: SurfaceHandle, frame: u32, fps: u16) -> GuiSceneOp {
+    let value = fps;
+    let mut text = *b"FPS:000";
+    text[4] = b'0' + (value / 100) as u8;
+    text[5] = b'0' + ((value / 10) % 10) as u8;
+    text[6] = b'0' + (value % 10) as u8;
+    let mut command = GuiDrawCommand::empty(GuiDrawKind::GlyphRun);
+    command.x = FPS_SURFACE_BOUNDS.x + 4;
+    command.y = FPS_SURFACE_BOUNDS.y + 4;
+    command.color = 0xf0f6fc;
+    command.text_len = text.len() as u8;
+    command.text[..text.len()].copy_from_slice(&text);
+    GuiSceneOp::upsert(surface, frame, FPS_NODE_ID, command)
+}
+
+fn update_fps_surface(
+    display: &mut logos_display::Display,
+    surface: SurfaceHandle,
+    frame: &mut u32,
+    fps: u16,
+) {
+    if !surface.is_valid() {
+        return;
+    }
+    *frame = frame.wrapping_add(1).max(1);
+    let _ = display.gui_mut().apply_scene_op(11, fps_command(surface, *frame, fps));
+}
+
+fn create_fps_surface(display: &mut logos_display::Display) -> SurfaceHandle {
+    let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, 2);
+    request.bounds = FPS_SURFACE_BOUNDS;
+    request.z_order = FPS_Z_ORDER;
+    display
+        .gui_mut()
+        .create(11, request)
+        .map(|response| response.surface)
+        .unwrap_or(SurfaceHandle::EMPTY)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render(
     display: &mut logos_display::Display,
     framebuffer: &mut [u8],
     config: &FramebufferConfig,
     present_state: &FramebufferPresentState,
-) {
+    fps: &mut FpsCounter,
+    fps_surface: SurfaceHandle,
+    fps_scene_frame: &mut u32,
+    fps_enabled: bool,
+) -> bool {
     let format = match config.format {
         FramebufferFormat::Bgr8 => logos_display::PixelFormat::Bgr8,
         FramebufferFormat::Rgb8 => logos_display::PixelFormat::Rgb8,
@@ -110,7 +189,26 @@ fn render(
         config.stride as usize * 4,
         format,
     );
+    common::heartbeat();
+    publish_render(display, present_state, fps, fps_surface, fps_scene_frame, true, fps_enabled)
+}
+
+fn publish_render(
+    display: &mut logos_display::Display,
+    present_state: &FramebufferPresentState,
+    fps: &mut FpsCounter,
+    fps_surface: SurfaceHandle,
+    fps_scene_frame: &mut u32,
+    complete: bool,
+    fps_enabled: bool,
+) -> bool {
+    let presented = display.presented();
+    let fps_changed = fps_enabled && presented && complete && fps.record(common::current_ticks());
+    if fps_changed {
+        update_fps_surface(display, fps_surface, fps_scene_frame, fps.value);
+    }
     publish_present(display, present_state);
+    fps_changed
 }
 
 fn publish_present(display: &mut logos_display::Display, present_state: &FramebufferPresentState) {
@@ -192,13 +290,18 @@ pub extern "C" fn _start() -> ! {
     let mut root_request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateRoot, 1);
     root_request.bounds = GuiRect::new(0, 0, config.width, config.height);
     let _ = display.gui_mut().create(11, root_request);
+    let mut fps_surface = create_fps_surface(display);
+    let mut fps_scene_frame = 0;
+    update_fps_surface(display, fps_surface, &mut fps_scene_frame, 0);
     #[cfg(feature = "qemu-proof")]
     let _ = common::ipc_probe(logos_abi::IPC_SYSCALL_SEND, 0, 0);
     let mut heartbeat_ticks = 0u16;
     let mut render_pending = false;
     let mut render_complete = false;
     let mut gui_render_pending = false;
-    let mut gui_dirty = false;
+    let mut gui_dirty = true;
+    let mut fps_enabled = true;
+    let mut fps = FpsCounter::new();
     let mut published_cursor = None;
     loop {
         if render_pending && render_complete || gui_dirty || gui_render_pending {
@@ -215,9 +318,19 @@ pub extern "C" fn _start() -> ! {
             let mut root_request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateRoot, 1);
             root_request.bounds = GuiRect::new(0, 0, config.width, config.height);
             let _ = display.gui_mut().create(11, root_request);
+            fps_surface = create_fps_surface(display);
             render_pending = false;
             render_complete = false;
             gui_render_pending = false;
+            gui_dirty = true;
+            fps = FpsCounter::new();
+            fps_scene_frame = 0;
+            if fps_enabled {
+                update_fps_surface(display, fps_surface, &mut fps_scene_frame, 0);
+            }
+        }
+        if !gui_render_pending && fps_enabled && fps.refresh(common::current_ticks()) {
+            update_fps_surface(display, fps_surface, &mut fps_scene_frame, fps.value);
             gui_dirty = true;
         }
         let mut progressed = false;
@@ -228,8 +341,10 @@ pub extern "C" fn _start() -> ! {
             let mut response = GuiSurfaceResponse::new(surface_request, GuiStatus::Malformed);
             let cursor_request =
                 is_cursor_surface_request(surface_request, 13, config.width, config.height);
+            let fps_toggle = surface_request.operation == GuiSurfaceOperation::ToggleFps;
             let cursor_destroy = display.is_cursor_surface(surface_request.surface);
             let result = match surface_request.operation {
+                GuiSurfaceOperation::ToggleFps => Ok(()),
                 GuiSurfaceOperation::CreateRoot | GuiSurfaceOperation::CreateModal => {
                     display.gui_mut().create(13, surface_request).map(|created| {
                         response.surface = created.surface;
@@ -249,6 +364,16 @@ pub extern "C" fn _start() -> ! {
                 Ok(()) => GuiStatus::Ok,
                 Err(error) => gui_status(error),
             };
+            if result.is_ok() && fps_toggle {
+                fps_enabled = !fps_enabled;
+                fps_scene_frame = fps_scene_frame.wrapping_add(1).max(1);
+                let op = if fps_enabled {
+                    fps_command(fps_surface, fps_scene_frame, fps.value)
+                } else {
+                    GuiSceneOp::remove(fps_surface, fps_scene_frame, FPS_NODE_ID)
+                };
+                let _ = display.gui_mut().apply_scene_op(11, op);
+            }
             if result.is_ok() && cursor_request && response.surface.is_valid() {
                 display.register_cursor_surface(13, response.surface);
             } else if result.is_ok() && cursor_destroy {
@@ -289,6 +414,9 @@ pub extern "C" fn _start() -> ! {
                 }
                 GuiSurfaceOperation::Destroy => {
                     display.gui_mut().destroy(12, lockscreen_surface_request.surface)
+                }
+                GuiSurfaceOperation::ToggleFps => {
+                    Err(logos_display::GuiRegistryError::InvalidRequest)
                 }
             };
             response.status = match result {
@@ -351,10 +479,20 @@ pub extern "C" fn _start() -> ! {
             lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
         }
         if render_pending && render_complete && !gui_render_pending {
-            render(display, framebuffer, config, present_state);
+            let fps_changed = render(
+                display,
+                framebuffer,
+                config,
+                present_state,
+                &mut fps,
+                fps_surface,
+                &mut fps_scene_frame,
+                fps_enabled,
+            );
             if display.gui().terminal_bounds().is_some() {
                 gui_dirty = true;
             }
+            gui_dirty |= fps_changed;
             render_pending = false;
         }
         if gui_dirty || gui_render_pending {
@@ -365,9 +503,19 @@ pub extern "C" fn _start() -> ! {
                 config.stride as usize * 4,
                 format,
             );
-            publish_present(display, present_state);
+            common::heartbeat();
+            let complete = !display.render_pending();
+            let fps_changed = publish_render(
+                display,
+                present_state,
+                &mut fps,
+                fps_surface,
+                &mut fps_scene_frame,
+                complete,
+                fps_enabled,
+            );
             gui_render_pending = display.render_pending();
-            gui_dirty = false;
+            gui_dirty = fps_changed;
             progressed = true;
         }
         if progressed {

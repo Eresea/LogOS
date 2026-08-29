@@ -23,7 +23,9 @@ pub const GLYPH_WIDTH: usize = 8;
 pub const GLYPH_HEIGHT: usize = 16;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
-const GUI_TILE_SIZE: u32 = 32;
+const GUI_TILE_SIZE: u32 = 64;
+// Finish full-screen damage in a few bounded turns while keeping each turn
+// short enough for input and watchdog progress.
 const GUI_TILES_PER_STEP: usize = 8;
 const CURSOR_LAYERS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
@@ -418,6 +420,10 @@ impl Display {
 
     pub const fn generation(&self) -> u16 {
         self.generation
+    }
+
+    pub const fn presented(&self) -> bool {
+        self.presented
     }
 
     fn mark_dirty(&mut self, index: usize) {

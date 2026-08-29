@@ -417,6 +417,18 @@ fn send_surface_command(
     }
 }
 
+fn is_fps_toggle(input: &InputMessage) -> bool {
+    input.kind == MessageKind::Key
+        && input.state == KeyState::Pressed
+        && input.code == KeyCode::function(12).raw()
+        && input.modifiers & logos_abi::MOD_CTRL != 0
+}
+
+fn queue_fps_toggle(queue: &mut SurfaceCommandQueue, next: &mut u32) {
+    let request = GuiSurfaceRequest::new(GuiSurfaceOperation::ToggleFps, next_request_id(next));
+    let _ = queue.push(request);
+}
+
 fn send_lockscreen_section(lockscreen: logos_abi::CapabilityHandle, visible: bool, next: &mut u32) {
     let mut hook = GuiHook::new(GuiHookKind::Section, next_request_id(next));
     hook.deadline = u64::from(visible);
@@ -1275,6 +1287,11 @@ pub extern "C" fn _start() -> ! {
                     pending_cursor_draw =
                         Some(cursor_op(cursor_surface, cursor_x, cursor_y, &mut cursor_sequence));
                 }
+            }
+            if is_fps_toggle(&event) {
+                queue_fps_toggle(&mut surface_commands, &mut next_request);
+                surface_commands.flush(display_control);
+                continue;
             }
             if !authenticated || atrium.phase() != logos_atrium::AtriumPhase::Home {
                 let _ = common::ipc_send_handle(lockscreen_input, &event);
