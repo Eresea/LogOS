@@ -21,9 +21,10 @@ Boot has three owners in one direction: **UEFI → Core → Runtime**. Ownership
 9. **Atrium establishes the GUI shell.** After Shell and LockScreen are available, Atrium publishes
    the bounded Boot/Locked/Home route, creates its delegated Display surface, and starts in the
    locked or first-boot claim section.
-10. **Authentication enters Home.** LockScreen sends a bounded User request through Shell. A valid
-    session context moves Atrium to Home and hides LockScreen; System then requests its read-only
-    management surface; logout, restart, stale responses, and
+10. **Authentication enters Home.** LockScreen sends a bounded User request through Shell. A
+    successful first-boot claim returns LockScreen to the login route; a valid explicit login session
+    moves Atrium to Home and hides LockScreen. System then requests its read-only management surface;
+    logout, restart, stale responses, and
     reboot discard all Atrium surfaces and return to the locked section.
 
 ## Structural checks

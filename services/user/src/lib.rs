@@ -272,10 +272,7 @@ impl<E: EntropySource> UserService<E> {
                         request.root,
                         &mut self.entropy,
                     )
-                    .map(|(user, session)| {
-                        response.user = user;
-                        response.session = session;
-                    }),
+                    .map(|user| response.user = user),
                 UserOperation::Create
                     if self.catalog.is_admin_session(request.session).unwrap_or(false) =>
                 {
@@ -357,9 +354,7 @@ impl<E: EntropySource> UserService<E> {
             Ok(()) => UserStatus::Ok,
             Err(error) => map_error(error),
         };
-        if response.status == UserStatus::Ok
-            && matches!(response.operation, UserOperation::Claim | UserOperation::Login)
-        {
+        if response.status == UserStatus::Ok && response.operation == UserOperation::Login {
             if let Ok((capability, root, rights)) = self.catalog.first_capability(response.session)
             {
                 response.capability = capability;
@@ -417,7 +412,7 @@ impl UserCatalog {
         password: &[u8],
         home: NamespaceRoot,
         entropy: &mut E,
-    ) -> Result<(UserId, SessionHandle), UserError> {
+    ) -> Result<UserId, UserError> {
         if self.claimed {
             return Err(UserError::AlreadyClaimed);
         }
@@ -440,7 +435,7 @@ impl UserCatalog {
         self.assign_role(user, admin)?;
         self.assign_role(user, user_role)?;
         self.claimed = true;
-        self.login(name, password)
+        Ok(user)
     }
 
     pub fn create_user<E: EntropySource>(
@@ -1200,14 +1195,13 @@ mod tests {
         let mut catalog = UserCatalog::new();
         let mut entropy = Entropy(1);
         assert_eq!(catalog.login(b"admin", b"password"), Err(UserError::NotClaimed));
-        let (_, session) =
-            catalog.claim(b"admin", b"correct horse", root(1), &mut entropy).unwrap();
+        catalog.claim(b"admin", b"correct horse", root(1), &mut entropy).unwrap();
         assert!(catalog.is_claimed());
         assert_eq!(
             catalog.claim(b"other", b"password", root(2), &mut entropy),
             Err(UserError::AlreadyClaimed)
         );
-        assert!(catalog.login(b"admin", b"correct horse").is_ok());
+        let (_, session) = catalog.login(b"admin", b"correct horse").unwrap();
         assert_eq!(catalog.login(b"admin", b"wrong"), Err(UserError::BadCredentials));
         catalog.logout(session).unwrap();
         assert_eq!(
@@ -1220,7 +1214,8 @@ mod tests {
     fn namespace_capabilities_only_attenuate_and_revoke_descendants() {
         let mut catalog = UserCatalog::new();
         let mut entropy = Entropy(7);
-        let (_, session) = catalog.claim(b"admin", b"password", root(3), &mut entropy).unwrap();
+        catalog.claim(b"admin", b"password", root(3), &mut entropy).unwrap();
+        let (_, session) = catalog.login(b"admin", b"password").unwrap();
         let parent = catalog
             .attach_capability(
                 session,
@@ -1241,7 +1236,8 @@ mod tests {
     fn snapshot_round_trip_drops_volatile_sessions() {
         let mut catalog = UserCatalog::new();
         let mut entropy = Entropy(11);
-        let (_, session) = catalog.claim(b"admin", b"password", root(4), &mut entropy).unwrap();
+        catalog.claim(b"admin", b"password", root(4), &mut entropy).unwrap();
+        let (_, session) = catalog.login(b"admin", b"password").unwrap();
         let mut snapshot = [0; USER_SNAPSHOT_BYTES];
         let length = catalog.encode_snapshot(&mut snapshot).unwrap();
         let mut restored = UserCatalog::new();
@@ -1284,8 +1280,8 @@ mod tests {
     fn administrative_name_and_password_changes_take_effect_without_persisting_sessions() {
         let mut catalog = UserCatalog::new();
         let mut entropy = Entropy(19);
-        let (user, session) =
-            catalog.claim(b"admin", b"old-password", root(5), &mut entropy).unwrap();
+        catalog.claim(b"admin", b"old-password", root(5), &mut entropy).unwrap();
+        let (user, session) = catalog.login(b"admin", b"old-password").unwrap();
         catalog.rename_user(user, b"administrator").unwrap();
         assert_eq!(catalog.login(b"admin", b"old-password"), Err(UserError::NotFound));
         assert!(catalog.login(b"administrator", b"old-password").is_ok());
@@ -1296,5 +1292,18 @@ mod tests {
         );
         assert!(catalog.login(b"administrator", b"new-password").is_ok());
         catalog.logout(session).unwrap();
+    }
+
+    #[test]
+    fn claim_response_does_not_create_a_session() {
+        let mut service = UserService::new(Entropy(23));
+        let mut request = UserRequest::new(UserOperation::Claim, 1);
+        assert!(request.set_name(b"admin"));
+        assert!(request.set_password(b"password"));
+        let response = service.handle(request);
+        assert_eq!(response.status, UserStatus::Ok);
+        assert!(response.user.is_valid());
+        assert!(!response.session.is_valid());
+        assert!(service.catalog().is_claimed());
     }
 }

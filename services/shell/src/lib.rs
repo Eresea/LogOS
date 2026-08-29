@@ -794,6 +794,17 @@ mod tests {
     }
 
     #[test]
+    fn successful_claim_keeps_shell_locked_for_explicit_login() {
+        let mut shell = Shell::new();
+        let request =
+            shell.begin_user_request(UserOperation::Claim, b"admin", b"password").unwrap();
+        shell.apply_user_response(UserResponse::new(request, UserStatus::Ok)).unwrap();
+        assert_eq!(shell.phase(), ShellPhase::Locked);
+        assert_eq!(shell.focus(), ShellFocus::LockScreen);
+        assert!(shell.context().is_clear());
+    }
+
+    #[test]
     fn failure_logout_restart_and_stale_responses_clear_session() {
         let mut shell = Shell::new();
         let request = shell.begin_user_request(UserOperation::Login, b"alice", b"bad").unwrap();

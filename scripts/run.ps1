@@ -544,11 +544,19 @@ try {
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen admin claim PASS' $TimeoutSeconds)) {
             throw 'Admin claim did not complete.'
         }
+        $loginMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen login PASS'
+        Send-QmpText $qmp 'admin'
+        Send-QmpKey $qmp 'tab'
+        Send-QmpText $qmp 'password'
+        Send-QmpKey $qmp 'ret'
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen login PASS' $loginMarker $TimeoutSeconds)) {
+            throw 'Post-claim login did not complete.'
+        }
         if (-not (Wait-ProofMarker 'LogOS vNext: Atrium authenticated' $TimeoutSeconds)) {
-            throw 'Atrium did not receive the claimed admin session.'
+            throw 'Atrium did not receive the explicit login session.'
         }
         if (-not (Wait-ProofMarker 'LogOS vNext: Atrium home surface ready' $TimeoutSeconds)) {
-            throw 'Home surface did not become ready after admin claim.'
+            throw 'Home surface did not become ready after explicit login.'
         }
 
         $bootMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium IPC topology ready'

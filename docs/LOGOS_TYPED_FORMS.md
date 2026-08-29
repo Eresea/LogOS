@@ -255,7 +255,8 @@ ui-compiler/examples/register.ui
 `login.ui` binds `loginForm`. `register.ui` binds `registerForm`, which adds a
 `confirmPassword` control and a form-level matching validator. The Shell selects
 the register page only while the User catalog is `Unclaimed`; a successful claim
-creates the first administrator through the existing User service contract.
+creates the first administrator and returns to the login route through the existing
+User service contract.
 
 The page markup owns presentation and event wiring. The LockScreen service owns
 the bounded form state, validation, credential clearing, and User requests.
