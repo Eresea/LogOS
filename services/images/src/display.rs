@@ -462,20 +462,6 @@ pub extern "C" fn _start() -> ! {
             }
             ready_mask &= !READY_INPUT;
         }
-        if ready_mask & READY_ATRIUM_RENDER != 0 {
-            let mut atrium_render = RenderMessage::empty(MessageKind::RenderCells);
-            while common::ipc_receive_handle(atrium_render_capability, &mut atrium_render)
-                == IpcStatus::Ok
-            {
-                progressed = true;
-                if display.apply(generation, &atrium_render).is_ok() {
-                    let more = atrium_render.flags & RENDER_FLAG_MORE != 0;
-                    render_pending = true;
-                    render_complete = !more;
-                }
-            }
-            ready_mask &= !READY_ATRIUM_RENDER;
-        }
         if ready_mask & READY_GUI != 0 {
             let mut gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
             while common::ipc_receive_handle(gui_capability, &mut gui_op) == IpcStatus::Ok {
@@ -555,6 +541,20 @@ pub extern "C" fn _start() -> ! {
             publish_cursor(display, present_state, &mut published_cursor);
         }
         ready_mask &= !(READY_ATRIUM_GUI | READY_LOCKSCREEN_GUI);
+        if ready_mask & READY_ATRIUM_RENDER != 0 {
+            let mut atrium_render = RenderMessage::empty(MessageKind::RenderCells);
+            while common::ipc_receive_handle(atrium_render_capability, &mut atrium_render)
+                == IpcStatus::Ok
+            {
+                progressed = true;
+                if display.apply(generation, &atrium_render).is_ok() {
+                    let more = atrium_render.flags & RENDER_FLAG_MORE != 0;
+                    render_pending = true;
+                    render_complete = !more;
+                }
+            }
+            ready_mask &= !READY_ATRIUM_RENDER;
+        }
         if render_pending && render_complete && !gui_render_pending {
             let fps_changed = render(
                 display,
