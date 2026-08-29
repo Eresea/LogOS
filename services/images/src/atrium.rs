@@ -695,6 +695,7 @@ pub extern "C" fn _start() -> ! {
     let mut authenticated = false;
     let mut heartbeat_ticks = 0u16;
     let mut event = InputMessage::key(KeyCode::Unknown, KeyState::Released, 0);
+    let mut deferred_event = None;
     let mut response = GuiSurfaceResponse::new(
         GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, 1),
         logos_abi::GuiStatus::Malformed,
@@ -1280,7 +1281,19 @@ pub extern "C" fn _start() -> ! {
         }
 
         let mut cursor_sent_in_input = false;
-        while common::ipc_receive_handle(input, &mut event) == IpcStatus::Ok {
+        loop {
+            if let Some(next) = deferred_event.take() {
+                event = next;
+            } else if common::ipc_receive_handle(input, &mut event) != IpcStatus::Ok {
+                break;
+            }
+            if event.pointer_event().is_some_and(|pointer| pointer.state == PointerState::Move) {
+                let (latest, deferred) = logos_atrium::coalesce_pointer_move(event, &mut |next| {
+                    common::ipc_receive_handle(input, next) == IpcStatus::Ok
+                });
+                event = latest;
+                deferred_event = deferred;
+            }
             if let Some(pointer) = event.pointer_event() {
                 cursor_x = pointer.x.clamp(0, 639);
                 cursor_y = pointer.y.clamp(0, 399);

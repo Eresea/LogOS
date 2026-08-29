@@ -330,24 +330,11 @@ impl LockScreen {
         }
         let Some(pointer) = input.pointer_event() else { return LockScreenAction::Ignored };
         let target = self.pointer_target(pointer.x, pointer.y);
-        let hover_changed = self.hovered != target;
         self.hovered = target;
         match pointer.state {
-            PointerState::Move => {
-                if hover_changed {
-                    LockScreenAction::Changed
-                } else {
-                    LockScreenAction::Ignored
-                }
-            }
+            PointerState::Move => LockScreenAction::Ignored,
             PointerState::Down if pointer.buttons & 1 != 0 => {
-                let Some(target) = target else {
-                    return if hover_changed {
-                        LockScreenAction::Changed
-                    } else {
-                        LockScreenAction::Ignored
-                    };
-                };
+                let Some(target) = target else { return LockScreenAction::Ignored };
                 if target == LockScreenField::Submit {
                     self.field = target;
                     self.components.focus(target);
@@ -732,7 +719,7 @@ mod tests {
         let mut lock = LockScreen::new();
         assert_eq!(
             lock.pointer_input(InputMessage::pointer(200, 205, 0, PointerState::Move).unwrap()),
-            LockScreenAction::Changed
+            LockScreenAction::Ignored
         );
         assert_eq!(lock.hovered(), Some(LockScreenField::Password));
         assert_eq!(

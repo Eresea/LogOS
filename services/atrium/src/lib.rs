@@ -13,6 +13,34 @@ pub const MAX_ATRIUM_SURFACES: usize = 4;
 pub const MAX_CALCULATOR_TEXT: usize = 32;
 pub const SURFACE_MOVE_STEP: i32 = 32;
 
+/// Collapse consecutive pointer motion while preserving keyboard and button
+/// transition ordering. The receiver returns one queued event at a time.
+pub fn coalesce_pointer_move<F>(
+    first: InputMessage,
+    receive: &mut F,
+) -> (InputMessage, Option<InputMessage>)
+where
+    F: FnMut(&mut InputMessage) -> bool,
+{
+    let is_move = |event: InputMessage| {
+        event.pointer_event().is_some_and(|pointer| pointer.state == PointerState::Move)
+    };
+    if !is_move(first) {
+        return (first, None);
+    }
+
+    let mut latest = first;
+    let mut next = first;
+    while receive(&mut next) {
+        if is_move(next) {
+            latest = next;
+        } else {
+            return (latest, Some(next));
+        }
+    }
+    (latest, None)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AtriumPhase {
     Boot,
@@ -977,6 +1005,27 @@ mod tests {
             Some(files.reference)
         );
         assert_eq!(atrium.pointer_target(&move_event), None);
+    }
+
+    #[test]
+    fn coalesces_motion_without_dropping_button_edges() {
+        let first = InputMessage::pointer(1, 1, 0, PointerState::Move).unwrap();
+        let queued = [
+            InputMessage::pointer(2, 2, 0, PointerState::Move).unwrap(),
+            InputMessage::pointer(3, 3, 0, PointerState::Move).unwrap(),
+            InputMessage::pointer(3, 3, 1, PointerState::Down).unwrap(),
+        ];
+        let mut index = 0;
+        let (latest, deferred) = coalesce_pointer_move(first, &mut |event| {
+            let Some(next) = queued.get(index).copied() else { return false };
+            *event = next;
+            index += 1;
+            true
+        });
+
+        assert_eq!(latest.pointer_event().unwrap().x, 3);
+        assert_eq!(latest.pointer_event().unwrap().y, 3);
+        assert_eq!(deferred.unwrap().pointer_event().unwrap().state, PointerState::Down);
     }
 
     #[test]
