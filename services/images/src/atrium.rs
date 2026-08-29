@@ -10,6 +10,7 @@ use logos_abi::{
     GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, InputMessage,
     IpcStatus, KeyCode, KeyState, MessageKind, PointerState, RenderMessage, SurfaceHandle,
 };
+use logos_ui::{UiBlueprint, UiComponentTree, UiNodeKind, UiRect, UiStyle, UiStyleList, UiText};
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_INPUT,
@@ -205,6 +206,77 @@ fn draw_home(
     let _ = common::ipc_send_scene_batch(display, &detail_tail, 10);
 }
 
+fn draw_calculator_ui(
+    display: logos_abi::CapabilityHandle,
+    surface: logos_atrium::Surface,
+    calculator: &logos_atrium::Calculator,
+    sequence: u32,
+) {
+    let mut blueprint = UiBlueprint::new();
+    let Ok(root) = blueprint.push_root(UiNodeKind::Root, 1) else { return };
+    let Ok(panel) = blueprint.push_child(UiNodeKind::Panel, root, 2) else { return };
+    let Ok(title) = blueprint.push_child(UiNodeKind::Label, panel, 3) else { return };
+    let Ok(display_panel) = blueprint.push_child(UiNodeKind::Panel, panel, 4) else { return };
+    let Ok(value) = blueprint.push_child(UiNodeKind::Label, display_panel, 5) else { return };
+    let Ok(instructions) = blueprint.push_child(UiNodeKind::Label, panel, 6) else { return };
+    let _ = blueprint.set_text(title, UiText::from_bytes(b"Calculator").unwrap());
+    let _ = blueprint.set_text(value, UiText::from_bytes(calculator.display()).unwrap());
+    let _ =
+        blueprint.set_text(instructions, UiText::from_bytes(b"0-9  +  -  *  /  Enter").unwrap());
+    let mut rounded = UiStyleList::EMPTY;
+    let _ = rounded.push(UiStyle::RoundedLarge);
+    let _ = blueprint.set_styles(panel, rounded);
+    let _ = blueprint.set_styles(display_panel, rounded);
+    let Ok(mut tree) = UiComponentTree::from_blueprint(&blueprint) else { return };
+    let bounds = surface.bounds;
+    let panel_bounds = GuiRect::new(
+        bounds.x.saturating_add(12),
+        bounds.y.saturating_add(12),
+        bounds.width.saturating_sub(24),
+        bounds.height.saturating_sub(24),
+    );
+    let positions = [
+        (root, bounds),
+        (panel, panel_bounds),
+        (title, GuiRect::new(bounds.x.saturating_add(20), bounds.y.saturating_add(20), 200, 24)),
+        (
+            display_panel,
+            GuiRect::new(bounds.x.saturating_add(20), bounds.y.saturating_add(52), 260, 48),
+        ),
+        (value, GuiRect::new(bounds.x.saturating_add(32), bounds.y.saturating_add(82), 240, 24)),
+        (
+            instructions,
+            GuiRect::new(bounds.x.saturating_add(24), bounds.y.saturating_add(132), 240, 24),
+        ),
+    ];
+    for (index, (slot, rect)) in positions.into_iter().enumerate() {
+        let Ok(handle) = tree.tree().handle_at(usize::from(slot)) else { return };
+        if tree.tree_mut().set_bounds(handle, ui_rect(rect)).is_err() {
+            return;
+        }
+        if index == 0 && tree.tree_mut().set_clip(handle, ui_rect(bounds)).is_err() {
+            return;
+        }
+    }
+    let Ok(scene) = logos_ui_graphics::emit(
+        surface.reference,
+        sequence,
+        &tree,
+        logos_ui_graphics::UiSceneTheme::DEFAULT,
+    ) else {
+        return;
+    };
+    for operation in scene.as_slice() {
+        if common::ipc_send_handle(display, operation) != IpcStatus::Ok {
+            return;
+        }
+    }
+}
+
+fn ui_rect(rect: GuiRect) -> UiRect {
+    UiRect::new(rect.x, rect.y, rect.width, rect.height)
+}
+
 fn draw_app(
     display: logos_abi::CapabilityHandle,
     surface: logos_atrium::Surface,
@@ -222,6 +294,9 @@ fn draw_app(
     push_surface_text(&mut batch, surface.bounds, 20, 24, 0xffffff, title);
     match surface.app {
         logos_atrium::AppId::Calculator => {
+            draw_calculator_ui(display, surface, calculator, sequence)
+        }
+        logos_atrium::AppId::Files => {
             let _ = batch.push(GuiDrawCommand::fill_rect(
                 GuiRect::new(
                     surface.bounds.x.saturating_add(20),
@@ -252,31 +327,6 @@ fn draw_app(
                 0xb8c7da,
                 b"0-9  +  -  *  /  Enter",
             );
-            let _ = common::ipc_send_scene_batch(display, &detail, 4);
-        }
-        logos_atrium::AppId::Files => {
-            batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-            push_surface_text(&mut batch, surface.bounds, 24, 76, 0xb8c7da, b"Files placeholder");
-            let _ = common::ipc_send_scene_batch(display, &batch, 1);
-            let mut detail = GuiDrawBatch::new(
-                surface.reference,
-                sequence,
-                GuiRect::new(
-                    surface.bounds.x,
-                    surface.bounds.y,
-                    surface.bounds.width,
-                    surface.bounds.height,
-                ),
-            );
-            push_surface_text(
-                &mut detail,
-                surface.bounds,
-                24,
-                108,
-                0x7890aa,
-                b"Filesystem UI is planned",
-            );
-            push_surface_text(&mut detail, surface.bounds, 24, 132, 0x7890aa, b"separately.");
             let _ = common::ipc_send_scene_batch(display, &detail, 4);
         }
         logos_atrium::AppId::Terminal => {
