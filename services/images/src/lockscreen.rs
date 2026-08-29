@@ -501,7 +501,7 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if action != logos_lockscreen::LockScreenAction::Ignored && surface.is_valid() {
-                    pending_draw = Some(!static_cached);
+                    pending_draw = Some(true);
                 }
             }
         }
