@@ -966,13 +966,27 @@ fn render_command(
         GuiDrawKind::GlyphRun => {
             let mut rendered = 0;
             let packed = super::pixel_bytes(command.color, format);
+            let clip_left = clip.x.max(0) as usize;
+            let clip_top = clip.y.max(0) as usize;
+            let clip_right =
+                clip.x.saturating_add(clip.width as i32).max(0).min(width as i32) as usize;
+            let clip_bottom =
+                clip.y.saturating_add(clip.height as i32).max(0).min(height as i32) as usize;
             for (index, byte) in
                 command.text[..command.text_len as usize].iter().copied().enumerate()
             {
                 let glyph = glyph_cache.get(u32::from(byte));
                 let base_x = command.x + (index * super::GLYPH_WIDTH) as i32;
-                for glyph_y in 0..super::GLYPH_HEIGHT {
-                    for glyph_x in 0..super::GLYPH_WIDTH {
+                let first_x =
+                    (clip_left as i32 - base_x).max(0).min(super::GLYPH_WIDTH as i32) as usize;
+                let last_x =
+                    (clip_right as i32 - base_x).max(0).min(super::GLYPH_WIDTH as i32) as usize;
+                let first_y =
+                    (clip_top as i32 - command.y).max(0).min(super::GLYPH_HEIGHT as i32) as usize;
+                let last_y = (clip_bottom as i32 - command.y).max(0).min(super::GLYPH_HEIGHT as i32)
+                    as usize;
+                for glyph_y in first_y..last_y {
+                    for glyph_x in first_x..last_x {
                         let coverage = glyph.rows[glyph_y][glyph_x];
                         let coverage = if command.auxiliary & GUI_TEXT_FLAG_LIGHT != 0 {
                             (u16::from(coverage) * 3 / 4) as u8
@@ -982,20 +996,18 @@ fn render_command(
                         if coverage != 0 {
                             let x = base_x + glyph_x as i32;
                             let y = command.y + glyph_y as i32;
-                            if clip.contains(x, y) {
-                                rendered += plot_packed(
-                                    framebuffer,
-                                    width,
-                                    height,
-                                    stride,
-                                    format,
-                                    x,
-                                    y,
-                                    command.color,
-                                    packed,
-                                    coverage,
-                                ) as usize;
-                            }
+                            rendered += plot_packed(
+                                framebuffer,
+                                width,
+                                height,
+                                stride,
+                                format,
+                                x,
+                                y,
+                                command.color,
+                                packed,
+                                coverage,
+                            ) as usize;
                         }
                     }
                 }
