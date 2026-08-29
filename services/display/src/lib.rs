@@ -1285,6 +1285,7 @@ impl Display {
                 return self.render(framebuffer, width, height, stride, format);
             }
         }
+        let mut background_filled = false;
         if self.gui_background_pending {
             self.surface_background = self.gui_background.unwrap_or(self.cells[0].background);
             let pixel = pixel_bytes(self.surface_background, format);
@@ -1296,6 +1297,7 @@ impl Display {
             }
             self.present_all(framebuffer, width, height, stride);
             self.gui_background_pending = false;
+            background_filled = true;
             self.surface_initialized = true;
             if let Some(surface) = self.gui.terminal_bounds() {
                 self.set_all_dirty(true);
@@ -1318,12 +1320,14 @@ impl Display {
         let screen = GuiRect::new(0, 0, width as u32, height as u32);
         if self.gui_damage_count == 1 && self.gui_damage[0] == screen {
             let damage = self.gui_damage;
-            let pixel = pixel_bytes(self.surface_background, format);
-            let row_bytes = width * 4;
-            let backbuffer = self.backbuffer.as_mut().unwrap();
-            for row in 0..height {
-                let start = row * stride;
-                fill_row(&mut backbuffer[start..start + row_bytes], pixel);
+            if !background_filled {
+                let pixel = pixel_bytes(self.surface_background, format);
+                let row_bytes = width * 4;
+                let backbuffer = self.backbuffer.as_mut().unwrap();
+                for row in 0..height {
+                    let start = row * stride;
+                    fill_row(&mut backbuffer[start..start + row_bytes], pixel);
+                }
             }
             let backbuffer = self.backbuffer.as_mut().unwrap();
             if let Some(surface) = self.gui.terminal_bounds() {
