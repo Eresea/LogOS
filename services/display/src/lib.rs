@@ -720,62 +720,64 @@ impl Display {
         if self.hardware_cursor {
             return;
         }
-        for layer in self.cursor_layers.iter().copied().filter(|layer| layer.active()) {
-            let bounds = Self::cursor_bounds(layer.x, layer.y);
-            if intersect(bounds, clip).is_empty() {
+        let Some(layer) = self.cursor_layers.iter().rev().copied().find(|layer| layer.active())
+        else {
+            return;
+        };
+        let bounds = Self::cursor_bounds(layer.x, layer.y);
+        if intersect(bounds, clip).is_empty() {
+            return;
+        }
+        for row in 0..POINTER_CURSOR_HEIGHT {
+            let mask = POINTER_CURSOR_MASK[row as usize];
+            if mask == 0 {
                 continue;
             }
-            for row in 0..POINTER_CURSOR_HEIGHT {
-                let mask = POINTER_CURSOR_MASK[row as usize];
-                if mask == 0 {
-                    continue;
-                }
-                let left = mask.trailing_zeros() as i32;
-                let right = (32 - mask.leading_zeros()) as i32;
-                draw_cursor_span(
+            let left = mask.trailing_zeros() as i32;
+            let right = (32 - mask.leading_zeros()) as i32;
+            draw_cursor_span(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                layer.x.saturating_add(left + 1),
+                layer.x.saturating_add(right + 1),
+                layer.y.saturating_add(row + 2),
+                0x000000,
+                150,
+                clip,
+            );
+            let mut outline = POINTER_CURSOR_OUTLINE[(row + 1) as usize];
+            while outline != 0 {
+                let column = outline.trailing_zeros() as i32 - 1;
+                outline &= outline - 1;
+                draw_cursor_pixel(
                     framebuffer,
                     width,
                     height,
                     stride,
                     format,
-                    layer.x.saturating_add(left + 1),
-                    layer.x.saturating_add(right + 1),
-                    layer.y.saturating_add(row + 2),
-                    0x000000,
-                    150,
-                    clip,
-                );
-                let mut outline = POINTER_CURSOR_OUTLINE[(row + 1) as usize];
-                while outline != 0 {
-                    let column = outline.trailing_zeros() as i32 - 1;
-                    outline &= outline - 1;
-                    draw_cursor_pixel(
-                        framebuffer,
-                        width,
-                        height,
-                        stride,
-                        format,
-                        layer.x.saturating_add(column),
-                        layer.y.saturating_add(row),
-                        0x101820,
-                        u8::MAX,
-                        clip,
-                    );
-                }
-                draw_cursor_span(
-                    framebuffer,
-                    width,
-                    height,
-                    stride,
-                    format,
-                    layer.x.saturating_add(left),
-                    layer.x.saturating_add(right),
+                    layer.x.saturating_add(column),
                     layer.y.saturating_add(row),
-                    0xffffff,
+                    0x101820,
                     u8::MAX,
                     clip,
                 );
             }
+            draw_cursor_span(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                layer.x.saturating_add(left),
+                layer.x.saturating_add(right),
+                layer.y.saturating_add(row),
+                0xffffff,
+                u8::MAX,
+                clip,
+            );
         }
     }
 
@@ -1806,6 +1808,34 @@ mod tests {
         let new_pixel = (8 * 64 + 32) * 4;
         assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0x30, 0x20, 0x10]);
         assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn software_cursor_only_renders_the_topmost_layer() {
+        let mut display = Display::new(1);
+        display.cursor_layers[0] = CursorLayer {
+            surface: SurfaceHandle::new(1, 1, LOCKSCREEN_OWNER).unwrap(),
+            x: 8,
+            y: 4,
+        };
+        display.cursor_layers[1] =
+            CursorLayer { surface: SurfaceHandle::new(2, 1, ATRIUM_OWNER).unwrap(), x: 32, y: 4 };
+        let mut framebuffer = std::vec![0; 64 * 32 * 4];
+        for pixel in framebuffer.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0x40, 0x30, 0x20, 0]);
+        }
+
+        display.render_cursor_layers(
+            &mut framebuffer,
+            64,
+            32,
+            64 * 4,
+            PixelFormat::Bgr8,
+            GuiRect::new(0, 0, 64, 32),
+        );
+
+        assert_eq!(&framebuffer[(4 * 64 + 8) * 4..(4 * 64 + 8) * 4 + 4], &[0x40, 0x30, 0x20, 0]);
+        assert_eq!(&framebuffer[(4 * 64 + 32) * 4..(4 * 64 + 32) * 4 + 4], &[0xff, 0xff, 0xff, 0]);
     }
 
     #[test]
