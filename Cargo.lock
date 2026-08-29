@@ -303,6 +303,14 @@ name = "logos-ui-forms"
 version = "0.1.0"
 
 [[package]]
+name = "logos-ui-graphics"
+version = "0.1.0"
+dependencies = [
+ "logos-abi",
+ "logos-ui",
+]
+
+[[package]]
 name = "logos-ui-lsp"
 version = "0.1.0"
 dependencies = [

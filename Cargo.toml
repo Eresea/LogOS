@@ -27,6 +27,7 @@ members = [
     "program",
     "programs/demo",
     "ui",
+    "ui-graphics",
     "ui-forms",
     "ui-compiler",
     "ui-lsp",
