@@ -1279,6 +1279,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
+        let mut cursor_sent_in_input = false;
         while common::ipc_receive_handle(input, &mut event) == IpcStatus::Ok {
             if let Some(pointer) = event.pointer_event() {
                 cursor_x = pointer.x.clamp(0, 639);
@@ -1286,12 +1287,16 @@ pub extern "C" fn _start() -> ! {
                 if cursor_surface.is_valid() {
                     let cursor =
                         cursor_op(cursor_surface, cursor_x, cursor_y, &mut cursor_sequence);
-                    match common::ipc_send_handle(display, &cursor) {
-                        IpcStatus::Ok => pending_cursor_draw = None,
-                        IpcStatus::Full => pending_cursor_draw = Some(cursor),
-                        _ => {
-                            pending_cursor_draw = None;
-                            cursor_surface = SurfaceHandle::EMPTY;
+                    if cursor_sent_in_input || pending_cursor_draw.is_some() {
+                        pending_cursor_draw = Some(cursor);
+                    } else {
+                        match common::ipc_send_handle(display, &cursor) {
+                            IpcStatus::Ok => cursor_sent_in_input = true,
+                            IpcStatus::Full => pending_cursor_draw = Some(cursor),
+                            _ => {
+                                pending_cursor_draw = None;
+                                cursor_surface = SurfaceHandle::EMPTY;
+                            }
                         }
                     }
                 }

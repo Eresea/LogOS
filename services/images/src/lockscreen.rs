@@ -458,6 +458,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if visible && pending_auth.is_none() {
+            let mut cursor_sent_in_input = false;
             while common::ipc_receive_handle(input, &mut event) == IpcStatus::Ok {
                 if let Some(pointer) = event.pointer_event() {
                     cursor = (pointer.x.clamp(0, 639), pointer.y.clamp(0, 399));
@@ -465,12 +466,16 @@ pub extern "C" fn _start() -> ! {
                     if cursor_surface.is_valid() {
                         let cursor =
                             cursor_batch(cursor_surface, cursor.0, cursor.1, cursor_sequence);
-                        match common::ipc_send_scene_batch(display, &cursor, 1) {
-                            IpcStatus::Ok => pending_cursor_draw = None,
-                            IpcStatus::Full => pending_cursor_draw = Some(cursor),
-                            _ => {
-                                pending_cursor_draw = None;
-                                cursor_surface = SurfaceHandle::EMPTY;
+                        if cursor_sent_in_input || pending_cursor_draw.is_some() {
+                            pending_cursor_draw = Some(cursor);
+                        } else {
+                            match common::ipc_send_scene_batch(display, &cursor, 1) {
+                                IpcStatus::Ok => cursor_sent_in_input = true,
+                                IpcStatus::Full => pending_cursor_draw = Some(cursor),
+                                _ => {
+                                    pending_cursor_draw = None;
+                                    cursor_surface = SurfaceHandle::EMPTY;
+                                }
                             }
                         }
                     }
