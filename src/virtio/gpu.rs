@@ -595,7 +595,7 @@ impl VirtioGpuDevice {
             &mut self.next_fence,
             command,
         )?;
-        Self::wait_command(self.cursor_queue, completion)
+        Self::wait_cursor_command(self.cursor_queue, completion)
     }
 
     fn submit_command(
@@ -647,6 +647,24 @@ impl VirtioGpuDevice {
                 return Ok(());
             }
             core::hint::spin_loop();
+        }
+        Err(GpuError::Timeout)
+    }
+
+    fn wait_cursor_command(queue: &mut QueueMemory, completion: u16) -> Result<(), GpuError> {
+        for _ in 0..COMPLETION_SPIN_LIMIT {
+            let used = unsafe { read_volatile(&queue.used_index) };
+            if used != completion {
+                core::hint::spin_loop();
+                continue;
+            }
+            let element = queue.used_ring[usize::from(completion.wrapping_sub(1)) % QUEUE_SIZE];
+            if element.id != 0 {
+                return Err(GpuError::Timeout);
+            }
+            // QEMU completes cursor-queue requests without writing the
+            // response payload, so completion is the only reliable check.
+            return Ok(());
         }
         Err(GpuError::Timeout)
     }
