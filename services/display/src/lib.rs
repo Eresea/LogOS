@@ -27,6 +27,7 @@ const GUI_TILE_SIZE: u32 = 64;
 // Finish full-screen damage in a few bounded turns while keeping each turn
 // short enough for input and watchdog progress.
 const GUI_TILES_PER_STEP: usize = 8;
+const GUI_FULL_DAMAGE_TILES_PER_STEP: usize = 32;
 const CURSOR_LAYERS: usize = 2;
 const CURSOR_DAMAGE_RECTS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
@@ -1172,7 +1173,12 @@ impl Display {
         }
         let mut rendered = 0;
         let screen = GuiRect::new(0, 0, width as u32, height as u32);
-        for _ in 0..GUI_TILES_PER_STEP {
+        let tiles_per_step = if self.gui_damage_count == 1 && self.gui_damage[0] == screen {
+            GUI_FULL_DAMAGE_TILES_PER_STEP
+        } else {
+            GUI_TILES_PER_STEP
+        };
+        for _ in 0..tiles_per_step {
             if self.gui_tile_index >= self.gui_damage_count {
                 break;
             }
