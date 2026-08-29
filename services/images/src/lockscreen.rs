@@ -67,20 +67,26 @@ static mut LOGIN_UI_BUILD: logos_ui_compiler::UiBuild =
     logos_ui_compiler::UiBuild::from_document(logos_ui::UiDocument::EMPTY);
 static mut REGISTER_UI_BUILD: logos_ui_compiler::UiBuild =
     logos_ui_compiler::UiBuild::from_document(logos_ui::UiDocument::EMPTY);
-static mut UI_BUILDS_READY: bool = false;
+static mut LOGIN_UI_READY: bool = false;
+static mut REGISTER_UI_READY: bool = false;
 static mut UI_TREE: UiComponentTree = UiComponentTree::new();
 
-fn initialize_ui_builds() {
+fn initialize_ui_build(claim: bool) {
     unsafe {
-        if !UI_BUILDS_READY {
+        if claim {
+            if !REGISTER_UI_READY {
+                REGISTER_UI_BUILD = register_ui::build();
+                REGISTER_UI_READY = true;
+            }
+        } else if !LOGIN_UI_READY {
             LOGIN_UI_BUILD = login_ui::build();
-            REGISTER_UI_BUILD = register_ui::build();
-            UI_BUILDS_READY = true;
+            LOGIN_UI_READY = true;
         }
     }
 }
 
 fn ui_build(claim: bool) -> &'static logos_ui_compiler::UiBuild {
+    initialize_ui_build(claim);
     unsafe {
         if claim {
             &*core::ptr::addr_of!(REGISTER_UI_BUILD)
@@ -293,7 +299,6 @@ fn destroy_surface(display: logos_abi::CapabilityHandle, surface: SurfaceHandle,
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
-    initialize_ui_builds();
     let input = common::capability_handle(INPUT_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display = common::capability_handle(DISPLAY_CAPABILITY).unwrap_or_else(|_| common::idle());
     let display_control =
