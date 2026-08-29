@@ -338,7 +338,7 @@ pub extern "C" fn _start() -> ! {
                 update_fps_surface(display, fps_surface, &mut fps_scene_frame, 0);
             }
         }
-        if !gui_render_pending && fps_enabled && fps.refresh(common::current_ticks()) {
+        if fps_enabled && fps.refresh(common::current_ticks()) {
             update_fps_surface(display, fps_surface, &mut fps_scene_frame, fps.value);
             gui_dirty = true;
         }
