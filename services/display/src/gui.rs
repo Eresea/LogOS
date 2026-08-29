@@ -1018,21 +1018,6 @@ fn render_modern(
 ) -> usize {
     let bounds = GuiRect::new(command.x, command.y, command.width, command.height);
     let inner = rounded_stroke_inner(command, bounds);
-    let blur = command.shadow_blur();
-    let offset_x = i32::from(command.shadow_offset_x());
-    let offset_y = i32::from(command.shadow_offset_y());
-    let shifted_shadow = GuiRect::new(
-        bounds.x.saturating_add(offset_x),
-        bounds.y.saturating_add(offset_y),
-        bounds.width,
-        bounds.height,
-    );
-    let mut shadow_shapes = [GuiRect::EMPTY; 5];
-    let mut distance = 0;
-    while distance <= blur {
-        shadow_shapes[distance as usize] = expand_rect(shifted_shadow, i32::from(distance));
-        distance += 1;
-    }
     let clip = intersect(clip, GuiRect::new(0, 0, width as u32, height as u32));
     match command.kind {
         GuiDrawKind::FillRoundedRect => render_rounded_fill(
@@ -1060,17 +1045,32 @@ fn render_modern(
             inner,
         ),
         GuiDrawKind::Line => render_line(framebuffer, width, height, stride, format, command, clip),
-        GuiDrawKind::Shadow => render_shadow(
-            framebuffer,
-            width,
-            height,
-            stride,
-            format,
-            command,
-            clip,
-            &shadow_shapes,
-            blur,
-        ),
+        GuiDrawKind::Shadow => {
+            let blur = command.shadow_blur();
+            let shifted_shadow = GuiRect::new(
+                bounds.x.saturating_add(i32::from(command.shadow_offset_x())),
+                bounds.y.saturating_add(i32::from(command.shadow_offset_y())),
+                bounds.width,
+                bounds.height,
+            );
+            let mut shadow_shapes = [GuiRect::EMPTY; 5];
+            let mut distance = 0;
+            while distance <= blur {
+                shadow_shapes[distance as usize] = expand_rect(shifted_shadow, i32::from(distance));
+                distance += 1;
+            }
+            render_shadow(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                command,
+                clip,
+                &shadow_shapes,
+                blur,
+            )
+        }
         _ => 0,
     }
 }
