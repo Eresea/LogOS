@@ -183,7 +183,7 @@ pub(crate) fn run() {
             #[cfg(feature = "qemu-proof")]
             proof::live_service_restarted();
         }
-        sleep_current_for(3);
+        sleep_current_for(1);
         #[cfg(feature = "qemu-proof")]
         proof::runtime_wait_resumed();
     }
