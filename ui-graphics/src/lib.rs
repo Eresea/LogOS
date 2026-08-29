@@ -121,7 +121,7 @@ fn emit_node(
                 GuiDrawCommand::fill_rect(to_gui_rect(bounds), color(theme.surface, node)),
             )?;
         }
-        UiNodeKind::Panel => {
+        UiNodeKind::Panel | UiNodeKind::Form => {
             push_upsert(
                 output,
                 surface,
@@ -157,7 +157,6 @@ fn emit_node(
             let value = tree.value(node.handle).unwrap_or(node.text);
             push_text(output, surface, frame, index, node, value.as_bytes(), theme.text)?;
         }
-        UiNodeKind::Form => {}
     }
     Ok(())
 }
