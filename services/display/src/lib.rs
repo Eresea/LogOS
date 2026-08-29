@@ -446,8 +446,8 @@ fn rects_touch(left: GuiRect, right: GuiRect) -> bool {
         && right.y <= left_bottom
 }
 
-fn append_present_rect(
-    damage: &mut [GuiRect; MAX_DISPLAY_PRESENT_RECTS],
+fn append_present_rect<const CAPACITY: usize>(
+    damage: &mut [GuiRect; CAPACITY],
     count: &mut usize,
     rect: GuiRect,
 ) -> bool {
@@ -828,11 +828,15 @@ impl Display {
     ) {
         let Some(backbuffer) = self.backbuffer.as_ref() else { return };
         let screen = GuiRect::new(0, 0, width as u32, height as u32);
+        let mut merged = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        let mut merged_count = 0;
         for rect in damage.iter().copied() {
             let rect = intersect(rect, screen);
-            if rect.is_empty() {
-                continue;
+            if !rect.is_empty() {
+                let _ = append_present_rect(&mut merged, &mut merged_count, rect);
             }
+        }
+        for rect in merged[..merged_count].iter().copied() {
             let left = rect.x as usize;
             let right = left + rect.width as usize;
             for row in rect.y as usize..rect.y as usize + rect.height as usize {
