@@ -123,7 +123,7 @@ pub extern "C" fn _start() -> ! {
     let mut message =
         InputMessage::key(logos_abi::KeyCode::Unknown, logos_abi::KeyState::Released, 0);
     let mut heartbeat_ticks = 0u16;
-    if let Ok(mut request) = shell.begin_user_request(UserOperation::Login, b"Probe", b"probe") {
+    if let Ok(mut request) = shell.begin_user_request(UserOperation::Login, b"probe", b"probe") {
         let request_id = request.request_id;
         let bytes = unsafe {
             core::slice::from_raw_parts(
@@ -157,12 +157,13 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        while common::ipc_receive_handle(lockscreen_request, &mut lock_request) == IpcStatus::Ok {
-            if pending_user.is_some()
-                || pending_probe.is_some()
-                || pending_lock_request.is_some()
-                || pending_lock_response.is_some()
-                || !lock_request.is_valid()
+        while pending_user.is_none()
+            && pending_probe.is_none()
+            && pending_lock_request.is_none()
+            && pending_lock_response.is_none()
+            && common::ipc_receive_handle(lockscreen_request, &mut lock_request) == IpcStatus::Ok
+        {
+            if !lock_request.is_valid()
                 || !matches!(lock_request.operation, UserOperation::Claim | UserOperation::Login)
             {
                 continue;

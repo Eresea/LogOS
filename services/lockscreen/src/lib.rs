@@ -15,11 +15,15 @@ use logos_ui_forms::{BoundedText, Control, FormState, ValidationError};
 
 pub const MAX_FIELD_BYTES: usize = 32;
 pub const MAX_RETRIES: u8 = 3;
-pub const USERNAME_BOUNDS: GuiRect = GuiRect::new(170, 132, 300, 36);
-pub const PASSWORD_BOUNDS: GuiRect = GuiRect::new(170, 192, 300, 36);
-pub const CONFIRM_PASSWORD_BOUNDS: GuiRect = GuiRect::new(170, 252, 300, 36);
-pub const SUBMIT_BOUNDS: GuiRect = GuiRect::new(250, 248, 140, 36);
-pub const CLAIM_SUBMIT_BOUNDS: GuiRect = GuiRect::new(250, 300, 140, 36);
+pub const USERNAME_BOUNDS: GuiRect = GuiRect::new(128, 120, 384, 40);
+pub const PASSWORD_BOUNDS: GuiRect = GuiRect::new(128, 176, 384, 40);
+pub const CONFIRM_PASSWORD_BOUNDS: GuiRect = GuiRect::new(128, 280, 384, 40);
+pub const SUBMIT_BOUNDS: GuiRect = GuiRect::new(128, 232, 384, 40);
+pub const CLAIM_USERNAME_BOUNDS: GuiRect = GuiRect::new(128, 168, 384, 40);
+pub const CLAIM_PASSWORD_BOUNDS: GuiRect = GuiRect::new(128, 224, 384, 40);
+pub const CLAIM_SUBMIT_BOUNDS: GuiRect = GuiRect::new(128, 336, 384, 40);
+const CLAIM_CONFIRM_POINTER_BOUNDS: GuiRect = GuiRect::new(128, 280, 384, 56);
+const CLAIM_SUBMIT_POINTER_BOUNDS: GuiRect = GuiRect::new(128, 336, 384, 56);
 
 pub type LoginText = BoundedText<MAX_FIELD_BYTES>;
 
@@ -401,15 +405,23 @@ impl LockScreen {
     fn pointer_target(&self, x: i16, y: i16) -> Option<LockScreenField> {
         let x = i32::from(x);
         let y = i32::from(y);
-        if USERNAME_BOUNDS.contains(x, y) {
+        let (username, password, confirm, submit) = if self.mode == LockScreenMode::Claim {
+            (
+                CLAIM_USERNAME_BOUNDS,
+                CLAIM_PASSWORD_BOUNDS,
+                CLAIM_CONFIRM_POINTER_BOUNDS,
+                CLAIM_SUBMIT_POINTER_BOUNDS,
+            )
+        } else {
+            (USERNAME_BOUNDS, PASSWORD_BOUNDS, CONFIRM_PASSWORD_BOUNDS, SUBMIT_BOUNDS)
+        };
+        if username.contains(x, y) {
             Some(LockScreenField::Username)
-        } else if PASSWORD_BOUNDS.contains(x, y) {
+        } else if password.contains(x, y) {
             Some(LockScreenField::Password)
-        } else if self.mode == LockScreenMode::Claim && CONFIRM_PASSWORD_BOUNDS.contains(x, y) {
+        } else if self.mode == LockScreenMode::Claim && confirm.contains(x, y) {
             Some(LockScreenField::ConfirmPassword)
-        } else if (self.mode == LockScreenMode::Login && SUBMIT_BOUNDS.contains(x, y))
-            || (self.mode == LockScreenMode::Claim && CLAIM_SUBMIT_BOUNDS.contains(x, y))
-        {
+        } else if submit.contains(x, y) {
             Some(LockScreenField::Submit)
         } else {
             None
@@ -708,10 +720,48 @@ mod tests {
         let mut lock = LockScreen::new();
         lock.set_unclaimed();
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(200, 270, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(200, 290, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::ConfirmPassword);
+    }
+
+    #[test]
+    fn pointer_targets_match_rendered_control_edges() {
+        let mut lock = LockScreen::new();
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(150, 125, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::Username);
+
+        lock.set_unclaimed();
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(150, 340, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::Submit);
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(150, 290, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::ConfirmPassword);
+    }
+
+    #[test]
+    fn pointer_targets_match_claim_layout_with_notice() {
+        let mut lock = LockScreen::new();
+        lock.set_unclaimed();
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(150, 180, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::Username);
+        assert_eq!(
+            lock.pointer_input(InputMessage::pointer(150, 240, 1, PointerState::Down).unwrap()),
+            LockScreenAction::Changed
+        );
+        assert_eq!(lock.field(), LockScreenField::Password);
     }
 
     #[test]

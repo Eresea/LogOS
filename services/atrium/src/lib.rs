@@ -794,6 +794,9 @@ mod tests {
     fn phase_and_surface_lifecycle_is_bounded() {
         let mut atrium = Atrium::new();
         assert_eq!(atrium.phase(), AtriumPhase::Boot);
+        atrium.lock();
+        assert_eq!(atrium.phase(), AtriumPhase::Locked);
+        assert_eq!(atrium.request_surface(AppId::Calculator, client(1)), Err(AtriumError::Locked));
         atrium.authenticate();
         for slot in 0..MAX_ATRIUM_SURFACES {
             let request =
