@@ -226,6 +226,7 @@ pub struct VirtioBlockDevice {
     isr: MmioRegion,
     device: MmioRegion,
     notify_multiplier: u32,
+    capacity_blocks: u64,
     queue: &'static mut QueueMemory,
     requests: [Option<BlockRequestId>; QUEUE_SIZE],
     used_index: u16,
@@ -327,6 +328,7 @@ impl VirtioBlockDevice {
             isr,
             device: device_config,
             notify_multiplier: probe.capabilities.notify_multiplier,
+            capacity_blocks: 0,
             queue,
             requests: [None; QUEUE_SIZE],
             used_index: 0,
@@ -366,6 +368,7 @@ impl VirtioBlockDevice {
                 STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
             )?
         };
+        device.capacity_blocks = device.read_capacity_blocks()?;
         Ok(device)
     }
 
@@ -391,6 +394,13 @@ impl VirtioBlockDevice {
     }
 
     fn capacity_blocks(&self) -> Result<u64, DeviceError> {
+        if self.capacity_blocks == 0 {
+            return Err(DeviceError::InvalidCompletion);
+        }
+        Ok(self.capacity_blocks)
+    }
+
+    fn read_capacity_blocks(&self) -> Result<u64, DeviceError> {
         let sectors = unsafe { self.device.read_u64(0)? };
         let blocks = sectors / logos_storage::SECTORS_PER_LOGOS_BLOCK;
         if blocks == 0 { Err(DeviceError::InvalidCompletion) } else { Ok(blocks) }
