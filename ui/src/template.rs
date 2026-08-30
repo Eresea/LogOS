@@ -249,6 +249,7 @@ pub enum UiStyle {
     PaddingX6,
     PaddingY3,
     RoundedLarge,
+    RoundedFull,
     BackgroundAccent,
     Text4xl,
     FontLight,

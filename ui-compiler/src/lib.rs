@@ -26,7 +26,7 @@ pub const MAX_UI_VALUES: usize = 64;
 
 pub const UI_COMPONENT_NAMES: [&str; 5] =
     ["ui.button", "ui.column", "ui.form", "ui.input", "ui.text"];
-pub const UI_STYLE_NAMES: [&str; 19] = [
+pub const UI_STYLE_NAMES: [&str; 20] = [
     "h-full",
     "w-full",
     "flex-x",
@@ -42,6 +42,7 @@ pub const UI_STYLE_NAMES: [&str; 19] = [
     "px-6",
     "py-3",
     "rounded-lg",
+    "rounded-full",
     "bg-accent",
     "text-4xl",
     "font-light",
@@ -1243,6 +1244,7 @@ fn style_token(token: &[u8]) -> Option<UiStyle> {
         b"px-6" => Some(UiStyle::PaddingX6),
         b"py-3" => Some(UiStyle::PaddingY3),
         b"rounded-lg" => Some(UiStyle::RoundedLarge),
+        b"rounded-full" => Some(UiStyle::RoundedFull),
         b"bg-accent" => Some(UiStyle::BackgroundAccent),
         b"text-4xl" => Some(UiStyle::Text4xl),
         b"font-light" => Some(UiStyle::FontLight),
@@ -1704,7 +1706,7 @@ mod tests {
 
     #[test]
     fn compiles_flex_and_axis_specific_gap_utilities() {
-        let build = compile(r#"<ui.column {flex-x gap-2 gap-x-3 gap-y-4}/>"#);
+        let build = compile(r#"<ui.column {flex-x gap-2 gap-x-3 gap-y-4 rounded-full}/>"#);
         assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
         let styles = &build.document.node(0).unwrap().styles;
         let styles = &styles.tokens[..styles.len as usize];
@@ -1712,6 +1714,7 @@ mod tests {
         assert!(styles.contains(&UiStyle::Gap(2)));
         assert!(styles.contains(&UiStyle::GapX(3)));
         assert!(styles.contains(&UiStyle::GapY(4)));
+        assert!(styles.contains(&UiStyle::RoundedFull));
     }
 
     #[test]

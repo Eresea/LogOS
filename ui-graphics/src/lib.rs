@@ -123,45 +123,49 @@ fn emit_node(
             )?;
         }
         UiNodeKind::Panel | UiNodeKind::Form => {
+            push_shadow(output, surface, frame, index, node, bounds)?;
             push_upsert(
                 output,
                 surface,
                 frame,
                 index,
-                0,
+                1,
                 fill_command(bounds, panel_color(node, theme), node),
             )?;
         }
         UiNodeKind::Label => {
-            push_text(output, surface, frame, index, node, node.text.as_bytes(), theme.text)?;
+            push_text(output, surface, frame, index, node, node.text.as_bytes(), theme.text, 0)?;
         }
         UiNodeKind::Button => {
+            push_shadow(output, surface, frame, index, node, bounds)?;
             push_upsert(
                 output,
                 surface,
                 frame,
                 index,
-                0,
+                1,
                 fill_command(bounds, control_color(node, theme), node),
             )?;
-            push_text(output, surface, frame, index, node, node.text.as_bytes(), theme.text)?;
+            push_text(output, surface, frame, index, node, node.text.as_bytes(), theme.text, 2)?;
         }
         UiNodeKind::TextInput => {
+            push_shadow(output, surface, frame, index, node, bounds)?;
             push_upsert(
                 output,
                 surface,
                 frame,
                 index,
-                0,
+                1,
                 fill_command(bounds, control_color(node, theme), node),
             )?;
             let value = tree.value(node.handle).unwrap_or(node.text);
-            push_text(output, surface, frame, index, node, value.as_bytes(), theme.text)?;
+            push_text(output, surface, frame, index, node, value.as_bytes(), theme.text, 2)?;
         }
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_text(
     output: &mut UiSceneFrame,
     surface: SurfaceHandle,
@@ -170,6 +174,7 @@ fn push_text(
     node: &UiNode,
     text: &[u8],
     text_color: u32,
+    fragment: u32,
 ) -> Result<(), UiSceneError> {
     if text.is_empty() {
         return Ok(());
@@ -182,7 +187,29 @@ fn push_text(
     ) else {
         return Err(UiSceneError::Capacity);
     };
-    push_upsert(output, surface, frame, index, 1, command)
+    push_upsert(output, surface, frame, index, fragment, command)
+}
+
+fn push_shadow(
+    output: &mut UiSceneFrame,
+    surface: SurfaceHandle,
+    frame: u32,
+    index: usize,
+    node: &UiNode,
+    bounds: UiRect,
+) -> Result<(), UiSceneError> {
+    if !has_rounded_style(node) {
+        return Ok(());
+    }
+    let radius = corner_radius(bounds, node);
+    push_upsert(
+        output,
+        surface,
+        frame,
+        index,
+        0,
+        GuiDrawCommand::shadow(to_gui_rect(bounds), 0x55000000, radius, 3, 0, 3),
+    )
 }
 
 fn push_upsert(
@@ -196,7 +223,7 @@ fn push_upsert(
     if !command.is_valid() {
         return Err(UiSceneError::InvalidCommand);
     }
-    let node_id = (index as u32).saturating_mul(2).saturating_add(fragment + 1);
+    let node_id = (index as u32).saturating_mul(3).saturating_add(fragment + 1);
     let mut op = GuiSceneOp::upsert(surface, frame, node_id, command);
     op.flags = GUI_DRAW_FLAG_MORE;
     push(output, op)
@@ -223,13 +250,25 @@ fn visible_bounds(node: &UiNode) -> UiRect {
 
 fn fill_command(bounds: UiRect, color: u32, node: &UiNode) -> GuiDrawCommand {
     let rect = to_gui_rect(bounds);
-    if node.styles.contains(UiStyle::RoundedLarge) {
-        let radius = bounds.width.min(bounds.height).min(32) / 2;
-        if radius != 0 {
-            return GuiDrawCommand::fill_rounded_rect(rect, color, radius as u8);
-        }
+    let radius = corner_radius(bounds, node);
+    if radius != 0 {
+        return GuiDrawCommand::fill_rounded_rect(rect, color, radius);
     }
     GuiDrawCommand::fill_rect(rect, color)
+}
+
+fn corner_radius(bounds: UiRect, node: &UiNode) -> u8 {
+    if node.styles.contains(UiStyle::RoundedFull) {
+        bounds.width.min(bounds.height).min(64) as u8 / 2
+    } else if node.styles.contains(UiStyle::RoundedLarge) {
+        bounds.width.min(bounds.height).min(24) as u8 / 2
+    } else {
+        0
+    }
+}
+
+fn has_rounded_style(node: &UiNode) -> bool {
+    node.styles.contains(UiStyle::RoundedLarge) || node.styles.contains(UiStyle::RoundedFull)
 }
 
 fn panel_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
@@ -309,8 +348,8 @@ mod tests {
         assert_eq!(scene.as_slice()[0].operation, logos_abi::GuiNodeOperation::Clear);
         assert_eq!(scene.as_slice()[1].node_id, 1);
         assert_eq!(scene.as_slice()[2].node_id, 4);
-        assert_eq!(scene.as_slice()[3].node_id, 5);
-        assert_eq!(scene.as_slice()[4].node_id, 6);
+        assert_eq!(scene.as_slice()[3].node_id, 8);
+        assert_eq!(scene.as_slice()[4].node_id, 9);
         assert_eq!(scene.as_slice()[0].flags, GUI_DRAW_FLAG_MORE);
         assert_eq!(scene.as_slice()[4].flags, 0);
         assert!(scene.as_slice().iter().all(|op| op.is_valid()));
@@ -344,6 +383,28 @@ mod tests {
         let surface = SurfaceHandle::new(1, 1, 7).unwrap();
         let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
         assert_eq!(scene.as_slice()[1].command.width, 50);
+    }
+
+    #[test]
+    fn rounded_surface_emits_fixed_radius_and_shadow_before_fill() {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let button = blueprint.push_child(UiNodeKind::Button, root, 2).unwrap();
+        blueprint.set_text(button, UiText::from_bytes(b"Go").unwrap()).unwrap();
+        let mut styles = logos_ui::UiStyleList::EMPTY;
+        assert!(styles.push(logos_ui::UiStyle::RoundedLarge));
+        blueprint.set_styles(button, styles).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 100, 60));
+        set_bounds(&mut tree, 1, UiRect::new(8, 8, 80, 24));
+
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        assert_eq!(scene.as_slice()[2].command.kind, logos_abi::GuiDrawKind::Shadow);
+        assert_eq!(scene.as_slice()[3].command.kind, logos_abi::GuiDrawKind::FillRoundedRect);
+        assert_eq!(scene.as_slice()[3].command.corner_radius(), 12);
+        assert_eq!(scene.as_slice()[2].command.shadow_blur(), 3);
+        assert!(scene.as_slice().iter().all(|op| op.is_valid()));
     }
 
     #[test]
