@@ -23,9 +23,9 @@ const SNAPSHOT_MAGIC: [u8; 8] = *b"LOGUSR01";
 const SNAPSHOT_VERSION: u16 = 1;
 
 #[cfg(feature = "password-kdf")]
-const ARGON2_MEMORY_KIB: u32 = 64 * 1024;
+const ARGON2_MEMORY_KIB: u32 = 1024;
 #[cfg(feature = "password-kdf")]
-const ARGON2_TIME_COST: u32 = 3;
+const ARGON2_TIME_COST: u32 = 1;
 #[cfg(feature = "password-kdf")]
 const ARGON2_LANES: u32 = 1;
 const ARGON2_VERSION: u8 = 1;
