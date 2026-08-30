@@ -10,6 +10,12 @@ use crate::proof;
 
 pub(crate) fn run() {
     crate::start_services();
+    if cfg!(feature = "lockscreen-proof") {
+        loop {
+            crate::supervise_services();
+            sleep_current_for(1);
+        }
+    }
     #[cfg(feature = "qemu-proof")]
     proof::verify_service_manager_boundary();
     #[cfg(feature = "qemu-proof")]

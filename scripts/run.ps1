@@ -97,7 +97,7 @@ if ($networkEnabled) {
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
 $display = if ($interactiveMode) { 'gtk,zoom-to-fit=on' } else { 'none' }
 $qemuArgs = @(
-    '-machine', 'q35', '-m', '256M', '-smp', $Cpus,
+    '-machine', 'q35', '-m', '256M', '-smp', $Cpus, '-cpu', 'max',
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
     '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",
@@ -133,8 +133,80 @@ if ($Proof) {
 }
 
 if (-not $Proof) {
-    & $qemuPath @qemuArgs
-    exit $LASTEXITCODE
+    if (-not ('LogosInteractiveProcess' -as [type])) {
+        Add-Type @'
+using System;
+using System.ComponentModel;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class LogosInteractiveProcess {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo {
+        public int cb;
+        public string reserved;
+        public string desktop;
+        public string title;
+        public int x, y, xSize, ySize, xCountChars, yCountChars, fillAttribute, flags;
+        public short showWindow, reserved2;
+        public IntPtr reserved2Pointer, standardInput, standardOutput, standardError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation {
+        public IntPtr process;
+        public IntPtr thread;
+        public int processId;
+        public int threadId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CreateProcess(
+        string application,
+        StringBuilder commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        bool inheritHandles,
+        uint creationFlags,
+        IntPtr environment,
+        string workingDirectory,
+        ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    public static int Start(string application, string commandLine, string workingDirectory) {
+        var startup = new StartupInfo {
+            cb = Marshal.SizeOf<StartupInfo>(),
+            desktop = "WinSta0\\Default",
+            showWindow = 1
+        };
+        var information = new ProcessInformation();
+        var command = new StringBuilder(commandLine);
+        if (!CreateProcess(application, command, IntPtr.Zero, IntPtr.Zero, false, 0,
+                           IntPtr.Zero, workingDirectory, ref startup, out information)) {
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "QEMU could not be started on the interactive Windows desktop.");
+        }
+        CloseHandle(information.thread);
+        CloseHandle(information.process);
+        return information.processId;
+    }
+}
+'@
+    }
+    $interactiveLogName = "qemu-interactive-$PID.log"
+    $interactiveArguments = ($qemuArgs | ForEach-Object {
+            if ($_ -eq 'stdio') { "file:$interactiveLogName" }
+            elseif ($_ -match '[\s"]') { '"' + $_.Replace('"', '\"') + '"' } else { $_ }
+        }) -join ' '
+    $interactiveCommandLine = '"' + $qemuPath.Replace('"', '\"') + '" ' + $interactiveArguments
+    $interactivePid = [LogosInteractiveProcess]::Start($qemuPath, $interactiveCommandLine, $target)
+    $interactiveProcess = [Diagnostics.Process]::GetProcessById($interactivePid)
+    $interactiveProcess.WaitForExit()
+    $exitCode = $interactiveProcess.ExitCode
+    $interactiveProcess.Dispose()
+    exit $exitCode
 }
 
 $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -156,11 +228,11 @@ if ($networkEnabled -and $Proof) {
     $peerArguments = @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
             (Join-Path $PSScriptRoot 'network-peer.ps1'), '-Port', [string]$networkPeerPort
-        )
+    )
     if ($NetworkTracePath) { $peerArguments += @('-TracePath', [System.IO.Path]::GetFullPath($NetworkTracePath)) }
-    foreach ($argument in $peerArguments) {
-        [void]$peerPsi.ArgumentList.Add($argument)
-    }
+    $peerPsi.Arguments = ($peerArguments | ForEach-Object {
+            if ($_ -match '[\s"]') { '"' + $_.Replace('"', '\"') + '"' } else { $_ }
+        }) -join ' '
     $networkPeerProcess = [Diagnostics.Process]::new()
     $networkPeerProcess.StartInfo = $peerPsi
     [void]$networkPeerProcess.Start()
@@ -175,6 +247,8 @@ while ([DateTime]::UtcNow -lt $deadline) {
         $text = Get-Content $log -Raw
         $successMarker = if ($FetchProof) {
             'LogOS vNext: fetch proof PASS'
+        } elseif ($LockScreenProof) {
+            'LogOS vNext: LockScreen claim mode ready'
         } else {
             'LogOS vNext: QEMU proof PASS'
         }
@@ -288,6 +362,7 @@ function Send-QmpPointerButton {
             )
         }
     } | Out-Null
+    Start-Sleep -Milliseconds 100
 }
 
 function Wait-ProofMarker {
@@ -354,10 +429,18 @@ function Framebuffer-HasNativeCursor {
     param([string]$Path, [int]$X, [int]$Y)
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [IO.File]::ReadAllBytes($Path)
-    # Check the fixed arrow tip/body rather than the old solid 3x14 cursor bar.
-    foreach ($point in @(@(0, 0), @(1, 1), @(4, 4), @(8, 8), @(12, 12))) {
-        $index = 15 + (((($Y + 2 + $point[1]) * 640) + $X + 1 + $point[0]) * 3)
-        if ($bytes[$index] -ne 255 -or $bytes[$index + 1] -ne 255 -or $bytes[$index + 2] -ne 255) {
+    # The software cursor is an adaptive circular shape with an opaque core.
+    $points = @(@(0, 0), @(1, 0), @(-1, 0), @(0, 1), @(0, -1))
+    $origin = 15 + (($Y * 640 + $X) * 3)
+    $red = $bytes[$origin]
+    $green = $bytes[$origin + 1]
+    $blue = $bytes[$origin + 2]
+    $isBright = $red -ge 220 -and $green -ge 220 -and $blue -ge 220
+    $isDark = $red -le 32 -and $green -le 32 -and $blue -le 32
+    if (-not ($isBright -or $isDark)) { return $false }
+    foreach ($point in $points) {
+        $index = 15 + (((($Y + $point[1]) * 640) + $X + $point[0]) * 3)
+        if ($bytes[$index] -ne $red -or $bytes[$index + 1] -ne $green -or $bytes[$index + 2] -ne $blue) {
             return $false
         }
     }
@@ -451,19 +534,27 @@ try {
         Write-Host 'Fetch persistence proof PASS'
         return
     }
-    $atriumAdmissionCount = Get-ProofMarkerCount 'LogOS vNext: Atrium and LockScreen tasks admitted'
-    if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium and LockScreen tasks admitted' $atriumAdmissionCount $TimeoutSeconds)) {
-        throw 'Atrium/LockScreen restart admission was not observed.'
+    if (-not $LockScreenProof) {
+        $atriumAdmissionCount = Get-ProofMarkerCount 'LogOS vNext: Atrium and LockScreen tasks admitted'
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium and LockScreen tasks admitted' $atriumAdmissionCount $TimeoutSeconds)) {
+            throw 'Atrium/LockScreen restart admission was not observed.'
+        }
     }
     if (-not (Wait-ProofMarker 'LogOS vNext: Atrium IPC topology ready' $TimeoutSeconds)) {
         throw 'Atrium IPC topology was not admitted.'
+    }
+    if (-not (Wait-ProofMarker 'LogOS vNext: Atrium locked route ready' $TimeoutSeconds)) {
+        throw 'Boot did not enter the locked route.'
     }
     if (-not (Wait-ProofMarker 'LogOS vNext: Atrium and LockScreen tasks admitted' $TimeoutSeconds)) {
         throw 'Atrium/LockScreen task startup was not admitted.'
     }
     if (-not $LockScreenProof) {
+        if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen cursor surface ready' $TimeoutSeconds)) {
+        throw 'LockScreen cursor surface did not become ready.'
+        }
         if ($interactiveMode) {
-        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
+            Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofBefore } } | Out-Null
         }
         foreach ($key in @('n', 'e', 't', 'dot', 's', 't', 'a', 't', 'u', 's', 'ret')) {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{
@@ -473,13 +564,13 @@ try {
         }
         Start-Sleep -Milliseconds 500
         if ($interactiveMode) {
-        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofAfter } } | Out-Null
-        if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
+            Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $proofAfter } } | Out-Null
+            if (-not (Test-Path $proofBefore) -or -not (Test-Path $proofAfter)) {
             throw 'QEMU proof did not capture both framebuffer snapshots.'
-        }
-        if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
+            }
+            if ((Get-FileHash $proofBefore).Hash -eq (Get-FileHash $proofAfter).Hash) {
             throw 'QEMU keyboard injection did not change the rendered framebuffer.'
-        }
+            }
         }
         $resultAfterInput = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
         if ($resultAfterInput -notmatch 'LogOS vNext: keyboard event wake') {
@@ -490,10 +581,20 @@ try {
         Send-QmpKey $qmp 'ctrl-3'
         Start-Sleep -Seconds 2
         $pointerWakeCount = Get-ProofMarkerCount 'LogOS vNext: pointer event wake'
+        # The PS/2 decoder intentionally drops zero-delta packets. Use one
+        # bounded pixel of motion to materialize the initial software cursor.
+        $cursorBaselineCount = Get-ProofMarkerCount 'LogOS vNext: Display cursor published'
+        Send-QmpPointerMotion $qmp 1 0
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: pointer event wake' $pointerWakeCount $TimeoutSeconds)) {
+        throw 'QEMU pointer baseline event was not delivered.'
+        }
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Display cursor published' $cursorBaselineCount $TimeoutSeconds)) {
+        throw 'QEMU pointer baseline cursor was not published.'
+        }
         if (-not (Wait-QmpFramebufferStable $qmp $pointerBefore $TimeoutSeconds)) {
         throw 'QEMU pointer proof did not observe a rendered framebuffer.'
         }
-        if (-not $VirtioGpu -and -not (Framebuffer-HasNativeCursor $pointerBefore 320 200)) {
+        if (-not $VirtioGpu -and -not (Framebuffer-HasNativeCursor $pointerBefore 321 200)) {
         throw 'QEMU pointer proof did not observe the native cursor on LockScreen.'
         }
         if ($VirtioGpu -and -not (Wait-ProofMarker 'LogOS vNext: VirtIO GPU cursor ready' $TimeoutSeconds)) {
@@ -527,23 +628,50 @@ try {
         if (-not (Wait-ProofMarker 'LogOS vNext: VirtIO GPU cursor moved' $TimeoutSeconds)) {
             throw 'QEMU pointer motion did not move the VirtIO-GPU cursor plane.'
         }
-        } elseif (-not (Framebuffer-HasNativeCursor $pointerAfter 360 180)) {
+        } elseif (-not (Framebuffer-HasNativeCursor $pointerAfter 361 180)) {
         throw 'QEMU pointer motion did not move the native cursor to the decoded position.'
         }
     }
     if ($LockScreenProof) {
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen surface ready' $TimeoutSeconds)) {
-            throw 'LockScreen surface did not become ready.'
+        throw 'LockScreen surface did not become ready.'
+        }
+        if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen cursor surface ready' $TimeoutSeconds)) {
+        throw 'LockScreen cursor surface did not become ready.'
         }
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen claim mode ready' $TimeoutSeconds)) {
-            throw 'First-boot Claim mode did not become ready.'
+        throw 'First-boot Claim mode did not become ready.'
+        }
+        # Exercise the rendered register controls with the mouse: username,
+        # password, confirmation, then the submit target.
+        $pointerTargetCount = Get-ProofMarkerCount 'LogOS vNext: LockScreen pointer target accepted'
+        Send-QmpPointerMotion $qmp -170 -20
+        Send-QmpPointerButton $qmp $true
+        Send-QmpPointerButton $qmp $false
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' $pointerTargetCount $TimeoutSeconds)) {
+            throw 'Register username click was not delivered.'
         }
         Send-QmpText $qmp 'admin'
-        Send-QmpKey $qmp 'tab'
+        Send-QmpPointerMotion $qmp 0 60
+        Send-QmpPointerButton $qmp $true
+        Send-QmpPointerButton $qmp $false
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' ($pointerTargetCount + 1) $TimeoutSeconds)) {
+            throw 'Register password click was not delivered.'
+        }
         Send-QmpText $qmp 'password'
-        Send-QmpKey $qmp 'tab'
+        Send-QmpPointerMotion $qmp 0 60
+        Send-QmpPointerButton $qmp $true
+        Send-QmpPointerButton $qmp $false
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' ($pointerTargetCount + 2) $TimeoutSeconds)) {
+            throw 'Register confirmation click was not delivered.'
+        }
         Send-QmpText $qmp 'password'
-        Send-QmpKey $qmp 'ret'
+        Send-QmpPointerMotion $qmp 0 60
+        Send-QmpPointerButton $qmp $true
+        Send-QmpPointerButton $qmp $false
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' ($pointerTargetCount + 3) $TimeoutSeconds)) {
+            throw 'Register submit click was not delivered.'
+        }
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen admin claim PASS' $TimeoutSeconds)) {
             throw 'Admin claim did not complete.'
         }
@@ -562,14 +690,34 @@ try {
             throw 'Home surface did not become ready after explicit login.'
         }
 
-        $bootMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium IPC topology ready'
-        $surfaceMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen surface ready'
         $homeMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium home surface ready'
-        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'system_reset' } | Out-Null
-        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium IPC topology ready' $bootMarker $TimeoutSeconds)) {
+        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'quit' } | Out-Null
+        if (-not $process.WaitForExit(5000)) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            throw 'First proof QEMU did not exit before the persisted boot.'
+        }
+        $qmp.Client.Close()
+        $qmp = $null
+        $secondLogName = "qemu-proof-$Cpus-second-$PID.log"
+        $secondLog = Join-Path $target $secondLogName
+        Remove-Item -LiteralPath $secondLog -Force -ErrorAction SilentlyContinue
+        $qemuArgs = $qemuArgs | ForEach-Object {
+            if ($_ -like 'file:qemu-proof-*.log') { "file:$secondLogName" } else { $_ }
+        }
+        $psi.Arguments = ($qemuArgs | ForEach-Object {
+                if ($_ -match '[\s"]') { '"' + $_.Replace('"', '\"') + '"' } else { $_ }
+            }) -join ' '
+        $process.Dispose()
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $psi
+        [void]$process.Start()
+        $log = $secondLog
+        $homeMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium home surface ready'
+        $qmp = Connect-Qmp $QmpPort
+        if (-not (Wait-ProofMarker 'LogOS vNext: Atrium IPC topology ready' $TimeoutSeconds)) {
             throw 'Second boot did not reach Atrium.'
         }
-        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen surface ready' $surfaceMarker $TimeoutSeconds)) {
+        if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen surface ready' $TimeoutSeconds)) {
             throw 'Second boot did not recreate LockScreen.'
         }
         $loginMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen login PASS'
@@ -583,7 +731,6 @@ try {
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium home surface ready' $homeMarker $TimeoutSeconds)) {
             throw 'Home surface did not become ready after persisted login.'
         }
-        Add-Content -LiteralPath $log -Value 'LogOS vNext: LockScreen proof PASS'
         Write-Host 'LockScreen two-boot proof PASS'
     }
     Write-Host $result
