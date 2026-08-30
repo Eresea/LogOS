@@ -578,13 +578,17 @@ fn queue_cursor_surface(
     sent.then_some(request)
 }
 
-fn cursor_op(surface: SurfaceHandle, x: i16, y: i16, sequence: &mut u32) -> GuiSceneOp {
-    GuiSceneOp::upsert(
-        surface,
-        next_request_id(sequence),
-        1,
-        GuiDrawCommand::fill_rect(GuiRect::new(i32::from(x), i32::from(y), 3, 14), 0xffffff),
-    )
+fn cursor_op(
+    surface: SurfaceHandle,
+    x: i16,
+    y: i16,
+    pressed: bool,
+    sequence: &mut u32,
+) -> GuiSceneOp {
+    let mut command =
+        GuiDrawCommand::fill_rect(GuiRect::new(i32::from(x), i32::from(y), 3, 14), 0xffffff);
+    command.auxiliary = pressed as u32;
+    GuiSceneOp::upsert(surface, next_request_id(sequence), 1, command)
 }
 
 fn discover_program_capability(
@@ -700,6 +704,8 @@ pub extern "C" fn _start() -> ! {
         GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, 1),
         logos_abi::GuiStatus::Malformed,
     );
+    atrium.lock();
+    proof_line(b"LogOS vNext: Atrium locked route ready");
     send_lockscreen_section(lockscreen_control, true, &mut next_request);
 
     loop {
@@ -1118,8 +1124,13 @@ pub extern "C" fn _start() -> ! {
                 pending_cursor_surface = None;
                 if response.status == logos_abi::GuiStatus::Ok && response.surface.is_valid() {
                     cursor_surface = response.surface;
-                    pending_cursor_draw =
-                        Some(cursor_op(cursor_surface, cursor_x, cursor_y, &mut cursor_sequence));
+                    pending_cursor_draw = Some(cursor_op(
+                        cursor_surface,
+                        cursor_x,
+                        cursor_y,
+                        false,
+                        &mut cursor_sequence,
+                    ));
                 }
                 continue;
             }
@@ -1298,8 +1309,13 @@ pub extern "C" fn _start() -> ! {
                 cursor_x = pointer.x.clamp(0, 639);
                 cursor_y = pointer.y.clamp(0, 399);
                 if cursor_surface.is_valid() {
-                    let cursor =
-                        cursor_op(cursor_surface, cursor_x, cursor_y, &mut cursor_sequence);
+                    let cursor = cursor_op(
+                        cursor_surface,
+                        cursor_x,
+                        cursor_y,
+                        pointer.buttons & 1 != 0,
+                        &mut cursor_sequence,
+                    );
                     if cursor_sent_in_input || pending_cursor_draw.is_some() {
                         pending_cursor_draw = Some(cursor);
                     } else {

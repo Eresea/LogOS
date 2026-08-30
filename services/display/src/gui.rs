@@ -821,8 +821,7 @@ fn is_surface_fill(command: GuiDrawCommand) -> bool {
 }
 
 fn is_opaque_occluder(command: GuiDrawCommand) -> bool {
-    matches!(command.kind, GuiDrawKind::FillRect | GuiDrawKind::FillRoundedRect)
-        && color_alpha(command.color) == u8::MAX
+    command.kind == GuiDrawKind::FillRect && color_alpha(command.color) == u8::MAX
 }
 
 fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
@@ -1102,30 +1101,12 @@ fn render_rounded_fill(
     if clip.is_empty() {
         return 0;
     }
-    let left = bounds.x;
-    let right = bounds.x.saturating_add(bounds.width as i32);
-    let top = bounds.y;
-    let radius = i32::from(radius);
     let clip_right = clip.x.saturating_add(clip.width as i32);
     let mut rendered = 0;
     for y in clip.y..clip.y.saturating_add(clip.height as i32) {
-        let local_y = y.saturating_sub(top);
-        if radius == 0 || (local_y >= radius && local_y < bounds.height as i32 - radius) {
-            rendered += fill_span(
-                framebuffer,
-                width,
-                height,
-                stride,
-                format,
-                clip.x,
-                clip_right,
-                y,
-                color,
-                u8::MAX,
-            );
-            continue;
-        }
-        let left_edge = clip_right.min(left.saturating_add(radius));
+        let Some(row) = rounded_row(bounds, radius, y) else { continue };
+        let right_full = mirrored_right(bounds, row.full_start);
+        let right_edge = mirrored_right(bounds, row.start);
         rendered += render_rounded_edge(
             framebuffer,
             width,
@@ -1133,10 +1114,10 @@ fn render_rounded_fill(
             stride,
             format,
             bounds,
-            radius as u8,
+            radius,
             color,
-            clip.x,
-            left_edge,
+            clip.x.max(row.start),
+            clip_right.min(row.full_start),
             y,
         );
         rendered += fill_span(
@@ -1145,8 +1126,8 @@ fn render_rounded_fill(
             height,
             stride,
             format,
-            clip.x.max(left.saturating_add(radius)),
-            clip_right.min(right.saturating_sub(radius)),
+            clip.x.max(row.full_start),
+            clip_right.min(right_full),
             y,
             color,
             u8::MAX,
@@ -1158,10 +1139,10 @@ fn render_rounded_fill(
             stride,
             format,
             bounds,
-            radius as u8,
+            radius,
             color,
-            clip.x.max(right.saturating_sub(radius)),
-            clip_right,
+            clip.x.max(right_full),
+            clip_right.min(right_edge),
             y,
         );
     }
@@ -1360,15 +1341,111 @@ fn render_shadow(
     shadow_shapes: &[GuiRect; 5],
     blur: u8,
 ) -> usize {
+    let base_radius = command.corner_radius();
+    let outer_radius = base_radius.saturating_add(blur);
     let mut rendered = 0;
     for y in clip.y..clip.y.saturating_add(clip.height as i32) {
-        for x in clip.x..clip.x.saturating_add(clip.width as i32) {
-            let coverage = shadow_coverage(shadow_shapes, command.corner_radius(), x, y, blur);
-            if coverage != 0 {
-                rendered +=
-                    plot(framebuffer, width, height, stride, format, x, y, command.color, coverage)
-                        as usize;
+        let Some(outer_row) = rounded_row(shadow_shapes[blur as usize], outer_radius, y) else {
+            continue;
+        };
+        let outer_end = mirrored_right(shadow_shapes[blur as usize], outer_row.start);
+        let base_row = rounded_row(shadow_shapes[0], base_radius, y);
+        if let Some(base_row) = base_row {
+            let base_full_end = mirrored_right(shadow_shapes[0], base_row.full_start);
+            if base_row.full_start < base_full_end {
+                rendered += fill_span(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    clip.x.max(base_row.full_start),
+                    clip.x.saturating_add(clip.width as i32).min(base_full_end),
+                    y,
+                    command.color,
+                    u8::MAX,
+                );
+                rendered += render_shadow_edge(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    command,
+                    clip.x.max(outer_row.start),
+                    clip.x.saturating_add(clip.width as i32).min(base_row.full_start),
+                    y,
+                    shadow_shapes,
+                    blur,
+                );
+                rendered += render_shadow_edge(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    command,
+                    clip.x.max(base_full_end),
+                    clip.x.saturating_add(clip.width as i32).min(outer_end),
+                    y,
+                    shadow_shapes,
+                    blur,
+                );
+            } else {
+                rendered += render_shadow_edge(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    command,
+                    clip.x.max(outer_row.start),
+                    clip.x.saturating_add(clip.width as i32).min(outer_end),
+                    y,
+                    shadow_shapes,
+                    blur,
+                );
             }
+        } else {
+            rendered += render_shadow_edge(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                command,
+                clip.x.max(outer_row.start),
+                clip.x.saturating_add(clip.width as i32).min(outer_end),
+                y,
+                shadow_shapes,
+                blur,
+            );
+        }
+    }
+    rendered
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_shadow_edge(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    command: GuiDrawCommand,
+    left: i32,
+    right: i32,
+    y: i32,
+    shadow_shapes: &[GuiRect; 5],
+    blur: u8,
+) -> usize {
+    let mut rendered = 0;
+    for x in left..right {
+        let coverage = shadow_coverage(shadow_shapes, command.corner_radius(), x, y, blur);
+        if coverage != 0 {
+            rendered +=
+                plot(framebuffer, width, height, stride, format, x, y, command.color, coverage)
+                    as usize;
         }
     }
     rendered
@@ -1522,6 +1599,83 @@ fn rounded_coverage(bounds: GuiRect, radius: u8, x: i32, y: i32) -> u8 {
         }
     }
     coverage_from_samples(samples)
+}
+
+#[derive(Clone, Copy)]
+struct RoundedRow {
+    start: i32,
+    full_start: i32,
+}
+
+fn rounded_row(bounds: GuiRect, radius: u8, y: i32) -> Option<RoundedRow> {
+    let left = bounds.x;
+    let right = rounded_right(bounds);
+    let top = bounds.y;
+    let bottom = top.saturating_add(bounds.height.min(i32::MAX as u32) as i32);
+    if y < top || y >= bottom || radius == 0 {
+        return (y >= top && y < bottom).then_some(RoundedRow { start: left, full_start: left });
+    }
+
+    let radius = i64::from(radius) * 4;
+    let local_y = i64::from(y.saturating_sub(top));
+    let radius_px = radius / 4;
+    if local_y >= radius_px && local_y < i64::from(bottom.saturating_sub(top)) - radius_px {
+        return Some(RoundedRow { start: left, full_start: left });
+    }
+
+    let center_x = i64::from(left) * 4 + radius;
+    let center_y = if local_y < radius_px {
+        i64::from(top) * 4 + radius
+    } else {
+        i64::from(bottom) * 4 - radius
+    };
+    let radius_squared = radius * radius;
+    let mut start = i64::MAX;
+    let mut full_start = i64::MIN;
+    for sample_y in [1_i64, 3] {
+        let dy = i64::from(y) * 4 + sample_y - center_y;
+        if dy.unsigned_abs() > radius as u64 {
+            continue;
+        }
+        let horizontal = integer_sqrt((radius_squared - dy * dy) as u64);
+        for sample_x in [1_i64, 3] {
+            let threshold = div_ceil(center_x - horizontal as i64 - sample_x, 4);
+            start = start.min(threshold);
+            full_start = full_start.max(threshold);
+        }
+    }
+    if start == i64::MAX {
+        return None;
+    }
+    let start = (start as i32).max(left).min(right);
+    let full_start = (full_start as i32).max(start).min(right);
+    Some(RoundedRow { start, full_start })
+}
+
+fn rounded_right(bounds: GuiRect) -> i32 {
+    bounds.x.saturating_add(bounds.width.min(i32::MAX as u32) as i32)
+}
+
+fn mirrored_right(bounds: GuiRect, left_edge: i32) -> i32 {
+    rounded_right(bounds).saturating_sub(left_edge.saturating_sub(bounds.x))
+}
+
+fn div_ceil(value: i64, divisor: i64) -> i64 {
+    value.div_euclid(divisor) + i64::from(value.rem_euclid(divisor) != 0)
+}
+
+fn integer_sqrt(value: u64) -> u64 {
+    let mut low = 0;
+    let mut high = value.min(128) + 1;
+    while low + 1 < high {
+        let middle = low + (high - low) / 2;
+        if middle * middle <= value {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    low
 }
 
 fn rounded_sample_inside(
@@ -1744,6 +1898,68 @@ mod tests {
         );
         assert_eq!(pixel(&stroke, 32, 16, 2), [255, 255, 255, 0]);
         assert_eq!(pixel(&stroke, 32, 16, 12), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rounded_scanline_bounds_match_coverage_edges() {
+        let bounds = GuiRect::new(4, 3, 64, 40);
+        for radius in [1, 4, 8, 12] {
+            for y in bounds.y..bounds.y + bounds.height as i32 {
+                let row = rounded_row(bounds, radius, y).unwrap();
+                let right_full = mirrored_right(bounds, row.full_start);
+                let right_edge = mirrored_right(bounds, row.start);
+                for x in bounds.x..rounded_right(bounds) {
+                    let coverage = rounded_coverage(bounds, radius, x, y);
+                    let expected = if x < row.start || x >= right_edge {
+                        0
+                    } else if x >= row.full_start && x < right_full {
+                        u8::MAX
+                    } else {
+                        coverage
+                    };
+                    assert_eq!(coverage, expected, "radius={radius} x={x} y={y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_fill_preserves_the_background_at_its_corners() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root_bounds = GuiRect::new(0, 0, 32, 24);
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, root_bounds))
+            .unwrap()
+            .surface;
+        let panel_bounds = GuiRect::new(4, 4, 16, 12);
+        let panel = registry
+            .create(8, request(GuiSurfaceOperation::CreateModal, 2, panel_bounds))
+            .unwrap()
+            .surface;
+        registry.take_damage();
+
+        let mut root_batch = GuiDrawBatch::new(root, 1, root_bounds);
+        assert!(root_batch.push(GuiDrawCommand::fill_rect(root_bounds, 0x102030)));
+        registry.update(7, root_batch).unwrap();
+        let mut panel_batch = GuiDrawBatch::new(panel, 1, panel_bounds);
+        assert!(panel_batch.push(GuiDrawCommand::fill_rounded_rect(panel_bounds, 0xffffff, 6)));
+        registry.update(8, panel_batch).unwrap();
+
+        let (damage, damage_count) = registry.take_damage();
+        let mut framebuffer = vec![0; 32 * 24 * 4];
+        let mut glyph_cache = crate::GlyphCache::new();
+        registry.render(
+            &mut glyph_cache,
+            &mut framebuffer,
+            32,
+            24,
+            32 * 4,
+            PixelFormat::Bgr8,
+            &damage,
+            damage_count,
+        );
+        assert_eq!(pixel(&framebuffer, 32, 4, 4), [0x30, 0x20, 0x10, 0]);
+        assert_eq!(pixel(&framebuffer, 32, 12, 10), [0xff, 0xff, 0xff, 0]);
     }
 
     #[test]

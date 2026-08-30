@@ -279,13 +279,11 @@ fn request_cursor_surface(
     (common::ipc_send_handle(display, &request) == IpcStatus::Ok).then_some(request)
 }
 
-fn cursor_op(surface: SurfaceHandle, x: i16, y: i16, sequence: u32) -> GuiSceneOp {
-    GuiSceneOp::upsert(
-        surface,
-        sequence,
-        1,
-        GuiDrawCommand::fill_rect(GuiRect::new(i32::from(x), i32::from(y), 3, 14), 0xffffff),
-    )
+fn cursor_op(surface: SurfaceHandle, x: i16, y: i16, pressed: bool, sequence: u32) -> GuiSceneOp {
+    let mut command =
+        GuiDrawCommand::fill_rect(GuiRect::new(i32::from(x), i32::from(y), 3, 14), 0xffffff);
+    command.auxiliary = pressed as u32;
+    GuiSceneOp::upsert(surface, sequence, 1, command)
 }
 
 fn destroy_surface(display: logos_abi::CapabilityHandle, surface: SurfaceHandle, next: &mut u32) {
@@ -416,8 +414,9 @@ pub extern "C" fn _start() -> ! {
                     && surface_response.surface.is_valid()
                 {
                     cursor_surface = surface_response.surface;
+                    proof_line(b"LogOS vNext: LockScreen cursor surface ready");
                     pending_cursor_draw =
-                        Some(cursor_op(cursor_surface, cursor.0, cursor.1, cursor_sequence));
+                        Some(cursor_op(cursor_surface, cursor.0, cursor.1, false, cursor_sequence));
                 }
                 continue;
             }
@@ -468,7 +467,13 @@ pub extern "C" fn _start() -> ! {
                     cursor = (pointer.x.clamp(0, 639), pointer.y.clamp(0, 399));
                     cursor_sequence = cursor_sequence.wrapping_add(1).max(1);
                     if cursor_surface.is_valid() {
-                        let cursor = cursor_op(cursor_surface, cursor.0, cursor.1, cursor_sequence);
+                        let cursor = cursor_op(
+                            cursor_surface,
+                            cursor.0,
+                            cursor.1,
+                            pointer.buttons & 1 != 0,
+                            cursor_sequence,
+                        );
                         if cursor_sent_in_input || pending_cursor_draw.is_some() {
                             pending_cursor_draw = Some(cursor);
                         } else {
@@ -488,13 +493,18 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     lock.input(event)
                 };
-                proof_line(b"LogOS vNext: LockScreen received input");
+                if event
+                    .pointer_event()
+                    .is_some_and(|pointer| pointer.state == logos_abi::PointerState::Down)
+                    && action != logos_lockscreen::LockScreenAction::Ignored
+                {
+                    proof_line(b"LogOS vNext: LockScreen pointer target accepted");
+                }
                 if let logos_lockscreen::LockScreenAction::Submit(operation) = action {
                     let (name, password) = lock.credentials();
                     let mut request = UserRequest::new(operation, next_id(&mut next_request));
                     if request.set_name(name) && request.set_password(password) {
                         pending_auth = Some(request);
-                        proof_line(b"LogOS vNext: LockScreen auth submitted");
                         lock.clear_password();
                     } else {
                         lock.cancel_submission();

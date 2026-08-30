@@ -32,13 +32,10 @@ const CURSOR_LAYERS: usize = 2;
 const CURSOR_DAMAGE_RECTS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
 const ATRIUM_OWNER: u32 = 13;
-const POINTER_CURSOR_WIDTH: i32 = 18;
-const POINTER_CURSOR_HEIGHT: i32 = 24;
-const POINTER_CURSOR_MASK: [u32; POINTER_CURSOR_HEIGHT as usize] = [
-    0x00001, 0x00003, 0x00007, 0x0000f, 0x0001f, 0x0003f, 0x0007f, 0x000ff, 0x001ff, 0x003ff,
-    0x007ff, 0x00fff, 0x01fff, 0x03fff, 0x07fff, 0x0ffff, 0x0ffff, 0x0fff8, 0x0fff8, 0x01ff0,
-    0x01ff0, 0x03fe0, 0x03fe0, 0x07fc0,
-];
+const CURSOR_PRESSED_AUXILIARY: u32 = 1;
+const POINTER_CURSOR_CORE_RADIUS_SQUARED: i32 = 12;
+const POINTER_CURSOR_GLOW_RADIUS: i32 = 9;
+const POINTER_CURSOR_PRESS_RADIUS: i32 = 8;
 const GLYPH_CACHE_ENTRIES: usize = 32;
 const DIRTY_WORDS: usize = (MAX_COLUMNS * MAX_ROWS).div_ceil(usize::BITS as usize);
 const ASCII_FIRST: u32 = 0x20;
@@ -77,11 +74,13 @@ struct CursorLayer {
     surface: SurfaceHandle,
     x: i32,
     y: i32,
+    pressed: bool,
     order: u32,
 }
 
 impl CursorLayer {
-    const EMPTY: Self = Self { surface: SurfaceHandle::EMPTY, x: 0, y: 0, order: 0 };
+    const EMPTY: Self =
+        Self { surface: SurfaceHandle::EMPTY, x: 0, y: 0, pressed: false, order: 0 };
 
     const fn active(self) -> bool {
         self.surface.is_valid()
@@ -267,49 +266,6 @@ fn pixel_bytes(color: u32, format: PixelFormat) -> [u8; 4] {
     }
 }
 
-const fn cursor_mask_has(row: i32, column: i32) -> bool {
-    row >= 0
-        && row < POINTER_CURSOR_HEIGHT
-        && column >= 0
-        && column < POINTER_CURSOR_WIDTH
-        && POINTER_CURSOR_MASK[row as usize] & (1u32 << column) != 0
-}
-
-const fn cursor_outline_mask() -> [u32; (POINTER_CURSOR_HEIGHT + 2) as usize] {
-    let mut outline = [0; (POINTER_CURSOR_HEIGHT + 2) as usize];
-    let mut row = 0;
-    while row < POINTER_CURSOR_HEIGHT + 2 {
-        let actual_row = row - 1;
-        let mut column = 0;
-        while column < POINTER_CURSOR_WIDTH + 2 {
-            let actual_column = column - 1;
-            if !cursor_mask_has(actual_row, actual_column) {
-                let mut neighbor_row = -1;
-                let mut adjacent = false;
-                while neighbor_row <= 1 {
-                    let mut neighbor_column = -1;
-                    while neighbor_column <= 1 {
-                        adjacent |= cursor_mask_has(
-                            actual_row + neighbor_row,
-                            actual_column + neighbor_column,
-                        );
-                        neighbor_column += 1;
-                    }
-                    neighbor_row += 1;
-                }
-                if adjacent {
-                    outline[row as usize] |= 1u32 << column as u32;
-                }
-            }
-            column += 1;
-        }
-        row += 1;
-    }
-    outline
-}
-
-const POINTER_CURSOR_OUTLINE: [u32; (POINTER_CURSOR_HEIGHT + 2) as usize] = cursor_outline_mask();
-
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn draw_cursor_pixel(
@@ -347,50 +303,72 @@ fn draw_cursor_pixel(
     framebuffer[offset..offset + 4].copy_from_slice(&pixel_bytes(blended, format));
 }
 
-#[allow(clippy::too_many_arguments)]
-#[inline(always)]
-fn draw_cursor_span(
-    framebuffer: &mut [u8],
+fn cursor_luminance(
+    framebuffer: &[u8],
     width: usize,
     height: usize,
     stride: usize,
     format: PixelFormat,
-    left: i32,
-    right: i32,
+    x: i32,
     y: i32,
-    color: u32,
-    alpha: u8,
-    clip: GuiRect,
-) {
-    if y < clip.y || y >= clip.y.saturating_add(clip.height as i32) || y < 0 {
-        return;
+) -> u8 {
+    if width == 0 || height == 0 {
+        return 0;
     }
-    let left = left.max(clip.x).max(0).min(width as i32) as usize;
-    let right =
-        right.min(clip.x.saturating_add(clip.width as i32)).min(width as i32).max(0) as usize;
-    if left >= right || y as usize >= height {
-        return;
+    let x = x.clamp(0, width.saturating_sub(1) as i32) as usize;
+    let y = y.clamp(0, height.saturating_sub(1) as i32) as usize;
+    let offset = y.saturating_mul(stride).saturating_add(x.saturating_mul(4));
+    if offset.saturating_add(3) > framebuffer.len() {
+        return 0;
     }
-    if alpha == u8::MAX {
-        let pixel = pixel_bytes(color, format);
-        let start = y as usize * stride + left * 4;
-        let end = y as usize * stride + right * 4;
-        fill_row(&mut framebuffer[start..end], pixel);
-    } else {
-        for x in left..right {
-            draw_cursor_pixel(
-                framebuffer,
-                width,
-                height,
-                stride,
-                format,
-                x as i32,
-                y,
-                color,
-                alpha,
-                clip,
-            );
+    let (red, green, blue) = match format {
+        PixelFormat::Rgb8 => {
+            (framebuffer[offset], framebuffer[offset + 1], framebuffer[offset + 2])
         }
+        PixelFormat::Bgr8 => {
+            (framebuffer[offset + 2], framebuffer[offset + 1], framebuffer[offset])
+        }
+    };
+    ((u32::from(red) * 54 + u32::from(green) * 183 + u32::from(blue) * 19) >> 8) as u8
+}
+
+fn cursor_color(
+    framebuffer: &[u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: PixelFormat,
+    x: i32,
+    y: i32,
+) -> u32 {
+    if cursor_luminance(framebuffer, width, height, stride, format, x, y) > 150 {
+        0x000000
+    } else {
+        0xffffff
+    }
+}
+
+const fn cursor_alpha(distance_squared: i32) -> u8 {
+    if distance_squared <= POINTER_CURSOR_CORE_RADIUS_SQUARED {
+        u8::MAX
+    } else if distance_squared <= 25 {
+        24
+    } else if distance_squared <= 49 {
+        8
+    } else if distance_squared <= POINTER_CURSOR_GLOW_RADIUS * POINTER_CURSOR_GLOW_RADIUS {
+        2
+    } else {
+        0
+    }
+}
+
+const fn cursor_press_alpha(distance_squared: i32) -> u8 {
+    if distance_squared >= (POINTER_CURSOR_PRESS_RADIUS - 1) * (POINTER_CURSOR_PRESS_RADIUS - 1)
+        && distance_squared <= POINTER_CURSOR_GLOW_RADIUS * POINTER_CURSOR_GLOW_RADIUS
+    {
+        100
+    } else {
+        0
     }
 }
 
@@ -574,10 +552,10 @@ impl Display {
 
     fn cursor_bounds(x: i32, y: i32) -> GuiRect {
         GuiRect::new(
-            x.saturating_sub(1),
-            y.saturating_sub(1),
-            POINTER_CURSOR_WIDTH as u32 + 3,
-            POINTER_CURSOR_HEIGHT as u32 + 3,
+            x.saturating_sub(POINTER_CURSOR_GLOW_RADIUS),
+            y.saturating_sub(POINTER_CURSOR_GLOW_RADIUS),
+            (POINTER_CURSOR_GLOW_RADIUS * 2 + 1) as u32,
+            (POINTER_CURSOR_GLOW_RADIUS * 2 + 1) as u32,
         )
     }
 
@@ -591,7 +569,7 @@ impl Display {
         }
         self.cursor_order = self.cursor_order.wrapping_add(1).max(1);
         self.cursor_layers[index] =
-            CursorLayer { surface, x: 320, y: 200, order: self.cursor_order };
+            CursorLayer { surface, x: 320, y: 200, pressed: false, order: self.cursor_order };
         self.gui.invalidate_rect(Self::cursor_bounds(320, 200));
     }
 
@@ -651,6 +629,7 @@ impl Display {
         }
         self.cursor_layers[index].x = op.command.x;
         self.cursor_layers[index].y = op.command.y;
+        self.cursor_layers[index].pressed = op.command.auxiliary == CURSOR_PRESSED_AUXILIARY;
         self.cursor_order = self.cursor_order.wrapping_add(1).max(1);
         self.cursor_layers[index].order = self.cursor_order;
         true
@@ -741,56 +720,37 @@ impl Display {
         if intersect(bounds, clip).is_empty() {
             return;
         }
-        for row in 0..POINTER_CURSOR_HEIGHT {
-            let mask = POINTER_CURSOR_MASK[row as usize];
-            if mask == 0 {
-                continue;
-            }
-            let left = mask.trailing_zeros() as i32;
-            let right = (32 - mask.leading_zeros()) as i32;
-            draw_cursor_span(
-                framebuffer,
-                width,
-                height,
-                stride,
-                format,
-                layer.x.saturating_add(left + 1),
-                layer.x.saturating_add(right + 1),
-                layer.y.saturating_add(row + 2),
-                0x000000,
-                150,
-                clip,
-            );
-            let mut outline = POINTER_CURSOR_OUTLINE[(row + 1) as usize];
-            while outline != 0 {
-                let column = outline.trailing_zeros() as i32 - 1;
-                outline &= outline - 1;
+        let color = cursor_color(framebuffer, width, height, stride, format, layer.x, layer.y);
+        for y in -POINTER_CURSOR_GLOW_RADIUS..=POINTER_CURSOR_GLOW_RADIUS {
+            for x in -POINTER_CURSOR_GLOW_RADIUS..=POINTER_CURSOR_GLOW_RADIUS {
+                let alpha = cursor_alpha(x * x + y * y);
                 draw_cursor_pixel(
                     framebuffer,
                     width,
                     height,
                     stride,
                     format,
-                    layer.x.saturating_add(column),
-                    layer.y.saturating_add(row),
-                    0x101820,
-                    u8::MAX,
+                    layer.x.saturating_add(x),
+                    layer.y.saturating_add(y),
+                    color,
+                    alpha,
                     clip,
                 );
+                if layer.pressed {
+                    draw_cursor_pixel(
+                        framebuffer,
+                        width,
+                        height,
+                        stride,
+                        format,
+                        layer.x.saturating_add(x),
+                        layer.y.saturating_add(y),
+                        color,
+                        cursor_press_alpha(x * x + y * y),
+                        clip,
+                    );
+                }
             }
-            draw_cursor_span(
-                framebuffer,
-                width,
-                height,
-                stride,
-                format,
-                layer.x.saturating_add(left),
-                layer.x.saturating_add(right),
-                layer.y.saturating_add(row),
-                0xffffff,
-                u8::MAX,
-                clip,
-            );
         }
     }
 
@@ -918,6 +878,11 @@ impl Display {
     pub fn cursor_position(&self) -> Option<(i16, i16)> {
         let layer = self.active_cursor_layer()?;
         Some((layer.x as i16, layer.y as i16))
+    }
+
+    pub fn cursor_state(&self) -> Option<(i16, i16, bool)> {
+        let layer = self.active_cursor_layer()?;
+        Some((layer.x as i16, layer.y as i16, layer.pressed))
     }
 
     fn active_cursor_layer(&self) -> Option<CursorLayer> {
@@ -1750,6 +1715,70 @@ mod tests {
     }
 
     #[test]
+    fn retained_scene_text_update_repaints_the_framebuffer() {
+        let mut display = Display::new(1);
+        let mut root_request =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root_request.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
+        display.gui_mut().create(11, root_request).unwrap();
+        let mut request =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        request.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
+        request.z_order = 1;
+        let surface = display.gui_mut().create(12, request).unwrap().surface;
+        let mut framebuffer = std::vec![0; 64 * 32 * 4];
+
+        let mut clear = logos_abi::GuiSceneOp::clear(surface, 1);
+        clear.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        display.gui_mut().apply_scene_op(12, clear).unwrap();
+        let mut background = logos_abi::GuiSceneOp::upsert(
+            surface,
+            1,
+            1,
+            logos_abi::GuiDrawCommand::fill_surface(0x102030),
+        );
+        background.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        display.gui_mut().apply_scene_op(12, background).unwrap();
+        let text = logos_abi::GuiSceneOp::upsert(
+            surface,
+            1,
+            2,
+            logos_abi::GuiDrawCommand::glyph_run(12, 8, 0xffffff, b"A").unwrap(),
+        );
+        display.gui_mut().apply_scene_op(12, text).unwrap();
+        display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+        }
+        let before = framebuffer.clone();
+
+        let mut clear = logos_abi::GuiSceneOp::clear(surface, 2);
+        clear.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        display.gui_mut().apply_scene_op(12, clear).unwrap();
+        let mut background = logos_abi::GuiSceneOp::upsert(
+            surface,
+            2,
+            1,
+            logos_abi::GuiDrawCommand::fill_surface(0x102030),
+        );
+        background.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        display.gui_mut().apply_scene_op(12, background).unwrap();
+        let text = logos_abi::GuiSceneOp::upsert(
+            surface,
+            2,
+            2,
+            logos_abi::GuiDrawCommand::glyph_run(12, 8, 0xffffff, b"B").unwrap(),
+        );
+        display.gui_mut().apply_scene_op(12, text).unwrap();
+        display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+        }
+
+        assert_ne!(before, framebuffer);
+    }
+
+    #[test]
     fn terminal_cells_render_inside_the_atrium_surface() {
         let mut display = Display::new(1);
         let mut terminal = RenderMessage::empty(MessageKind::FullRedraw);
@@ -1919,12 +1948,14 @@ mod tests {
             surface: SurfaceHandle::new(1, 1, LOCKSCREEN_OWNER).unwrap(),
             x: 8,
             y: 4,
+            pressed: false,
             order: 2,
         };
         display.cursor_layers[1] = CursorLayer {
             surface: SurfaceHandle::new(2, 1, ATRIUM_OWNER).unwrap(),
             x: 32,
             y: 4,
+            pressed: false,
             order: 1,
         };
         let mut framebuffer = std::vec![0; 64 * 32 * 4];
@@ -1943,6 +1974,60 @@ mod tests {
 
         assert_eq!(&framebuffer[(4 * 64 + 8) * 4..(4 * 64 + 8) * 4 + 4], &[0xff, 0xff, 0xff, 0]);
         assert_eq!(&framebuffer[(4 * 64 + 32) * 4..(4 * 64 + 32) * 4 + 4], &[0x40, 0x30, 0x20, 0]);
+    }
+
+    #[test]
+    fn software_cursor_adapts_to_background_luminance() {
+        let bright = [0xf0, 0xf0, 0xf0, 0];
+        let dark = [0x20, 0x30, 0x40, 0];
+
+        assert_eq!(cursor_color(&bright, 1, 1, 4, PixelFormat::Bgr8, 0, 0), 0x000000);
+        assert_eq!(cursor_color(&dark, 1, 1, 4, PixelFormat::Bgr8, 0, 0), 0xffffff);
+        assert_eq!(cursor_alpha(10), u8::MAX);
+        assert_eq!(cursor_alpha(16), 24);
+        assert!(cursor_alpha(16) > 0);
+        assert_eq!(cursor_alpha(100), 0);
+    }
+
+    #[test]
+    fn software_cursor_press_ring_is_dismissed_on_release() {
+        let mut display = Display::new(1);
+        display.cursor_layers[0] = CursorLayer {
+            surface: SurfaceHandle::new(1, 1, LOCKSCREEN_OWNER).unwrap(),
+            x: 16,
+            y: 16,
+            pressed: true,
+            order: 1,
+        };
+        let mut pressed = std::vec![0; 32 * 32 * 4];
+        for pixel in pressed.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0x20, 0x30, 0x40, 0]);
+        }
+        display.render_cursor_layers(
+            &mut pressed,
+            32,
+            32,
+            32 * 4,
+            PixelFormat::Bgr8,
+            GuiRect::new(0, 0, 32, 32),
+        );
+
+        display.cursor_layers[0].pressed = false;
+        let mut released = std::vec![0; 32 * 32 * 4];
+        for pixel in released.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0x20, 0x30, 0x40, 0]);
+        }
+        display.render_cursor_layers(
+            &mut released,
+            32,
+            32,
+            32 * 4,
+            PixelFormat::Bgr8,
+            GuiRect::new(0, 0, 32, 32),
+        );
+
+        let ring_pixel = (16 * 32 + 24) * 4;
+        assert!(pressed[ring_pixel] > released[ring_pixel]);
     }
 
     #[test]

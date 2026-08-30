@@ -229,15 +229,17 @@ fn publish_present(display: &mut logos_display::Display, present_state: &Framebu
 fn publish_cursor(
     display: &logos_display::Display,
     present_state: &FramebufferPresentState,
-    published: &mut Option<(bool, i16, i16)>,
+    published: &mut Option<(bool, i16, i16, bool)>,
 ) {
-    let (visible, x, y) =
-        display.cursor_position().map(|(x, y)| (true, x, y)).unwrap_or((false, 0, 0));
-    if *published == Some((visible, x, y)) {
+    let (visible, x, y, pressed) = display
+        .cursor_state()
+        .map(|(x, y, pressed)| (true, x, y, pressed))
+        .unwrap_or((false, 0, 0, false));
+    if *published == Some((visible, x, y, pressed)) {
         return;
     }
-    present_state.publish_cursor(visible, x, y);
-    *published = Some((visible, x, y));
+    present_state.publish_cursor(visible, x, y, pressed);
+    *published = Some((visible, x, y, pressed));
     #[cfg(feature = "qemu-proof")]
     common::proof_line(b"LogOS vNext: Display cursor published");
 }

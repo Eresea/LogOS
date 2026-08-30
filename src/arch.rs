@@ -762,7 +762,7 @@ pub(crate) fn framebuffer_present_snapshot()
     }
 }
 
-pub(crate) fn framebuffer_cursor_snapshot() -> Option<(u32, bool, i16, i16)> {
+pub(crate) fn framebuffer_cursor_snapshot() -> Option<(u32, bool, i16, i16, bool)> {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe {
         (*core::ptr::addr_of!(SERVICE_RUNTIME)).framebuffer_present_frame().map(|frame| {
