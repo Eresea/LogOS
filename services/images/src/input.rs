@@ -36,7 +36,7 @@ fn flush_pointer(
             | IpcStatus::Unauthorized
             | IpcStatus::Malformed
             | IpcStatus::Empty => *sent_mask = 1,
-            IpcStatus::Full => common::wait_on_capability_or_input(capability),
+            IpcStatus::Full => return false,
         }
     }
     if *sent_mask == 1 {
@@ -78,16 +78,8 @@ pub extern "C" fn _start() -> ! {
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
-        if flush_pointer(atrium_output, pending_pointer, pointer_sent_mask) {
-            continue;
-        }
-        if let Some(byte) = pointer.pop() {
-            if let Some(event) = pointer_decoder.feed(byte) {
-                *pending_pointer = Some(event);
-                *pointer_sent_mask = 0;
-                let _ = flush_pointer(atrium_output, pending_pointer, pointer_sent_mask);
-            }
-            continue;
+        if pending_pointer.is_some() {
+            let _ = flush_pointer(atrium_output, pending_pointer, pointer_sent_mask);
         }
         if let Some(message) = *pending {
             for (index, capability) in [shell_output, atrium_output].into_iter().enumerate() {
@@ -114,14 +106,28 @@ pub extern "C" fn _start() -> ! {
             }
             continue;
         }
-        let Some(byte) = keyboard.pop() else {
-            common::sleep_on_input();
+        if let Some(byte) = keyboard.pop() {
+            if let Some(event) = decoder.feed(byte) {
+                proof_line(b"LogOS vNext: Input decoded keyboard event");
+                *pending = Some(event.terminal_message());
+                *sent_mask = 0;
+            }
             continue;
-        };
-        if let Some(event) = decoder.feed(byte) {
-            proof_line(b"LogOS vNext: Input decoded keyboard event");
-            *pending = Some(event.terminal_message());
-            *sent_mask = 0;
+        }
+        if pending_pointer.is_none() {
+            if let Some(byte) = pointer.pop() {
+                if let Some(event) = pointer_decoder.feed(byte) {
+                    *pending_pointer = Some(event);
+                    *pointer_sent_mask = 0;
+                    let _ = flush_pointer(atrium_output, pending_pointer, pointer_sent_mask);
+                }
+                continue;
+            }
+        }
+        if pending_pointer.is_some() {
+            common::wait_on_capability_or_input(atrium_output);
+        } else {
+            common::sleep_on_input();
         }
     }
 }
