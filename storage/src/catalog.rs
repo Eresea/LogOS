@@ -18,6 +18,7 @@ const COMMIT_CHECKSUM_OFFSET: usize = 64;
 const COMMIT_MAGIC: &[u8; 4] = b"LOSC";
 const LEGACY_MAGIC: &[u8; 8] = b"LOGOSFS\0";
 const MAX_BLOCK_COUNT: u64 = (crate::COW_MAX_BITMAP_BLOCKS * crate::BLOCK_BYTES * 8) as u64;
+const WRITE_VERIFY_ATTEMPTS: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CatalogError {
@@ -636,7 +637,8 @@ fn validate_pools(
     system_blocks: u64,
     package_start: u64,
 ) -> Result<(), CatalogError> {
-    let system_end = DATA_START.checked_add(system_blocks).ok_or(CatalogError::InvalidRequest)?;
+    let system_start = DATA_START;
+    let system_end = system_start.checked_add(system_blocks).ok_or(CatalogError::InvalidRequest)?;
     if system_blocks == 0
         || system_end >= package_start
         || package_start >= data_end
@@ -654,7 +656,8 @@ fn empty_root(
     system_blocks: u64,
     package_start: u64,
 ) -> Result<SystemCatalogRoot, CatalogError> {
-    let system_end = DATA_START.checked_add(system_blocks).ok_or(CatalogError::InvalidRequest)?;
+    let system_start = DATA_START;
+    let system_end = system_start.checked_add(system_blocks).ok_or(CatalogError::InvalidRequest)?;
     validate_pools(blocks, data_end, system_blocks, package_start)?;
     Ok(SystemCatalogRoot {
         generation: 1,
@@ -667,7 +670,7 @@ fn empty_root(
         bitmap_slot: 0,
         bitmap_start: BlockIndex::new(data_end),
         bitmap_blocks: 1,
-        system_start: BlockIndex::new(DATA_START),
+        system_start: BlockIndex::new(system_start),
         system_end: BlockIndex::new(system_end),
         user_start: BlockIndex::new(system_end),
         user_end: BlockIndex::new(package_start),
@@ -806,11 +809,12 @@ fn read_bitmap<B: BlockStore>(
     root: SystemCatalogRoot,
     output: &mut [Block; crate::COW_MAX_BITMAP_BLOCKS],
 ) -> Result<(), CatalogError> {
-    store.read_block(
-        BlockIndex::new(root.bitmap_start.get() + root.bitmap_slot as u64),
-        &mut output[0],
-    )?;
+    store.read_block(bitmap_block(root), &mut output[0])?;
     Ok(())
+}
+
+fn bitmap_block(root: SystemCatalogRoot) -> BlockIndex {
+    BlockIndex::new(root.bitmap_start.get() + u64::from(root.bitmap_slot))
 }
 
 fn write_bitmap<B: BlockStore>(
@@ -818,10 +822,7 @@ fn write_bitmap<B: BlockStore>(
     root: SystemCatalogRoot,
     bitmap: &[Block; crate::COW_MAX_BITMAP_BLOCKS],
 ) -> Result<(), CatalogError> {
-    store.write_block(
-        BlockIndex::new(root.bitmap_start.get() + root.bitmap_slot as u64),
-        &bitmap[0],
-    )?;
+    store.write_block(bitmap_block(root), &bitmap[0])?;
     Ok(())
 }
 
@@ -830,15 +831,18 @@ fn verify_bitmap<B: BlockStore>(
     root: SystemCatalogRoot,
     expected: &[Block; crate::COW_MAX_BITMAP_BLOCKS],
 ) -> Result<(), CatalogError> {
-    let mut actual = Block::zero();
-    store.read_block_uncached(
-        BlockIndex::new(root.bitmap_start.get() + root.bitmap_slot as u64),
-        &mut actual,
-    )?;
-    if actual != expected[0] {
-        return Err(CatalogError::Block(BlockError::Io));
+    for attempt in 0..WRITE_VERIFY_ATTEMPTS {
+        let mut actual = Block::zero();
+        store.read_block_uncached(bitmap_block(root), &mut actual)?;
+        if actual == expected[0] {
+            return Ok(());
+        }
+        if attempt + 1 < WRITE_VERIFY_ATTEMPTS {
+            store.write_block(bitmap_block(root), &expected[0])?;
+            store.flush()?;
+        }
     }
-    Ok(())
+    Err(CatalogError::Block(BlockError::Io))
 }
 
 fn verify_catalog<B: BlockStore>(
@@ -847,15 +851,27 @@ fn verify_catalog<B: BlockStore>(
     expected: &[u8],
 ) -> Result<(), CatalogError> {
     for offset in 0..root.catalog_blocks as usize {
-        let mut actual = Block::zero();
-        store.read_block_uncached(
-            BlockIndex::new(root.catalog_start.get() + offset as u64),
-            &mut actual,
-        )?;
         let start = offset * crate::BLOCK_BYTES;
         let end = (start + crate::BLOCK_BYTES).min(expected.len());
-        if actual.as_bytes()[..end - start] != expected[start..end] {
-            return Err(CatalogError::Block(BlockError::Io));
+        let mut expected_block = Block::zero();
+        expected_block.as_bytes_mut()[..end - start].copy_from_slice(&expected[start..end]);
+        for attempt in 0..WRITE_VERIFY_ATTEMPTS {
+            let mut actual = Block::zero();
+            store.read_block_uncached(
+                BlockIndex::new(root.catalog_start.get() + offset as u64),
+                &mut actual,
+            )?;
+            if actual == expected_block {
+                break;
+            }
+            if attempt + 1 == WRITE_VERIFY_ATTEMPTS {
+                return Err(CatalogError::Block(BlockError::Io));
+            }
+            store.write_block(
+                BlockIndex::new(root.catalog_start.get() + offset as u64),
+                &expected_block,
+            )?;
+            store.flush()?;
         }
     }
     Ok(())
