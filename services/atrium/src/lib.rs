@@ -12,6 +12,12 @@ use logos_abi::{
 pub const MAX_ATRIUM_SURFACES: usize = 4;
 pub const MAX_CALCULATOR_TEXT: usize = 32;
 pub const SURFACE_MOVE_STEP: i32 = 32;
+pub const CALCULATOR_BUTTON_LEFT: i32 = 20;
+pub const CALCULATOR_BUTTON_TOP: i32 = 100;
+pub const CALCULATOR_BUTTON_WIDTH: i32 = 56;
+pub const CALCULATOR_BUTTON_HEIGHT: i32 = 20;
+pub const CALCULATOR_BUTTON_GAP: i32 = 8;
+pub const CALCULATOR_BUTTON_LABELS: [u8; 16] = *b"789/456*123-0.=+";
 
 /// Collapse consecutive pointer motion while preserving keyboard and button
 /// transition ordering. The receiver returns one queued event at a time.
@@ -443,7 +449,7 @@ impl Atrium {
             (false, KeyCode::TAB) => AtriumAction::FocusNext,
             (false, KeyCode::BackTab) => AtriumAction::FocusPrevious,
             (false, KeyCode::ESCAPE) => AtriumAction::CloseFocused,
-            (false, KeyCode::ENTER) => match self.launcher_index {
+            (false, KeyCode::ENTER) if self.focused.is_none() => match self.launcher_index {
                 0 => AtriumAction::Launch(AppId::Calculator),
                 1 => AtriumAction::Launch(AppId::Files),
                 _ => AtriumAction::Launch(AppId::Terminal),
@@ -580,6 +586,29 @@ impl Calculator {
     pub fn input(&mut self, input: &InputMessage) -> bool {
         if input.state != KeyState::Pressed && input.state != KeyState::Repeat {
             return false;
+        }
+        if let Some(pointer) = input.pointer_event() {
+            if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
+                return false;
+            }
+            let x = i32::from(pointer.x).saturating_sub(CALCULATOR_BUTTON_LEFT);
+            let y = i32::from(pointer.y).saturating_sub(CALCULATOR_BUTTON_TOP);
+            let stride = CALCULATOR_BUTTON_WIDTH + CALCULATOR_BUTTON_GAP;
+            let row_stride = CALCULATOR_BUTTON_HEIGHT + CALCULATOR_BUTTON_GAP;
+            if x < 0
+                || y < 0
+                || x >= stride * 4 - CALCULATOR_BUTTON_GAP
+                || y >= row_stride * 4
+                || x % stride >= CALCULATOR_BUTTON_WIDTH
+                || y % row_stride >= CALCULATOR_BUTTON_HEIGHT
+            {
+                return false;
+            }
+            let index = ((y / row_stride) * 4 + x / stride) as usize;
+            let character = CALCULATOR_BUTTON_LABELS[index];
+            let code =
+                if character == b'=' { KeyCode::ENTER } else { KeyCode::character(character) };
+            return self.input(&InputMessage::key(code, KeyState::Pressed, 0));
         }
         if let Some(text) = input.text_bytes() {
             let mut changed = false;
@@ -821,6 +850,10 @@ mod tests {
         assert_eq!(atrium.input(&ctrl(b'4')), AtriumAction::Launch(AppId::System));
         let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
         atrium.spawn_surface(request, surface(1)).unwrap();
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0)),
+            AtriumAction::None
+        );
         assert_eq!(atrium.input(&ctrl(b'j')), AtriumAction::None);
         assert_eq!(atrium.input(&ctrl(b'1')), AtriumAction::Launch(AppId::Calculator));
         assert_eq!(atrium.input(&ctrl(b'l')), AtriumAction::Logout);
@@ -1057,5 +1090,23 @@ mod tests {
         assert!(calculator.input(&text));
         calculator.input(&InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0));
         assert_eq!(calculator.display(), b"15");
+    }
+
+    #[test]
+    fn calculator_accepts_keypad_pointer_buttons() {
+        let mut calculator = Calculator::new();
+        for index in [0, 15, 2, 14] {
+            let row = index / 4;
+            let column = index % 4;
+            let x = CALCULATOR_BUTTON_LEFT
+                + column as i32 * (CALCULATOR_BUTTON_WIDTH + CALCULATOR_BUTTON_GAP)
+                + 1;
+            let y = CALCULATOR_BUTTON_TOP
+                + row as i32 * (CALCULATOR_BUTTON_HEIGHT + CALCULATOR_BUTTON_GAP)
+                + 1;
+            let event = InputMessage::pointer(x as i16, y as i16, 1, PointerState::Down).unwrap();
+            assert!(calculator.input(&event));
+        }
+        assert_eq!(calculator.display(), b"16");
     }
 }
