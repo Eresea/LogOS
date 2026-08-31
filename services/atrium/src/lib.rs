@@ -440,6 +440,12 @@ impl Atrium {
         if input.modifiers & MOD_ALT != 0 && code == KeyCode::function(4) {
             return AtriumAction::CloseFocused;
         }
+        if code == KeyCode::TAB
+            && input.modifiers == 0
+            && self.focused_surface().is_some_and(|surface| surface.app == AppId::Terminal)
+        {
+            return AtriumAction::None;
+        }
         match (input.modifiers & MOD_CTRL != 0, code) {
             (true, KeyCode::TAB) => AtriumAction::FocusNext,
             (true, KeyCode::BackTab) => AtriumAction::FocusPrevious,
@@ -890,6 +896,19 @@ mod tests {
         assert_eq!(atrium.phase(), AtriumPhase::Boot);
         assert!(!atrium.home_surface().is_valid());
         assert_eq!(atrium.surfaces().count(), 0);
+    }
+
+    #[test]
+    fn plain_tab_routes_to_a_focused_terminal_surface() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(1)).unwrap();
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::TAB, KeyState::Pressed, 0)),
+            AtriumAction::None
+        );
+        assert!(AtriumAction::None.routes_to_surface());
     }
 
     #[test]
