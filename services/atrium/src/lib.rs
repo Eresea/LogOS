@@ -67,6 +67,25 @@ pub enum AppId {
     System = 4,
 }
 
+pub const COMMAND_MENU_ITEMS: [AppId; 4] =
+    [AppId::Calculator, AppId::Files, AppId::Terminal, AppId::System];
+pub const COMMAND_MENU_BOUNDS: GuiRect = GuiRect::new(128, 56, 384, 304);
+pub const COMMAND_MENU_ITEM_LEFT: i32 = 152;
+pub const COMMAND_MENU_ITEM_TOP: i32 = 112;
+pub const COMMAND_MENU_ITEM_WIDTH: u32 = 336;
+pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 36;
+pub const COMMAND_MENU_ITEM_GAP: i32 = 12;
+
+pub const fn command_menu_item_bounds(index: usize) -> GuiRect {
+    GuiRect::new(
+        COMMAND_MENU_ITEM_LEFT,
+        COMMAND_MENU_ITEM_TOP
+            + index as i32 * (COMMAND_MENU_ITEM_HEIGHT as i32 + COMMAND_MENU_ITEM_GAP),
+        COMMAND_MENU_ITEM_WIDTH,
+        COMMAND_MENU_ITEM_HEIGHT,
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceMode {
     Tiled,
@@ -171,6 +190,23 @@ impl Atrium {
 
     pub const fn launcher_index(&self) -> usize {
         self.launcher_index
+    }
+
+    pub const fn launcher_app(&self) -> AppId {
+        COMMAND_MENU_ITEMS[self.launcher_index]
+    }
+
+    pub fn command_menu_item_at(&mut self, x: i32, y: i32) -> Option<AppId> {
+        if self.phase != AtriumPhase::Home {
+            return None;
+        }
+        for (index, app) in COMMAND_MENU_ITEMS.into_iter().enumerate() {
+            if command_menu_item_bounds(index).contains(x, y) {
+                self.launcher_index = index;
+                return Some(app);
+            }
+        }
+        None
     }
 
     pub const fn home_surface(&self) -> SurfaceHandle {
@@ -457,17 +493,23 @@ impl Atrium {
             (false, KeyCode::TAB) => AtriumAction::FocusNext,
             (false, KeyCode::BackTab) => AtriumAction::FocusPrevious,
             (false, KeyCode::ESCAPE) => AtriumAction::CloseFocused,
-            (false, KeyCode::ENTER) if self.focused.is_none() => match self.launcher_index {
-                0 => AtriumAction::Launch(AppId::Calculator),
-                1 => AtriumAction::Launch(AppId::Files),
-                _ => AtriumAction::Launch(AppId::Terminal),
-            },
+            (false, KeyCode::ENTER) if self.focused.is_none() => {
+                AtriumAction::Launch(self.launcher_app())
+            }
+            (false, KeyCode::UP) => {
+                self.launcher_index = self.launcher_index.saturating_sub(1);
+                AtriumAction::LauncherChanged
+            }
+            (false, KeyCode::DOWN) => {
+                self.launcher_index = (self.launcher_index + 1).min(COMMAND_MENU_ITEMS.len() - 1);
+                AtriumAction::LauncherChanged
+            }
             (false, KeyCode::LEFT) => {
                 self.launcher_index = self.launcher_index.saturating_sub(1);
                 AtriumAction::LauncherChanged
             }
             (false, KeyCode::RIGHT) => {
-                self.launcher_index = (self.launcher_index + 1).min(2);
+                self.launcher_index = (self.launcher_index + 1).min(COMMAND_MENU_ITEMS.len() - 1);
                 AtriumAction::LauncherChanged
             }
             (true, _) => match code.character_byte() {
@@ -909,6 +951,27 @@ mod tests {
             AtriumAction::None
         );
         assert!(AtriumAction::None.routes_to_surface());
+    }
+
+    #[test]
+    fn command_menu_selection_is_bounded_and_launchable() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        assert_eq!(atrium.command_menu_item_at(151, COMMAND_MENU_ITEM_TOP), None);
+        assert_eq!(
+            atrium.command_menu_item_at(
+                COMMAND_MENU_ITEM_LEFT + 1,
+                COMMAND_MENU_ITEM_TOP
+                    + 2 * (COMMAND_MENU_ITEM_HEIGHT as i32 + COMMAND_MENU_ITEM_GAP)
+                    + 1,
+            ),
+            Some(AppId::Terminal)
+        );
+        assert_eq!(atrium.launcher_index(), 2);
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0)),
+            AtriumAction::Launch(AppId::Terminal)
+        );
     }
 
     #[test]

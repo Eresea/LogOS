@@ -164,45 +164,51 @@ fn draw_home(
     let mut batch = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
     batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     let _ = batch.push(GuiDrawCommand::fill_surface(0x101820));
-    let _ = batch.push(GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 180, 400), 0x182535));
-    push_text(&mut batch, 24, 24, 0xffffff, b"LogOS Atrium");
+    let _ = batch.push(GuiDrawCommand::shadow(
+        GuiRect::new(120, 48, 400, 320),
+        0x55000000,
+        16,
+        3,
+        0,
+        4,
+    ));
+    let _ = batch.push(GuiDrawCommand::fill_rounded_rect(
+        logos_atrium::COMMAND_MENU_BOUNDS,
+        0x182535,
+        16,
+    ));
     let _ = common::ipc_send_scene_batch(display, &batch, 1);
 
-    let mut navigation = GuiDrawBatch::new(surface, sequence, GuiRect::new(0, 48, 180, 112));
-    navigation.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    push_text(
-        &mut navigation,
-        24,
-        72,
-        if launcher_index == 0 { 0x7ee787 } else { 0xd9e5f5 },
-        b"Calculator",
-    );
-    push_text(
-        &mut navigation,
-        24,
-        104,
-        if launcher_index == 1 { 0x7ee787 } else { 0xd9e5f5 },
-        b"Files",
-    );
-    push_text(
-        &mut navigation,
-        24,
-        136,
-        if launcher_index == 2 { 0x7ee787 } else { 0xd9e5f5 },
-        b"Terminal",
-    );
-    let _ = common::ipc_send_scene_batch(display, &navigation, 4);
+    let mut header = GuiDrawBatch::new(surface, sequence, GuiRect::new(128, 56, 384, 48));
+    header.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    push_text(&mut header, 160, 82, 0xffffff, b"Command menu");
+    push_text(&mut header, 160, 100, 0xb8c7da, b"Choose an app to open");
+    let _ = common::ipc_send_scene_batch(display, &header, 4);
 
-    let mut detail = GuiDrawBatch::new(surface, sequence, GuiRect::new(180, 0, 460, 400));
-    detail.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    push_text(&mut detail, 220, 48, 0xffffff, b"Welcome to Atrium");
-    push_text(&mut detail, 220, 88, 0xb8c7da, b"Ctrl+1 Calculator  Ctrl+2 Files");
-    let _ = common::ipc_send_scene_batch(display, &detail, 7);
+    let labels: [&[u8]; 4] = [b"Calculator", b"Files", b"Terminal", b"System"];
+    for (index, label) in labels.into_iter().enumerate() {
+        let bounds = logos_atrium::command_menu_item_bounds(index);
+        let mut item = GuiDrawBatch::new(surface, sequence, bounds);
+        item.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        let selected = index == launcher_index;
+        let _ = item.push(GuiDrawCommand::fill_rounded_rect(
+            bounds,
+            if selected { 0x2f6f66 } else { 0x203040 },
+            8,
+        ));
+        push_text(
+            &mut item,
+            bounds.x + 16,
+            bounds.y + 11,
+            if selected { 0xffffff } else { 0xd9e5f5 },
+            label,
+        );
+        let _ = common::ipc_send_scene_batch(display, &item, 6 + index as u32 * 2);
+    }
 
-    let mut detail_tail = GuiDrawBatch::new(surface, sequence, GuiRect::new(180, 0, 460, 400));
-    push_text(&mut detail_tail, 220, 112, 0xb8c7da, b"Ctrl+3 Terminal");
-    push_text(&mut detail_tail, 220, 128, 0xb8c7da, b"Tab focuses; Ctrl+Arrow moves apps");
-    let _ = common::ipc_send_scene_batch(display, &detail_tail, 10);
+    let mut footer = GuiDrawBatch::new(surface, sequence, GuiRect::new(128, 324, 384, 36));
+    push_text(&mut footer, 160, 346, 0xb8c7da, b"Up/Down select   Enter open");
+    let _ = common::ipc_send_scene_batch(display, &footer, 14);
 }
 
 fn draw_calculator_ui(
@@ -1340,7 +1346,19 @@ pub extern "C" fn _start() -> ! {
                 }
                 continue;
             }
-            if let Some(pointer) = event.pointer_event() {
+            let menu_selected = event
+                .pointer_event()
+                .and_then(|pointer| {
+                    (pointer.state == PointerState::Down && pointer.buttons & 1 != 0)
+                        .then(|| {
+                            atrium.command_menu_item_at(i32::from(pointer.x), i32::from(pointer.y))
+                        })
+                        .flatten()
+                })
+                .is_some();
+            if menu_selected {
+                event = InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0);
+            } else if let Some(pointer) = event.pointer_event() {
                 if let Some(surface) = atrium.pointer_target(&event) {
                     if pointer.state == PointerState::Down {
                         send_surface_command(
