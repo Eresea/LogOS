@@ -482,7 +482,7 @@ impl LockScreen {
             self.restore_component_value();
             return false;
         }
-        if self.field == LockScreenField::Username && !valid_username(bytes) {
+        if self.field == LockScreenField::Username && !bytes.is_empty() && !valid_username(bytes) {
             self.restore_component_value();
             return false;
         }
@@ -793,5 +793,20 @@ mod tests {
         assert!(lock.credentials().0.is_empty());
         assert_eq!(lock.input(InputMessage::text(b"admin-1").unwrap()), LockScreenAction::Changed);
         assert_eq!(lock.credentials().0, b"admin-1");
+    }
+
+    #[test]
+    fn username_can_be_cleared_during_login_editing() {
+        let mut lock = LockScreen::new();
+        lock.set_locked();
+        assert_eq!(lock.input(InputMessage::text(b"alice").unwrap()), LockScreenAction::Changed);
+        for _ in 0..5 {
+            assert_eq!(
+                lock.input(InputMessage::key(KeyCode::Backspace, KeyState::Pressed, 0)),
+                LockScreenAction::Changed
+            );
+        }
+        assert!(lock.credentials().0.is_empty());
+        assert!(lock.form().controls.username.errors().contains(ValidationError::Required));
     }
 }
