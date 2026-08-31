@@ -3,6 +3,8 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(all(feature = "password-kdf", target_os = "none"))]
+use argon2::Block;
 #[cfg(feature = "password-kdf")]
 use argon2::{Algorithm, Argon2, Params, Version};
 use logos_abi::{
@@ -11,6 +13,8 @@ use logos_abi::{
     USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES, UserId, UserOperation, UserRequest,
     UserResponse, UserStatus,
 };
+#[cfg(all(feature = "password-kdf", target_os = "none"))]
+use logos_abi::{USER_KDF_WORKSPACE_BASE, USER_KDF_WORKSPACE_BYTES};
 
 pub const MAX_USERS: usize = 32;
 pub const MAX_ROLES: usize = 16;
@@ -145,9 +149,7 @@ impl PasswordVerifier {
             .map_err(|_| UserError::Crypto)?;
             let algorithm = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
             let mut output = [0; USER_ARGON2_OUTPUT_BYTES];
-            algorithm
-                .hash_password_into(password, &salt, &mut output)
-                .map_err(|_| UserError::Crypto)?;
+            hash_password_into(&algorithm, password, &salt, &mut output)?;
             Ok(Self { version: ARGON2_VERSION, salt, output })
         }
     }
@@ -166,6 +168,36 @@ impl PasswordVerifier {
             Err(UserError::BadCredentials)
         }
     }
+}
+
+#[cfg(all(feature = "password-kdf", target_os = "none"))]
+fn hash_password_into(
+    algorithm: &Argon2<'_>,
+    password: &[u8],
+    salt: &[u8],
+    output: &mut [u8],
+) -> Result<(), UserError> {
+    let block_count = algorithm.params().block_count();
+    if block_count > USER_KDF_WORKSPACE_BYTES / Block::SIZE {
+        return Err(UserError::Crypto);
+    }
+    // Core maps this fixed, service-private workspace before User starts.
+    let memory = unsafe {
+        core::slice::from_raw_parts_mut(USER_KDF_WORKSPACE_BASE as *mut Block, block_count)
+    };
+    algorithm
+        .hash_password_into_with_memory(password, salt, output, memory)
+        .map_err(|_| UserError::Crypto)
+}
+
+#[cfg(all(feature = "password-kdf", not(target_os = "none")))]
+fn hash_password_into(
+    algorithm: &Argon2<'_>,
+    password: &[u8],
+    salt: &[u8],
+    output: &mut [u8],
+) -> Result<(), UserError> {
+    algorithm.hash_password_into(password, salt, output).map_err(|_| UserError::Crypto)
 }
 
 pub trait EntropySource {

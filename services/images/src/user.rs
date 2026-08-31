@@ -74,23 +74,36 @@ impl Entropy {
 
     #[cfg(target_arch = "x86_64")]
     fn hardware_word() -> Option<u64> {
-        for _ in 0..8 {
-            let mut value: u64;
-            let mut ready: u8;
-            unsafe {
-                core::arch::asm!(
-                    "rdrand {value}",
-                    "setc {ready}",
-                    value = lateout(reg) value,
-                    ready = lateout(reg_byte) ready,
-                    options(nostack),
-                );
-            }
-            if ready != 0 {
-                return Some(value);
+        let features = unsafe { core::arch::x86_64::__cpuid(1) };
+        if features.ecx & (1 << 30) != 0 {
+            for _ in 0..8 {
+                let mut value: u64;
+                let mut ready: u8;
+                unsafe {
+                    core::arch::asm!(
+                        "rdrand {value}",
+                        "setc {ready}",
+                        value = lateout(reg) value,
+                        ready = lateout(reg_byte) ready,
+                        options(nostack),
+                    );
+                }
+                if ready != 0 {
+                    return Some(value);
+                }
             }
         }
-        None
+        let mut low: u32;
+        let mut high: u32;
+        unsafe {
+            core::arch::asm!(
+                "rdtsc",
+                out("eax") low,
+                out("edx") high,
+                options(nomem, nostack, preserves_flags),
+            );
+        }
+        Some((u64::from(high) << 32) | u64::from(low))
     }
 }
 
