@@ -6,7 +6,8 @@ extern crate std;
 use core::fmt::Write;
 
 use logos_abi::{
-    GuiRect, InputMessage, KeyCode, KeyState, MOD_CTRL, PointerState, ServiceHandle, SurfaceHandle,
+    GuiRect, InputMessage, KeyCode, KeyState, MOD_ALT, MOD_CTRL, PointerState, ServiceHandle,
+    SurfaceHandle,
 };
 
 pub const MAX_ATRIUM_SURFACES: usize = 4;
@@ -436,6 +437,9 @@ impl Atrium {
         if self.phase != AtriumPhase::Home {
             return AtriumAction::None;
         }
+        if input.modifiers & MOD_ALT != 0 && code == KeyCode::function(4) {
+            return AtriumAction::CloseFocused;
+        }
         match (input.modifiers & MOD_CTRL != 0, code) {
             (true, KeyCode::TAB) => AtriumAction::FocusNext,
             (true, KeyCode::BackTab) => AtriumAction::FocusPrevious,
@@ -851,6 +855,10 @@ mod tests {
         assert_eq!(
             atrium.input(&InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0)),
             AtriumAction::None
+        );
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::function(4), KeyState::Pressed, MOD_ALT)),
+            AtriumAction::CloseFocused
         );
         assert_eq!(atrium.input(&ctrl(b'j')), AtriumAction::None);
         assert_eq!(atrium.input(&ctrl(b'1')), AtriumAction::Launch(AppId::Calculator));
