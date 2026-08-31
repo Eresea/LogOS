@@ -670,6 +670,7 @@ pub extern "C" fn _start() -> ! {
     let mut program_surface_capabilities: [Option<ProgramSurfaceCapabilities>;
         logos_atrium::MAX_ATRIUM_SURFACES] = [None; logos_atrium::MAX_ATRIUM_SURFACES];
     let mut last_terminal_request: Option<AtriumSurfaceRequest> = None;
+    let mut last_system_request: Option<AtriumSurfaceRequest> = None;
     let mut terminal_client = logos_abi::ServiceHandle::EMPTY;
     let mut system_client = common::discover_capabilities_contract(
         logos_abi::IpcRights::Receive,
@@ -882,6 +883,7 @@ pub extern "C" fn _start() -> ! {
                 }
             } else {
                 system_client = system_request.client();
+                last_system_request = Some(system_request);
                 if let Some(surface) =
                     atrium.surface_for_client(system_client, logos_atrium::AppId::System)
                 {
@@ -891,20 +893,6 @@ pub extern "C" fn _start() -> ! {
                         system_request,
                         logos_abi::GuiStatus::Ok,
                         surface.reference,
-                    );
-                    if response_was_empty {
-                        pending_client_response_capability = system_surface_response;
-                    }
-                } else if pending_client_request.is_none() {
-                    pending_client_request = Some(system_request);
-                    pending_client_response_capability = system_surface_response;
-                } else {
-                    let response_was_empty = pending_client_response.is_none();
-                    queue_terminal_response(
-                        &mut pending_client_response,
-                        system_request,
-                        logos_abi::GuiStatus::Backpressure,
-                        SurfaceHandle::EMPTY,
                     );
                     if response_was_empty {
                         pending_client_response_capability = system_surface_response;
@@ -1410,12 +1398,21 @@ pub extern "C" fn _start() -> ! {
                         if pending_client_request.is_none() {
                             pending_client_request = Some(client_request);
                         }
+                    } else if app == logos_atrium::AppId::System {
+                        let Some(client_request) = last_system_request else { continue };
+                        if pending_client_request.is_none() {
+                            pending_client_request = Some(client_request);
+                            pending_client_response_capability = system_surface_response;
+                        }
                     }
-                    let client = if app == logos_atrium::AppId::Terminal {
-                        terminal_client
-                    } else {
-                        atrium_client
+                    let client = match app {
+                        logos_atrium::AppId::Terminal => terminal_client,
+                        logos_atrium::AppId::System => system_client,
+                        _ => atrium_client,
                     };
+                    if !client.is_valid() {
+                        continue;
+                    }
                     let Ok(surface_request) = atrium.request_surface(app, client) else { continue };
                     let mut request = GuiSurfaceRequest::new(
                         GuiSurfaceOperation::CreateModal,
@@ -1428,7 +1425,10 @@ pub extern "C" fn _start() -> ! {
                     }
                     if common::ipc_send_handle(display_control, &request) == IpcStatus::Ok {
                         pending_surface = Some((request, Some(surface_request)));
-                        pending_surface_for_client = app == logos_atrium::AppId::Terminal;
+                        pending_surface_for_client = matches!(
+                            app,
+                            logos_atrium::AppId::Terminal | logos_atrium::AppId::System
+                        );
                     }
                 }
                 logos_atrium::AtriumAction::Logout => {
