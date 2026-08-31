@@ -9,6 +9,7 @@ param(
     [switch]$NoNetwork,
     [switch]$NetworkProof,
     [switch]$VirtioGpu,
+    [switch]$InputTrace,
     # Retained as a compatibility alias; networking is enabled by default.
     [switch]$Network,
     [ValidateRange(1, 8)]
@@ -65,8 +66,10 @@ if (-not (Test-Path $disk)) {
 }
 
 $buildArgs = @('build', '--target', 'x86_64-unknown-uefi')
-if ($Proof) {
-    $features = @('qemu-proof')
+if ($Proof -or $InputTrace) {
+    $features = @(
+        if ($Proof) { 'qemu-proof' } else { 'input-debug' }
+    )
     if ($LockScreenProof) { $features += 'lockscreen-proof' }
     if ($FetchProof) { $features += 'fetch-proof' }
     $buildArgs += @('--features', ($features -join ','))
@@ -75,7 +78,7 @@ if ($releaseBuild) { $buildArgs += '--release' }
 cargo @buildArgs
 if ($LASTEXITCODE -ne 0) { throw "Kernel build failed with exit code $LASTEXITCODE." }
 
-& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof:$Proof -LockScreenProof:$LockScreenProof -FetchProof:$FetchProof
+& (Join-Path $PSScriptRoot 'build-services.ps1') -Release -Proof:$Proof -InputDebug:$InputTrace -LockScreenProof:$LockScreenProof -FetchProof:$FetchProof
 if ($LASTEXITCODE -ne 0) { throw "Service image build failed with exit code $LASTEXITCODE." }
 
 New-Item -ItemType Directory -Force (Join-Path $esp 'EFI\BOOT') | Out-Null
@@ -95,9 +98,11 @@ if ($networkEnabled) {
 }
 
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
+$inputTracePath = Join-Path $target "qemu-input-$PID.trace"
+$inputDebugLogPath = Join-Path $target "qemu-input-$PID.log"
 $display = if ($interactiveMode) { 'gtk,zoom-to-fit=on' } else { 'none' }
 $qemuArgs = @(
-    '-machine', 'q35', '-m', '256M', '-smp', $Cpus, '-cpu', 'max',
+    '-machine', 'q35', '-m', '256M', '-smp', $Cpus,
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
     '-drive', "format=raw,file=fat:rw:$espPath",
     '-drive', "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough",
@@ -129,84 +134,21 @@ if ($Proof) {
     Remove-Item $log -Force -ErrorAction SilentlyContinue
     $qemuArgs += @('-no-reboot', '-debugcon', "file:qemu-proof-$Cpus.log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
 } else {
-    $qemuArgs += @('-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9')
+    if ($InputTrace) {
+        Remove-Item -LiteralPath $inputDebugLogPath -Force -ErrorAction SilentlyContinue
+        $qemuArgs += @('-debugcon', "file:$inputDebugLogPath", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
+    } else {
+        $qemuArgs += @('-debugcon', 'stdio', '-global', 'isa-debugcon.iobase=0xe9')
+    }
+}
+if ($InputTrace) {
+    Remove-Item -LiteralPath $inputTracePath -Force -ErrorAction SilentlyContinue
+    $qemuArgs += @('-trace', "enable=*keyboard*,file=$inputTracePath")
 }
 
 if (-not $Proof) {
-    if (-not ('LogosInteractiveProcess' -as [type])) {
-        Add-Type @'
-using System;
-using System.ComponentModel;
-using System.Text;
-using System.Runtime.InteropServices;
-public static class LogosInteractiveProcess {
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct StartupInfo {
-        public int cb;
-        public string reserved;
-        public string desktop;
-        public string title;
-        public int x, y, xSize, ySize, xCountChars, yCountChars, fillAttribute, flags;
-        public short showWindow, reserved2;
-        public IntPtr reserved2Pointer, standardInput, standardOutput, standardError;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct ProcessInformation {
-        public IntPtr process;
-        public IntPtr thread;
-        public int processId;
-        public int threadId;
-    }
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool CreateProcess(
-        string application,
-        StringBuilder commandLine,
-        IntPtr processAttributes,
-        IntPtr threadAttributes,
-        bool inheritHandles,
-        uint creationFlags,
-        IntPtr environment,
-        string workingDirectory,
-        ref StartupInfo startupInfo,
-        out ProcessInformation processInformation);
-
-    [DllImport("kernel32.dll")]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    public static int Start(string application, string commandLine, string workingDirectory) {
-        var startup = new StartupInfo {
-            cb = Marshal.SizeOf<StartupInfo>(),
-            desktop = "WinSta0\\Default",
-            showWindow = 1
-        };
-        var information = new ProcessInformation();
-        var command = new StringBuilder(commandLine);
-        if (!CreateProcess(application, command, IntPtr.Zero, IntPtr.Zero, false, 0,
-                           IntPtr.Zero, workingDirectory, ref startup, out information)) {
-            throw new Win32Exception(Marshal.GetLastWin32Error(),
-                "QEMU could not be started on the interactive Windows desktop.");
-        }
-        CloseHandle(information.thread);
-        CloseHandle(information.process);
-        return information.processId;
-    }
-}
-'@
-    }
-    $interactiveLogName = "qemu-interactive-$PID.log"
-    $interactiveArguments = ($qemuArgs | ForEach-Object {
-            if ($_ -eq 'stdio') { "file:$interactiveLogName" }
-            elseif ($_ -match '[\s"]') { '"' + $_.Replace('"', '\"') + '"' } else { $_ }
-        }) -join ' '
-    $interactiveCommandLine = '"' + $qemuPath.Replace('"', '\"') + '" ' + $interactiveArguments
-    $interactivePid = [LogosInteractiveProcess]::Start($qemuPath, $interactiveCommandLine, $target)
-    $interactiveProcess = [Diagnostics.Process]::GetProcessById($interactivePid)
-    $interactiveProcess.WaitForExit()
-    $exitCode = $interactiveProcess.ExitCode
-    $interactiveProcess.Dispose()
-    exit $exitCode
+    & $qemuPath @qemuArgs
+    exit $LASTEXITCODE
 }
 
 $psi = [Diagnostics.ProcessStartInfo]::new()
@@ -507,7 +449,9 @@ $proofBefore = Join-Path $repoRoot "target\qemu-proof-before-$Cpus.ppm"
 $proofAfter = Join-Path $repoRoot "target\qemu-proof-after-$Cpus.ppm"
 $pointerBefore = Join-Path $repoRoot "target\qemu-proof-pointer-before-$Cpus.ppm"
 $pointerAfter = Join-Path $repoRoot "target\qemu-proof-pointer-after-$Cpus.ppm"
-Remove-Item $proofBefore, $proofAfter, $pointerBefore, $pointerAfter -Force -ErrorAction SilentlyContinue
+$keyboardBefore = Join-Path $repoRoot "target\qemu-proof-keyboard-before-$Cpus.ppm"
+$keyboardAfter = Join-Path $repoRoot "target\qemu-proof-keyboard-after-$Cpus.ppm"
+Remove-Item $proofBefore, $proofAfter, $pointerBefore, $pointerAfter, $keyboardBefore, $keyboardAfter -Force -ErrorAction SilentlyContinue
 $qmp = $null
 try {
     $qmp = Connect-Qmp $QmpPort
@@ -675,10 +619,35 @@ try {
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen admin claim PASS' $TimeoutSeconds)) {
             throw 'Admin claim did not complete.'
         }
+        if (-not (Wait-QmpFramebufferStable $qmp $keyboardBefore $TimeoutSeconds)) {
+            throw 'LockScreen login framebuffer did not stabilize before keyboard input.'
+        }
         $loginMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen login PASS'
+        $usernameValueMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen username value changed'
+        $passwordValueMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen password value changed'
         Send-QmpText $qmp 'admin'
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen username value changed' $usernameValueMarker $TimeoutSeconds)) {
+            throw 'Keyboard input did not change the LockScreen username value.'
+        }
+        $usernameRedrawMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen input redraw submitted'
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen input redraw submitted' $usernameRedrawMarker $TimeoutSeconds)) {
+            throw 'Keyboard username input did not redraw the LockScreen.'
+        }
+        if (-not (Wait-QmpFramebufferStable $qmp $keyboardAfter $TimeoutSeconds)) {
+            throw 'LockScreen login framebuffer did not stabilize after username input.'
+        }
+        if ((Get-FileHash $keyboardBefore).Hash -eq (Get-FileHash $keyboardAfter).Hash) {
+            throw 'Keyboard username input did not change the rendered LockScreen.'
+        }
         Send-QmpKey $qmp 'tab'
         Send-QmpText $qmp 'password'
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen password value changed' $passwordValueMarker $TimeoutSeconds)) {
+            throw 'Keyboard input did not change the LockScreen password value.'
+        }
+        $passwordRedrawMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen input redraw submitted'
+        if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen input redraw submitted' $passwordRedrawMarker $TimeoutSeconds)) {
+            throw 'Keyboard password input did not redraw the LockScreen.'
+        }
         Send-QmpKey $qmp 'ret'
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen login PASS' $loginMarker $TimeoutSeconds)) {
             throw 'Post-claim login did not complete.'

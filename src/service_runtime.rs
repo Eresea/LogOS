@@ -5201,7 +5201,7 @@ impl ServiceRuntime {
         }
     }
 
-    #[cfg(feature = "qemu-proof")]
+    #[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
     pub(crate) fn service_debug_line(&self, process: ProcessHandle, length: usize) -> bool {
         if self.service_slot_for_process(process).is_none()
             || !(1..=logos_abi::IPC_PAGE_BYTES).contains(&length)

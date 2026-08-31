@@ -138,7 +138,14 @@ const KEYBOARD_READ_CONFIG: u8 = 0x20;
 const KEYBOARD_WRITE_CONFIG: u8 = 0x60;
 const KEYBOARD_INPUT_FULL: u8 = 1 << 1;
 const KEYBOARD_OUTPUT_FULL: u8 = 1;
+const KEYBOARD_CLOCK_DISABLED: u8 = 1 << 4;
+const POINTER_CLOCK_DISABLED: u8 = 1 << 5;
+const KEYBOARD_TRANSLATION_ENABLED: u8 = 1 << 6;
+const KEYBOARD_AUX_OUTPUT: u8 = 1 << 5;
 const KEYBOARD_DATA_PORT: u16 = 0x60;
+const KEYBOARD_SET_SCANCODE: u8 = 0xf0;
+const KEYBOARD_SCANCODE_SET_2: u8 = 0x02;
+const KEYBOARD_ACK: u8 = 0xfa;
 const POINTER_COMMAND: u8 = 0xd4;
 const POINTER_ENABLE_AUX: u8 = 0xa8;
 const POINTER_ENABLE_STREAM: u8 = 0xf4;
@@ -1378,7 +1385,7 @@ pub(crate) fn allocator_proof() -> bool {
     unsafe { (&mut *core::ptr::addr_of_mut!(SERVICE_RUNTIME)).allocator_proof() }
 }
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
 pub(crate) fn service_debug_line(process: crate::process::ProcessHandle, length: usize) -> bool {
     let _runtime_guard = ServiceRuntimeGuard::acquire();
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).service_debug_line(process, length) }
@@ -1490,6 +1497,8 @@ fn initialize_post_uefi(cpu_count: usize) {
     if !configure_keyboard() {
         fatal(b"LogOS vNext: keyboard controller");
     }
+    #[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
+    proof_line(b"LogOS vNext: PS/2 keyboard set 2");
     POINTER_IRQ_AVAILABLE.store(configure_pointer(), Ordering::Release);
     calibrate_timer();
     crate::user_mode::initialize_kernel_cr3(current_cr3());
@@ -1778,6 +1787,8 @@ fn configure_pic() {
 
 fn configure_keyboard() -> bool {
     unsafe {
+        // InputDecoder consumes Set-2 bytes; establish that device contract
+        // after UEFI handoff instead of relying on firmware state.
         let mut ready = false;
         for _ in 0..1_000_000 {
             if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
@@ -1792,7 +1803,9 @@ fn configure_keyboard() -> bool {
         if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_OUTPUT_FULL == 0 {
             return false;
         }
-        let config = (in_port(KEYBOARD_DATA_PORT) & !0x60) | 0x03;
+        let config = (in_port(KEYBOARD_DATA_PORT)
+            & !(KEYBOARD_CLOCK_DISABLED | POINTER_CLOCK_DISABLED | KEYBOARD_TRANSLATION_ENABLED))
+            | 0x03;
         ready = false;
         for _ in 0..1_000_000 {
             if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
@@ -1807,8 +1820,47 @@ fn configure_keyboard() -> bool {
         for _ in 0..1_000_000 {
             if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
                 out_port(KEYBOARD_DATA_PORT, config);
-                return true;
+                ready = true;
+                break;
             }
+        }
+        if !ready {
+            return false;
+        }
+        ready = false;
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
+                out_port(KEYBOARD_DATA_PORT, KEYBOARD_SET_SCANCODE);
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            return false;
+        }
+        if !wait_keyboard_ack() {
+            return false;
+        }
+        ready = false;
+        for _ in 0..1_000_000 {
+            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
+                out_port(KEYBOARD_DATA_PORT, KEYBOARD_SCANCODE_SET_2);
+                ready = true;
+                break;
+            }
+        }
+        if !ready {
+            return false;
+        }
+        return wait_keyboard_ack();
+    }
+}
+
+unsafe fn wait_keyboard_ack() -> bool {
+    for _ in 0..1_000_000 {
+        let status = unsafe { in_port(KEYBOARD_STATUS_PORT) };
+        if status & KEYBOARD_OUTPUT_FULL != 0 && status & KEYBOARD_AUX_OUTPUT == 0 {
+            return unsafe { in_port(KEYBOARD_DATA_PORT) } == KEYBOARD_ACK;
         }
     }
     false
@@ -1894,7 +1946,7 @@ pub(super) fn handle_keyboard_interrupt() {
                     crate::runtime_events::signal_hardware_event(
                         crate::runtime_events::HardwareEventSource::Keyboard,
                     );
-                    #[cfg(feature = "qemu-proof")]
+                    #[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
                     proof_line(b"LogOS vNext: keyboard event wake");
                 }
             }

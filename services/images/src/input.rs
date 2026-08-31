@@ -14,12 +14,12 @@ static mut SENT_MASK: u8 = 0;
 static mut PENDING_POINTER: Option<InputMessage> = None;
 static mut POINTER_SENT_MASK: u8 = 0;
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
 fn proof_line(message: &[u8]) {
     common::proof_line(message);
 }
 
-#[cfg(not(feature = "qemu-proof"))]
+#[cfg(not(any(feature = "qemu-proof", feature = "input-debug")))]
 fn proof_line(_message: &[u8]) {}
 
 fn flush_pointer(

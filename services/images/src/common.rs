@@ -1367,7 +1367,7 @@ pub fn heartbeat_tick(ticks: &mut u16) {
     }
 }
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
 #[allow(dead_code)]
 pub fn proof_line(message: &[u8]) {
     if message.is_empty() || message.len() > logos_abi::IPC_PAGE_BYTES {

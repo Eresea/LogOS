@@ -96,12 +96,12 @@ fn ui_build(claim: bool) -> &'static logos_ui_compiler::UiBuild {
     }
 }
 
-#[cfg(feature = "qemu-proof")]
+#[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
 fn proof_line(message: &[u8]) {
     common::proof_line(message);
 }
 
-#[cfg(not(feature = "qemu-proof"))]
+#[cfg(not(any(feature = "qemu-proof", feature = "input-debug")))]
 fn proof_line(_message: &[u8]) {}
 
 fn draw_ui(
@@ -110,19 +110,24 @@ fn draw_ui(
     lock: &logos_lockscreen::LockScreen,
     sequence: u32,
     _include_static: bool,
-) -> IpcStatus {
+    start_index: usize,
+) -> (IpcStatus, usize) {
     let build = ui_build(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
     let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
     if tree.reset_from_document(&build.document).is_err() {
-        return IpcStatus::Malformed;
+        return (IpcStatus::Malformed, 0);
     }
     let Some(layout) = logos_shell::LoginLayout::from_build(build, CURSOR_BOUNDS) else {
-        return IpcStatus::Malformed;
+        return (IpcStatus::Malformed, 0);
     };
 
     for index in 0..build.document.node_count() {
-        let Ok(handle) = tree.tree().handle_at(index) else { return IpcStatus::Malformed };
-        let Some(layout_node) = layout.node(index as u16) else { return IpcStatus::Malformed };
+        let Ok(handle) = tree.tree().handle_at(index) else {
+            return (IpcStatus::Malformed, 0);
+        };
+        let Some(layout_node) = layout.node(index as u16) else {
+            return (IpcStatus::Malformed, 0);
+        };
         let bounds = if index == 0 {
             logos_ui::UiRect::new(
                 CURSOR_BOUNDS.x,
@@ -139,7 +144,7 @@ fn draw_ui(
             )
         };
         if tree.tree_mut().set_bounds(handle, bounds).is_err() {
-            return IpcStatus::Malformed;
+            return (IpcStatus::Malformed, 0);
         }
         if tree
             .tree_mut()
@@ -149,7 +154,7 @@ fn draw_ui(
             )
             .is_err()
         {
-            return IpcStatus::Malformed;
+            return (IpcStatus::Malformed, 0);
         }
     }
 
@@ -159,7 +164,7 @@ fn draw_ui(
     }
     for index in 0..build.document.node_count() {
         if tree.apply_document_styles(&build.document, index as u16, &conditions).is_err() {
-            return IpcStatus::Malformed;
+            return (IpcStatus::Malformed, 0);
         }
     }
 
@@ -180,30 +185,29 @@ fn draw_ui(
             },
         )
     {
-        return IpcStatus::Malformed;
+        return (IpcStatus::Malformed, 0);
     }
 
     let (username, password) = lock.credentials();
     if !set_named_value(tree, build, b"username", username, false)
         || !set_named_value(tree, build, b"password", password, true)
     {
-        return IpcStatus::Malformed;
+        return (IpcStatus::Malformed, 0);
     }
     if lock.mode() == logos_lockscreen::LockScreenMode::Claim
         && !set_named_value(tree, build, b"confirmPassword", lock.confirmation(), true)
     {
-        return IpcStatus::Malformed;
+        return (IpcStatus::Malformed, 0);
     }
     let Some(submit_index) = build.document.node_index_by_name(b"submit") else {
-        return IpcStatus::Malformed;
+        return (IpcStatus::Malformed, 0);
     };
     let Ok(submit) = tree.tree().handle_at(usize::from(submit_index)) else {
-        return IpcStatus::Malformed;
+        return (IpcStatus::Malformed, 0);
     };
     if tree.set_disabled(submit, !lock.form().can_submit()).is_err() {
-        return IpcStatus::Malformed;
+        return (IpcStatus::Malformed, 0);
     }
-
     let scene = match logos_ui_graphics::emit(
         surface,
         sequence,
@@ -211,15 +215,15 @@ fn draw_ui(
         logos_ui_graphics::UiSceneTheme::DEFAULT,
     ) {
         Ok(scene) => scene,
-        Err(_) => return IpcStatus::Malformed,
+        Err(_) => return (IpcStatus::Malformed, 0),
     };
-    for operation in scene.as_slice() {
+    for (index, operation) in scene.as_slice().iter().enumerate().skip(start_index) {
         let status = common::ipc_send_handle(display, operation);
         if status != IpcStatus::Ok {
-            return status;
+            return (status, index);
         }
     }
-    IpcStatus::Ok
+    (IpcStatus::Ok, scene.len())
 }
 
 fn field_for_node(
@@ -322,6 +326,8 @@ pub extern "C" fn _start() -> ! {
     let mut pending_cursor_draw: Option<GuiSceneOp> = None;
     let mut pending_draw: Option<bool> = None;
     let mut pending_draw_sequence = 0u32;
+    let mut pending_draw_index = 0usize;
+    let mut input_redraw_pending = false;
     let mut pending_auth: Option<UserRequest> = None;
     let mut response =
         UserResponse::new(UserRequest::new(UserOperation::Login, 1), UserStatus::Stale);
@@ -350,16 +356,31 @@ pub extern "C" fn _start() -> ! {
                 sequence = sequence.wrapping_add(1).max(1);
                 pending_draw_sequence = sequence;
             }
-            match draw_ui(display, surface, lock, pending_draw_sequence, include_static) {
+            let (status, next_index) = draw_ui(
+                display,
+                surface,
+                lock,
+                pending_draw_sequence,
+                include_static,
+                pending_draw_index,
+            );
+            pending_draw_index = next_index;
+            match status {
                 IpcStatus::Ok => {
                     pending_draw = None;
                     pending_draw_sequence = 0;
+                    pending_draw_index = 0;
                     static_cached = true;
+                    if input_redraw_pending {
+                        proof_line(b"LogOS vNext: LockScreen input redraw submitted");
+                        input_redraw_pending = false;
+                    }
                 }
                 IpcStatus::Full => {}
                 _ => {
                     pending_draw = None;
                     pending_draw_sequence = 0;
+                    pending_draw_index = 0;
                     static_cached = false;
                 }
             }
@@ -394,6 +415,7 @@ pub extern "C" fn _start() -> ! {
                 pending_surface = None;
                 pending_auth = None;
                 static_cached = false;
+                pending_draw_index = 0;
                 pending_cursor_surface = None;
                 pending_cursor_draw = None;
                 if cursor_surface.is_valid() {
@@ -430,6 +452,7 @@ pub extern "C" fn _start() -> ! {
                 surface = surface_response.surface;
                 proof_line(b"LogOS vNext: LockScreen surface ready");
                 pending_draw = Some(true);
+                pending_draw_index = 0;
             }
         }
         if let Some(request) = pending_auth {
@@ -457,12 +480,18 @@ pub extern "C" fn _start() -> ! {
                 }
                 if surface.is_valid() {
                     pending_draw = Some(!static_cached || old_mode != lock.mode());
+                    pending_draw_index = 0;
                 }
             }
         }
         if visible && pending_auth.is_none() {
             let mut cursor_sent_in_input = false;
+            let mut input_received = false;
             while common::ipc_receive_handle(input, &mut event) == IpcStatus::Ok {
+                input_received = true;
+                let username_len = lock.credentials().0.len();
+                let password_len = lock.credentials().1.len();
+                let confirmation_len = lock.confirmation().len();
                 if let Some(pointer) = event.pointer_event() {
                     cursor = (pointer.x.clamp(0, 639), pointer.y.clamp(0, 399));
                     cursor_sequence = cursor_sequence.wrapping_add(1).max(1);
@@ -493,6 +522,18 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     lock.input(event)
                 };
+                if action == logos_lockscreen::LockScreenAction::Changed {
+                    let (username, password) = lock.credentials();
+                    if username.len() != username_len {
+                        proof_line(b"LogOS vNext: LockScreen username value changed");
+                    }
+                    if password.len() != password_len {
+                        proof_line(b"LogOS vNext: LockScreen password value changed");
+                    }
+                    if lock.confirmation().len() != confirmation_len {
+                        proof_line(b"LogOS vNext: LockScreen confirmation value changed");
+                    }
+                }
                 if event
                     .pointer_event()
                     .is_some_and(|pointer| pointer.state == logos_abi::PointerState::Down)
@@ -512,7 +553,13 @@ pub extern "C" fn _start() -> ! {
                 }
                 if action != logos_lockscreen::LockScreenAction::Ignored && surface.is_valid() {
                     pending_draw = Some(true);
+                    pending_draw_index = 0;
+                    input_redraw_pending = true;
                 }
+            }
+            if input_received && input_redraw_pending && pending_draw.is_some() {
+                common::heartbeat();
+                continue;
             }
         }
         if let Some(cursor) = pending_cursor_draw {

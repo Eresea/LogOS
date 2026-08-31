@@ -4,6 +4,7 @@ use logos_abi::{GUI_DRAW_FLAG_MORE, GuiDrawCommand, GuiSceneOp, MAX_GUI_NODES, S
 use logos_ui::{UiComponentTree, UiNode, UiNodeKind, UiRect, UiStyle};
 
 pub const MAX_UI_SCENE_OPS: usize = MAX_GUI_NODES + 2;
+const GUI_GLYPH_WIDTH: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiSceneTheme {
@@ -179,15 +180,29 @@ fn push_text(
     if text.is_empty() {
         return Ok(());
     }
-    let Some(command) = GuiDrawCommand::glyph_run(
-        node.bounds.x.saturating_add(4),
-        node.bounds.y.saturating_add(4),
-        color(text_color, node),
-        text,
-    ) else {
-        return Err(UiSceneError::Capacity);
-    };
-    push_upsert(output, surface, frame, index, fragment, command)
+    let mut offset = 0;
+    let mut chunk = 0;
+    while offset < text.len() {
+        let end = offset.saturating_add(logos_abi::MAX_GUI_TEXT_BYTES).min(text.len());
+        let x_offset = offset.saturating_mul(GUI_GLYPH_WIDTH) as i32;
+        let node_id = if chunk == 0 {
+            (index as u32).saturating_mul(3).saturating_add(fragment + 1)
+        } else {
+            0x8000_0000 | index as u32
+        };
+        let Some(command) = GuiDrawCommand::glyph_run(
+            node.bounds.x.saturating_add(4).saturating_add(x_offset),
+            node.bounds.y.saturating_add(4),
+            color(text_color, node),
+            &text[offset..end],
+        ) else {
+            return Err(UiSceneError::Capacity);
+        };
+        push_upsert_id(output, surface, frame, node_id, command)?;
+        offset = end;
+        chunk += 1;
+    }
+    Ok(())
 }
 
 fn push_shadow(
@@ -224,13 +239,23 @@ fn push_upsert(
         return Err(UiSceneError::InvalidCommand);
     }
     let node_id = (index as u32).saturating_mul(3).saturating_add(fragment + 1);
+    push_upsert_id(output, surface, frame, node_id, command)
+}
+
+fn push_upsert_id(
+    output: &mut UiSceneFrame,
+    surface: SurfaceHandle,
+    frame: u32,
+    node_id: u32,
+    command: GuiDrawCommand,
+) -> Result<(), UiSceneError> {
     let mut op = GuiSceneOp::upsert(surface, frame, node_id, command);
     op.flags = GUI_DRAW_FLAG_MORE;
     push(output, op)
 }
 
 fn push(output: &mut UiSceneFrame, op: GuiSceneOp) -> Result<(), UiSceneError> {
-    if output.len() > MAX_GUI_NODES {
+    if output.len() >= MAX_UI_SCENE_OPS {
         return Err(UiSceneError::Capacity);
     }
     output.ops[output.len()] = op;
@@ -422,5 +447,23 @@ mod tests {
         let surface = SurfaceHandle::new(1, 1, 7).unwrap();
         let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
         assert!(scene.as_slice().iter().all(|op| op.is_valid()));
+    }
+
+    #[test]
+    fn long_labels_split_into_bounded_glyph_runs() {
+        let mut tree = sample_tree();
+        let label = tree.tree().handle_at(1).unwrap();
+        tree.set_text(label, UiText::from_bytes(b"This account will own this system.").unwrap())
+            .unwrap();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 400, 40));
+        set_bounds(&mut tree, 1, UiRect::new(0, 0, 400, 40));
+        set_bounds(&mut tree, 2, UiRect::new(0, 0, 400, 40));
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        assert_eq!(scene.len(), 6);
+        assert!(scene.as_slice().iter().all(|op| op.is_valid()));
+        assert_eq!(scene.as_slice()[1].node_id, 1);
+        assert_eq!(scene.as_slice()[2].node_id, 4);
+        assert_eq!(scene.as_slice()[3].node_id, 0x8000_0001);
     }
 }

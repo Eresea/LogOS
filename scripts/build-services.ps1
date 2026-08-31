@@ -1,6 +1,7 @@
 param(
     [switch]$Release,
     [switch]$Proof,
+    [switch]$InputDebug,
     [switch]$LockScreenProof,
     [switch]$PackageProof,
     [switch]$StorageProof,
@@ -20,6 +21,7 @@ $buildArgs = @(
 )
 $features = @()
 if ($Proof) { $features += 'qemu-proof' }
+if ($InputDebug) { $features += 'input-debug' }
 if ($LockScreenProof) { $features += 'lockscreen-proof' }
 if ($PackageProof) { $features += 'package-proof' }
 if ($StorageProof) { $features += 'storage-proof' }
