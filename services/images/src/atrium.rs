@@ -343,7 +343,7 @@ fn draw_app(
             let _ = common::ipc_send_scene_batch(display, &detail, 7);
         }
         logos_atrium::AppId::Terminal => {
-            draw_surface_chrome(display, surface, sequence, title, false, false);
+            draw_surface_chrome(display, surface, sequence, title, false, true);
         }
         logos_atrium::AppId::System => {
             draw_surface_chrome(display, surface, sequence, title, false, true);

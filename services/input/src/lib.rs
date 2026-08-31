@@ -370,6 +370,18 @@ const fn map_code(
         0x5a => KeyCode::ENTER,
         0x66 => KeyCode::BACKSPACE,
         0x0d => KeyCode::TAB,
+        0x05 => KeyCode::function(1),
+        0x06 => KeyCode::function(2),
+        0x04 => KeyCode::function(3),
+        0x0c => KeyCode::function(4),
+        0x03 => KeyCode::function(5),
+        0x0b => KeyCode::function(6),
+        0x83 => KeyCode::function(7),
+        0x0a => KeyCode::function(8),
+        0x01 => KeyCode::function(9),
+        0x09 => KeyCode::function(10),
+        0x78 => KeyCode::function(11),
+        0x07 => KeyCode::function(12),
         0x12 => KeyCode::SHIFT_LEFT,
         0x59 => KeyCode::SHIFT_RIGHT,
         0x14 => KeyCode::CTRL,
@@ -540,6 +552,15 @@ mod tests {
         assert_eq!(event.text.unwrap().text_bytes(), Some(&b"a"[..]));
         assert_eq!(decoder.feed(0xf0), None);
         assert_eq!(decoder.feed(0x1c).unwrap().key.state, KeyState::Released);
+    }
+
+    #[test]
+    fn set_two_decodes_function_keys_with_alt_modifier() {
+        let mut decoder = InputDecoder::new();
+        decoder.feed(0x11);
+        let event = decoder.feed(0x0c).unwrap();
+        assert_eq!(KeyCode::from_raw(event.key.code), KeyCode::function(4));
+        assert_ne!(event.key.modifiers & MOD_ALT, 0);
     }
 
     #[test]
