@@ -848,7 +848,9 @@ pub extern "C" fn _start() -> ! {
                             SurfaceHandle::EMPTY,
                         );
                     }
-                } else if pending_client_request.is_none() {
+                } else if atrium.phase() == logos_atrium::AtriumPhase::Home
+                    && pending_client_request.is_none()
+                {
                     pending_client_request = Some(terminal_request);
                 } else {
                     queue_terminal_response(
