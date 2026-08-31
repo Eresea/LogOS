@@ -1208,6 +1208,18 @@ pub extern "C" fn _start() -> ! {
                 false
             };
             if admitted {
+                if !home_surface {
+                    if let Some(surface) = atrium.focused_surface() {
+                        send_surface_command(
+                            display_control,
+                            &mut surface_commands,
+                            GuiSurfaceOperation::Focus,
+                            surface.reference,
+                            GuiRect::EMPTY,
+                            &mut next_request,
+                        );
+                    }
+                }
                 if home_surface {
                     proof_line(b"LogOS vNext: Atrium home surface ready");
                 }
