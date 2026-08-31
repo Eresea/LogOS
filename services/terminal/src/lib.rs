@@ -151,6 +151,10 @@ impl TerminalService {
         self.terminal.feed(bytes);
     }
 
+    pub fn reset(&mut self) {
+        self.terminal.reset();
+    }
+
     pub fn next_render(&mut self) -> Option<RenderMessage> {
         self.terminal.next_render()
     }

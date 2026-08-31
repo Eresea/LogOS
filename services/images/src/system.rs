@@ -11,6 +11,7 @@ use logos_abi::{
     GuiDrawCommand, GuiRect, IpcStatus, ManagerOperation, ManagerRequest, ManagerResponse,
     ManagerState, SurfaceHandle,
 };
+use logos_atrium::{STATUS_BAR_BOUNDS, STATUS_BAR_CLOSE_BOUNDS};
 
 const ATRIUM_REQUEST: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
@@ -64,10 +65,19 @@ fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) 
 }
 
 fn draw_status(draw: logos_abi::CapabilityHandle, surface: SurfaceHandle, sequence: u32) {
-    let mut batch = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
-    let _ = batch.push(GuiDrawCommand::fill_surface(0x101820));
-    push_text(&mut batch, 20, 24, 0xffffff, b"System");
-    push_text(&mut batch, 20, 48, 0x7890aa, b"Service manager status");
+    let mut base = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
+    base.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    let _ = base.push(GuiDrawCommand::fill_surface(0x101820));
+    let _ = base.push(GuiDrawCommand::fill_rect(STATUS_BAR_BOUNDS, 0x182535));
+    push_text(&mut base, 16, 10, 0xffffff, b"System");
+    let _ = common::ipc_send_scene_batch(draw, &base, 1);
+
+    let mut controls = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
+    controls.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    let _ = controls.push(GuiDrawCommand::fill_rounded_rect(STATUS_BAR_CLOSE_BOUNDS, 0x9f3b3b, 6));
+    push_text(&mut controls, 616, 10, 0xffffff, b"X");
+    push_text(&mut controls, 20, 48, 0x7890aa, b"Service manager status");
+    let _ = common::ipc_send_scene_batch(draw, &controls, 4);
 
     let mut cursor = 0;
     let mut row = 0i32;
@@ -88,15 +98,19 @@ fn draw_status(draw: logos_abi::CapabilityHandle, surface: SurfaceHandle, sequen
         let record = response.record;
         let name_len = usize::from(record.name_len).min(record.name.len());
         let y = 76 + row.saturating_mul(16);
-        push_text(&mut batch, 20, y, 0xd9e5f5, &record.name[..name_len]);
-        push_text(&mut batch, 190, y, 0x7ee787, state_name(record.state));
+        let mut row_batch = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
+        row_batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        push_text(&mut row_batch, 20, y, 0xd9e5f5, &record.name[..name_len]);
+        push_text(&mut row_batch, 190, y, 0x7ee787, state_name(record.state));
+        let _ = common::ipc_send_scene_batch(draw, &row_batch, 7 + row as u32 * 2);
         row += 1;
-        if response.cursor == u64::MAX || response.cursor <= cursor || row >= 14 {
+        if response.cursor == u64::MAX || response.cursor <= cursor || row >= 4 {
             break;
         }
         cursor = response.cursor;
     }
-    let _ = common::ipc_send_scene_batch(draw, &batch, 1);
+    let commit = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
+    let _ = common::ipc_send_scene_batch(draw, &commit, 15);
 }
 
 #[unsafe(no_mangle)]

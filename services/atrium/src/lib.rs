@@ -12,6 +12,9 @@ use logos_abi::{
 pub const MAX_ATRIUM_SURFACES: usize = 4;
 pub const MAX_CALCULATOR_TEXT: usize = 32;
 pub const SURFACE_MOVE_STEP: i32 = 32;
+pub const FULLSCREEN_SURFACE_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 400);
+pub const STATUS_BAR_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 32);
+pub const STATUS_BAR_CLOSE_BOUNDS: GuiRect = GuiRect::new(600, 0, 40, 32);
 pub const CALCULATOR_BUTTON_LEFT: i32 = 20;
 pub const CALCULATOR_BUTTON_TOP: i32 = 100;
 pub const CALCULATOR_BUTTON_WIDTH: i32 = 56;
@@ -184,13 +187,8 @@ impl Atrium {
         }
     }
 
-    pub const fn initial_surface_bounds(app: AppId) -> GuiRect {
-        match app {
-            AppId::Calculator => GuiRect::new(220, 72, 320, 220),
-            AppId::Files => GuiRect::new(248, 88, 340, 190),
-            AppId::Terminal => GuiRect::new(200, 48, 420, 300),
-            AppId::System => GuiRect::new(176, 40, 448, 320),
-        }
+    pub const fn initial_surface_bounds(_app: AppId) -> GuiRect {
+        FULLSCREEN_SURFACE_BOUNDS
     }
 
     pub fn set_home_surface(&mut self, surface: SurfaceHandle) -> Result<(), AtriumError> {
@@ -330,7 +328,7 @@ impl Atrium {
             app,
             client,
             bounds: Self::initial_surface_bounds(app),
-            mode: if app == AppId::Terminal { SurfaceMode::Tiled } else { SurfaceMode::Floating },
+            mode: SurfaceMode::Tiled,
         })
     }
 
@@ -870,20 +868,37 @@ mod tests {
     }
 
     #[test]
-    fn floating_focus_move_close_and_restart_are_generation_safe() {
+    fn fullscreen_surfaces_ignore_move_and_close_safely() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
         let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
         let admitted = atrium.spawn_surface(request, surface(1)).unwrap();
         assert_eq!(atrium.focused_surface().unwrap().id, admitted.id);
         atrium.move_focused(SURFACE_MOVE_STEP, -SURFACE_MOVE_STEP).unwrap();
-        assert_eq!(atrium.surface(admitted.id).unwrap().bounds, GuiRect::new(252, 40, 320, 220));
+        assert_eq!(atrium.surface(admitted.id).unwrap().bounds, FULLSCREEN_SURFACE_BOUNDS);
         let closed = atrium.close_focused().unwrap();
         assert_eq!(closed.id, admitted.id);
         atrium.restart();
         assert_eq!(atrium.phase(), AtriumPhase::Boot);
         assert!(!atrium.home_surface().is_valid());
         assert_eq!(atrium.surfaces().count(), 0);
+    }
+
+    #[test]
+    fn app_surfaces_are_fullscreen_and_close_button_is_bounded() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        for (index, app) in [AppId::Calculator, AppId::Files, AppId::Terminal, AppId::System]
+            .into_iter()
+            .enumerate()
+        {
+            let request = atrium.request_surface(app, client(index as u32 + 1)).unwrap();
+            assert_eq!(request.bounds(), FULLSCREEN_SURFACE_BOUNDS);
+            assert_eq!(request.mode(), SurfaceMode::Tiled);
+        }
+        assert!(STATUS_BAR_BOUNDS.contains(320, 16));
+        assert!(STATUS_BAR_CLOSE_BOUNDS.contains(620, 16));
+        assert!(!STATUS_BAR_CLOSE_BOUNDS.contains(599, 16));
     }
 
     #[test]
@@ -1000,7 +1015,7 @@ mod tests {
         assert_eq!(atrium.surface_at(overlap.0, overlap.1).unwrap().id, files.id);
         atrium.focus(calculator.id).unwrap();
         assert_eq!(atrium.surface_at(overlap.0, overlap.1).unwrap().id, calculator.id);
-        assert_eq!(atrium.surface_at(0, 0), None);
+        assert_eq!(atrium.surface_at(0, 0).unwrap().id, calculator.id);
         let stale = SurfaceHandle {
             generation: calculator.reference.generation + 1,
             ..calculator.reference
@@ -1010,7 +1025,7 @@ mod tests {
         assert_eq!(atrium.focused_surface().unwrap().reference, files.reference);
         let focused = atrium.focus_at(overlap.0, overlap.1).unwrap();
         assert_eq!(focused.reference, files.reference);
-        assert_eq!(atrium.focus_at(0, 0), Err(AtriumError::NotFound));
+        assert_eq!(atrium.focus_at(0, 0).unwrap().id, files.id);
     }
 
     #[test]
@@ -1040,7 +1055,10 @@ mod tests {
             atrium.pointer_target(&up).map(|surface| surface.reference),
             Some(files.reference)
         );
-        assert_eq!(atrium.pointer_target(&move_event), None);
+        assert_eq!(
+            atrium.pointer_target(&move_event).map(|surface| surface.reference),
+            Some(files.reference)
+        );
     }
 
     #[test]

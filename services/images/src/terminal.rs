@@ -115,6 +115,7 @@ pub extern "C" fn _start() -> ! {
                 && surface_response.status == logos_abi::GuiStatus::Ok
                 && surface_response.surface.is_valid()
             {
+                terminal.reset();
                 terminal_surface = surface_response.surface;
             } else if surface_response.is_revoke() && surface_response.surface == terminal_surface {
                 terminal_surface = SurfaceHandle::EMPTY;

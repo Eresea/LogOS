@@ -214,24 +214,18 @@ fn draw_calculator_ui(
     let bounds = surface.bounds;
     let panel_bounds = GuiRect::new(
         bounds.x.saturating_add(12),
-        bounds.y.saturating_add(12),
+        bounds.y.saturating_add(40),
         bounds.width.saturating_sub(24),
-        bounds.height.saturating_sub(24),
+        bounds.height.saturating_sub(52),
     );
     let mut base = GuiDrawBatch::new(surface.reference, sequence, bounds);
     base.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = base.push(GuiDrawCommand::fill_surface(0x101820));
     let _ = base.push(GuiDrawCommand::fill_rounded_rect(panel_bounds, 0x182535, 16));
-    push_surface_text(&mut base, bounds, 20, 20, 0xffffff, b"Calculator");
-    let _ = common::ipc_send_scene_batch(display, &base, 1);
-
-    let mut display_batch = GuiDrawBatch::new(surface.reference, sequence, bounds);
-    display_batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     let display_bounds =
         GuiRect::new(bounds.x.saturating_add(20), bounds.y.saturating_add(52), 260, 40);
-    let _ = display_batch.push(GuiDrawCommand::fill_rounded_rect(display_bounds, 0x263548, 8));
-    push_surface_text(&mut display_batch, bounds, 32, 64, 0xffffff, calculator.display());
-    let _ = common::ipc_send_scene_batch(display, &display_batch, 4);
+    let _ = base.push(GuiDrawCommand::fill_rounded_rect(display_bounds, 0x263548, 8));
+    push_surface_text(&mut base, bounds, 32, 64, 0xffffff, calculator.display());
+    let _ = common::ipc_send_scene_batch(display, &base, 6);
 
     let rows: [&[u8]; 4] = [
         b"[ 7 ]   [ 8 ]   [ 9 ]   [ / ]",
@@ -252,8 +246,42 @@ fn draw_calculator_ui(
             0xffffff,
             labels,
         );
-        let _ = common::ipc_send_scene_batch(display, &keypad, 6 + row as u32);
+        let _ = common::ipc_send_scene_batch(display, &keypad, 9 + row as u32);
     }
+}
+
+fn draw_surface_chrome(
+    display: logos_abi::CapabilityHandle,
+    surface: logos_atrium::Surface,
+    sequence: u32,
+    title: &[u8],
+    more: bool,
+    opaque: bool,
+) {
+    let bounds = surface.bounds;
+    let mut base = GuiDrawBatch::new(surface.reference, sequence, bounds);
+    base.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    let status_bar = GuiRect::new(bounds.x, bounds.y, bounds.width, 32);
+    if opaque {
+        let _ = base.push(GuiDrawCommand::fill_surface(0x101820));
+    }
+    let _ = base.push(GuiDrawCommand::fill_rect(status_bar, 0x182535));
+    push_surface_text(&mut base, bounds, 16, 10, 0xffffff, title);
+    let _ = common::ipc_send_scene_batch(display, &base, 1);
+
+    let mut close = GuiDrawBatch::new(surface.reference, sequence, bounds);
+    if more {
+        close.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    }
+    let close_bounds = GuiRect::new(
+        bounds.x.saturating_add(logos_atrium::STATUS_BAR_CLOSE_BOUNDS.x),
+        bounds.y.saturating_add(logos_atrium::STATUS_BAR_CLOSE_BOUNDS.y),
+        logos_atrium::STATUS_BAR_CLOSE_BOUNDS.width,
+        logos_atrium::STATUS_BAR_CLOSE_BOUNDS.height,
+    );
+    let _ = close.push(GuiDrawCommand::fill_rounded_rect(close_bounds, 0x9f3b3b, 6));
+    push_surface_text(&mut close, bounds, 616, 10, 0xffffff, b"X");
+    let _ = common::ipc_send_scene_batch(display, &close, 4);
 }
 
 fn draw_app(
@@ -262,21 +290,22 @@ fn draw_app(
     calculator: &logos_atrium::Calculator,
     sequence: u32,
 ) {
-    let mut batch = GuiDrawBatch::new(surface.reference, sequence, GuiRect::SURFACE);
-    let _ = batch.push(GuiDrawCommand::fill_surface(0x151c26));
     let title: &[u8] = match surface.app {
         logos_atrium::AppId::Calculator => b"Calculator",
         logos_atrium::AppId::Files => b"Files",
         logos_atrium::AppId::Terminal => b"Terminal",
         logos_atrium::AppId::System => b"System",
     };
-    push_surface_text(&mut batch, surface.bounds, 20, 24, 0xffffff, title);
     match surface.app {
         logos_atrium::AppId::Calculator => {
+            draw_surface_chrome(display, surface, sequence, title, true, true);
             draw_calculator_ui(display, surface, calculator, sequence)
         }
         logos_atrium::AppId::Files => {
-            let _ = batch.push(GuiDrawCommand::fill_rect(
+            draw_surface_chrome(display, surface, sequence, title, true, true);
+            let mut panel = GuiDrawBatch::new(surface.reference, sequence, surface.bounds);
+            panel.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+            let _ = panel.push(GuiDrawCommand::fill_rect(
                 GuiRect::new(
                     surface.bounds.x.saturating_add(20),
                     surface.bounds.y.saturating_add(52),
@@ -285,8 +314,7 @@ fn draw_app(
                 ),
                 0x263548,
             ));
-            batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-            let _ = common::ipc_send_scene_batch(display, &batch, 1);
+            let _ = common::ipc_send_scene_batch(display, &panel, 6);
             let mut detail = GuiDrawBatch::new(
                 surface.reference,
                 sequence,
@@ -306,13 +334,13 @@ fn draw_app(
                 0xb8c7da,
                 b"0-9  +  -  *  /  Enter",
             );
-            let _ = common::ipc_send_scene_batch(display, &detail, 4);
+            let _ = common::ipc_send_scene_batch(display, &detail, 7);
         }
         logos_atrium::AppId::Terminal => {
-            let _ = common::ipc_send_scene_batch(display, &batch, 1);
+            draw_surface_chrome(display, surface, sequence, title, false, false);
         }
         logos_atrium::AppId::System => {
-            let _ = common::ipc_send_scene_batch(display, &batch, 1);
+            draw_surface_chrome(display, surface, sequence, title, false, true);
         }
     }
 }
@@ -1324,40 +1352,45 @@ pub extern "C" fn _start() -> ! {
                             &mut next_request,
                         );
                     }
+                    let local_x = i32::from(pointer.x).saturating_sub(surface.bounds.x);
+                    let local_y = i32::from(pointer.y).saturating_sub(surface.bounds.y);
+                    let close_clicked = pointer.state == PointerState::Down
+                        && logos_atrium::STATUS_BAR_CLOSE_BOUNDS.contains(local_x, local_y);
                     let local = InputMessage::pointer(
-                        i32::from(pointer.x)
-                            .saturating_sub(surface.bounds.x)
-                            .clamp(i32::from(i16::MIN), i32::from(i16::MAX))
-                            as i16,
-                        i32::from(pointer.y)
-                            .saturating_sub(surface.bounds.y)
-                            .clamp(i32::from(i16::MIN), i32::from(i16::MAX))
-                            as i16,
+                        local_x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
+                        local_y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
                         pointer.buttons,
                         pointer.state,
                     )
                     .unwrap_or(event);
-                    let routed = AtriumSurfaceInput::new(surface.reference, local);
-                    if routed.is_valid() {
-                        if surface.app == logos_atrium::AppId::Terminal {
-                            let _ = common::ipc_send_handle(terminal, &routed);
-                        } else if surface.app == logos_atrium::AppId::System {
-                            let _ = common::ipc_send_handle(system_surface_input, &routed);
-                        } else if surface.app == logos_atrium::AppId::Calculator
-                            && calculator.input(&local)
-                        {
-                            render(display, atrium, calculator, &mut sequence);
-                        } else if let Some(caps) = program_surface_capabilities
-                            .iter()
-                            .flatten()
-                            .copied()
-                            .find(|caps| caps.client == surface.client)
-                        {
-                            let _ = common::ipc_send_handle(caps.input, &routed);
+                    if close_clicked {
+                        event = InputMessage::key(KeyCode::ESCAPE, KeyState::Pressed, 0);
+                    } else {
+                        let routed = AtriumSurfaceInput::new(surface.reference, local);
+                        if routed.is_valid() {
+                            if surface.app == logos_atrium::AppId::Terminal {
+                                let _ = common::ipc_send_handle(terminal, &routed);
+                            } else if surface.app == logos_atrium::AppId::System {
+                                let _ = common::ipc_send_handle(system_surface_input, &routed);
+                            } else if surface.app == logos_atrium::AppId::Calculator
+                                && calculator.input(&local)
+                            {
+                                render(display, atrium, calculator, &mut sequence);
+                            } else if let Some(caps) = program_surface_capabilities
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .find(|caps| caps.client == surface.client)
+                            {
+                                let _ = common::ipc_send_handle(caps.input, &routed);
+                            }
                         }
+                        continue;
                     }
                 }
-                continue;
+                if event.pointer_event().is_some() {
+                    continue;
+                }
             }
             let action = atrium.input(&event);
             match action {
