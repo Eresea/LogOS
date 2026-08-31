@@ -6,8 +6,8 @@ extern crate std;
 use core::fmt::Write;
 
 use logos_abi::{
-    GuiRect, InputMessage, KeyCode, KeyState, MOD_ALT, MOD_CTRL, PointerState, ServiceHandle,
-    SurfaceHandle,
+    GuiRect, InputMessage, KeyCode, KeyState, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, PointerState,
+    ServiceHandle, SurfaceHandle,
 };
 
 pub const MAX_ATRIUM_SURFACES: usize = 4;
@@ -477,7 +477,7 @@ impl Atrium {
             return AtriumAction::CloseFocused;
         }
         if code == KeyCode::TAB
-            && input.modifiers == 0
+            && input.modifiers & (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_META) == 0
             && self.focused_surface().is_some_and(|surface| surface.app == AppId::Terminal)
         {
             return AtriumAction::None;
@@ -947,7 +947,11 @@ mod tests {
         let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
         atrium.spawn_surface(request, surface(1)).unwrap();
         assert_eq!(
-            atrium.input(&InputMessage::key(KeyCode::TAB, KeyState::Pressed, 0)),
+            atrium.input(&InputMessage::key(
+                KeyCode::TAB,
+                KeyState::Pressed,
+                logos_abi::MOD_NUM_LOCK,
+            )),
             AtriumAction::None
         );
         assert!(AtriumAction::None.routes_to_surface());
