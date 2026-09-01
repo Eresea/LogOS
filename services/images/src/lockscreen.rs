@@ -14,10 +14,13 @@ mod register_ui {
 
 use logos_abi::{
     GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSceneOp, GuiSurfaceOperation,
-    GuiSurfaceRequest, GuiSurfaceResponse, InputMessage, IpcStatus, KeyCode, KeyState,
-    SurfaceHandle, UserOperation, UserRequest, UserResponse, UserStatus,
+    GuiSurfaceRequest, GuiSurfaceResponse, GuiTransform, InputMessage, IpcStatus, KeyCode,
+    KeyState, SurfaceHandle, UserOperation, UserRequest, UserResponse, UserStatus,
 };
-use logos_ui::{UiComponentTree, UiExpression, UiStyleConditions, UiText};
+use logos_ui::{
+    UiAnimationFill, UiAnimationPreset, UiAnimationSpec, UiAnimator, UiComponentTree,
+    UiComputedStyle, UiEasing, UiExpression, UiKeyframe, UiStyleConditions, UiText,
+};
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_GUI_INPUT,
@@ -76,6 +79,11 @@ static mut LOGIN_UI_READY: bool = false;
 static mut REGISTER_UI_READY: bool = false;
 static mut UI_TREE: UiComponentTree = UiComponentTree::new();
 static mut UI_TREE_MODE: u8 = u8::MAX;
+
+const SPLASH_OPACITY: u16 = 56_000;
+const SPLASH_ANIMATION_INDEX: usize = 0;
+const SPLASH_PHASE_INTRO: u8 = 1;
+const SPLASH_PHASE_LOADING: u8 = 2;
 
 fn initialize_ui_build(claim: bool) {
     unsafe {
@@ -282,6 +290,16 @@ fn next_id(next: &mut u32) -> u32 {
     value
 }
 
+fn request_splash_surface(
+    _display: logos_abi::CapabilityHandle,
+    next: &mut u32,
+) -> GuiSurfaceRequest {
+    let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, next_id(next));
+    request.bounds = CURSOR_BOUNDS;
+    request.z_order = 2;
+    request
+}
+
 fn request_surface(_display: logos_abi::CapabilityHandle, next: &mut u32) -> GuiSurfaceRequest {
     let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, next_id(next));
     request.bounds = CURSOR_BOUNDS;
@@ -295,8 +313,131 @@ fn request_cursor_surface(
 ) -> Option<GuiSurfaceRequest> {
     let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, next_id(next));
     request.bounds = CURSOR_BOUNDS;
-    request.z_order = 2;
+    request.z_order = 3;
     (common::ipc_send_handle(display, &request) == IpcStatus::Ok).then_some(request)
+}
+
+fn splash_animation() -> UiAnimationSpec {
+    let mut spec = UiAnimationSpec::new(360);
+    spec.fill = UiAnimationFill::Both;
+    spec.easing = UiEasing::CubicBezier { x1: 20, y1: 80, x2: 20, y2: 100 };
+    let from = UiComputedStyle {
+        opacity_q16: 0,
+        transform: logos_ui::UiTransform {
+            translate_y: 12,
+            scale_q8_8: 238,
+            ..logos_ui::UiTransform::IDENTITY
+        },
+        ..UiComputedStyle::DEFAULT
+    };
+    let to = UiComputedStyle { opacity_q16: SPLASH_OPACITY, ..UiComputedStyle::DEFAULT };
+    let _ = spec.push(UiKeyframe::new(0, from));
+    let _ = spec.push(UiKeyframe::new(u16::MAX, to));
+    spec
+}
+
+fn splash_loading_animation() -> UiAnimationSpec {
+    let mut spec = UiAnimationPreset::Spin.spec();
+    spec.duration_ms = 1_200;
+    spec
+}
+
+fn splash_color(rgb: u32, opacity_q16: u16, max_alpha: u8) -> u32 {
+    let alpha =
+        (u32::from(opacity_q16) * u32::from(max_alpha) / u32::from(u16::MAX)).clamp(1, 255) as u8;
+    (u32::from(alpha) << 24) | (rgb & 0x00ff_ffff)
+}
+
+fn splash_command(
+    style: UiComputedStyle,
+    index: usize,
+    loader_only: bool,
+) -> Option<GuiDrawCommand> {
+    if style.opacity_q16 == 0 {
+        return None;
+    }
+    let transform = if loader_only && index != 1 {
+        GuiTransform::IDENTITY
+    } else {
+        GuiTransform {
+            translate_x: style.transform.translate_x,
+            translate_y: style.transform.translate_y,
+            scale_q8_8: style.transform.scale_q8_8,
+            rotation_degrees: style.transform.rotation_degrees,
+            reserved: 0,
+        }
+    };
+    let command = match index {
+        0 => GuiDrawCommand::fill_rounded_rect(
+            GuiRect::new(480, 265, 320, 270),
+            splash_color(0x101b2a, style.opacity_q16, 220),
+            24,
+        ),
+        1 => GuiDrawCommand::logos_mark(
+            GuiRect::new(584, 291, 112, 112),
+            splash_color(0xf2a33a, style.opacity_q16, 255),
+        ),
+        2 => GuiDrawCommand::glyph_run_styled(
+            620,
+            420,
+            splash_color(0xffffff, style.opacity_q16, 255),
+            0,
+            b"LogOS",
+        )?,
+        3 => GuiDrawCommand::glyph_run_styled(
+            580,
+            449,
+            splash_color(0xb8c7da, style.opacity_q16, 210),
+            logos_abi::GUI_TEXT_FLAG_LIGHT,
+            b"secure workspace",
+        )?,
+        _ => return None,
+    };
+    Some(command.with_transform(transform))
+}
+
+fn splash_op(
+    surface: SurfaceHandle,
+    sequence: u32,
+    style: UiComputedStyle,
+    index: usize,
+    total: usize,
+    loader_only: bool,
+) -> Option<GuiSceneOp> {
+    if index == 0 {
+        let mut op = GuiSceneOp::clear(surface, sequence);
+        if total > 1 {
+            op.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        }
+        return Some(op);
+    }
+    let command = splash_command(style, index - 1, loader_only)?;
+    let mut op = GuiSceneOp::upsert(surface, sequence, (index + 1) as u32, command);
+    if index + 1 < total {
+        op.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    }
+    Some(op)
+}
+
+fn draw_splash(
+    display: logos_abi::CapabilityHandle,
+    surface: SurfaceHandle,
+    sequence: u32,
+    style: UiComputedStyle,
+    start_index: usize,
+    loader_only: bool,
+) -> (IpcStatus, usize) {
+    let total = if style.opacity_q16 == 0 { 1 } else { 5 };
+    for index in start_index..total {
+        let Some(operation) = splash_op(surface, sequence, style, index, total, loader_only) else {
+            return (IpcStatus::Malformed, index);
+        };
+        let status = common::ipc_send_handle(display, &operation);
+        if status != IpcStatus::Ok {
+            return (status, index);
+        }
+    }
+    (IpcStatus::Ok, total)
 }
 
 fn cursor_op(surface: SurfaceHandle, x: i16, y: i16, pressed: bool, sequence: u32) -> GuiSceneOp {
@@ -307,9 +448,14 @@ fn cursor_op(surface: SurfaceHandle, x: i16, y: i16, pressed: bool, sequence: u3
 }
 
 fn destroy_surface(display: logos_abi::CapabilityHandle, surface: SurfaceHandle, next: &mut u32) {
+    let request = destroy_request(surface, next);
+    let _ = common::ipc_send_handle(display, &request);
+}
+
+fn destroy_request(surface: SurfaceHandle, next: &mut u32) -> GuiSurfaceRequest {
     let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::Destroy, next_id(next));
     request.surface = surface;
-    let _ = common::ipc_send_handle(display, &request);
+    request
 }
 
 #[unsafe(no_mangle)]
@@ -331,10 +477,21 @@ pub extern "C" fn _start() -> ! {
     let mut next_request = 1u32;
     let mut sequence = 0u32;
     let mut surface = SurfaceHandle::EMPTY;
+    let mut splash_surface = SurfaceHandle::EMPTY;
     let mut visible = true;
     let mut static_cached = false;
     let mut pending_surface = Some(request_surface(display_control, &mut next_request));
     let mut pending_surface_sent = false;
+    let mut pending_splash_surface =
+        Some(request_splash_surface(display_control, &mut next_request));
+    let mut pending_splash_surface_sent = false;
+    let mut splash_animator = UiAnimator::new();
+    let mut splash_started = false;
+    let mut splash_phase = SPLASH_PHASE_INTRO;
+    let mut pending_splash_destroy = None;
+    let mut pending_splash_draw = false;
+    let mut pending_splash_draw_sequence = 0u32;
+    let mut pending_splash_draw_index = 0usize;
     let mut cursor_surface = SurfaceHandle::EMPTY;
     let mut pending_cursor_surface = None;
     let mut cursor = (
@@ -360,6 +517,25 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        if let Some(request) = pending_splash_destroy {
+            match common::ipc_send_handle(display_control, &request) {
+                IpcStatus::Ok => {
+                    pending_splash_destroy = None;
+                    splash_surface = SurfaceHandle::EMPTY;
+                    splash_started = false;
+                    splash_phase = SPLASH_PHASE_INTRO;
+                    splash_animator.clear(SPLASH_ANIMATION_INDEX);
+                }
+                IpcStatus::Full => {}
+                _ => {
+                    pending_splash_destroy = None;
+                    splash_surface = SurfaceHandle::EMPTY;
+                    splash_started = false;
+                    splash_phase = SPLASH_PHASE_INTRO;
+                    splash_animator.clear(SPLASH_ANIMATION_INDEX);
+                }
+            }
+        }
         if let Some(cursor) = pending_cursor_draw {
             match common::ipc_send_handle(display, &cursor) {
                 IpcStatus::Ok => pending_cursor_draw = None,
@@ -404,12 +580,58 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
+        if pending_splash_draw {
+            if pending_splash_draw_sequence == 0 {
+                pending_splash_draw_sequence = sequence.wrapping_add(1).max(1);
+                sequence = pending_splash_draw_sequence;
+                let _ = splash_animator.advance(common::current_ticks());
+            }
+            let style =
+                splash_animator.value(SPLASH_ANIMATION_INDEX).unwrap_or(UiComputedStyle::DEFAULT);
+            let (status, next_index) = draw_splash(
+                display,
+                splash_surface,
+                pending_splash_draw_sequence,
+                style,
+                pending_splash_draw_index,
+                splash_phase == SPLASH_PHASE_LOADING,
+            );
+            pending_splash_draw_index = next_index;
+            match status {
+                IpcStatus::Ok => {
+                    pending_splash_draw = false;
+                    pending_splash_draw_sequence = 0;
+                    pending_splash_draw_index = 0;
+                }
+                IpcStatus::Full => {}
+                _ => {
+                    pending_splash_draw = false;
+                    pending_splash_draw_sequence = 0;
+                    pending_splash_draw_index = 0;
+                    if splash_surface.is_valid() && pending_splash_destroy.is_none() {
+                        pending_splash_destroy =
+                            Some(destroy_request(splash_surface, &mut next_request));
+                    }
+                    splash_started = false;
+                    splash_phase = SPLASH_PHASE_INTRO;
+                }
+            }
+        }
         if let Some(request) = pending_surface {
             if !pending_surface_sent {
                 match common::ipc_send_handle(display_control, &request) {
                     IpcStatus::Ok => pending_surface_sent = true,
                     IpcStatus::Full => {}
                     _ => pending_surface = None,
+                }
+            }
+        }
+        if let Some(request) = pending_splash_surface {
+            if !pending_splash_surface_sent {
+                match common::ipc_send_handle(display_control, &request) {
+                    IpcStatus::Ok => pending_splash_surface_sent = true,
+                    IpcStatus::Full => {}
+                    _ => pending_splash_surface = None,
                 }
             }
         }
@@ -429,6 +651,11 @@ pub extern "C" fn _start() -> ! {
                     pending_surface = Some(request_surface(display_control, &mut next_request));
                     pending_surface_sent = false;
                 }
+                if pending_splash_destroy.is_none() {
+                    pending_splash_surface =
+                        Some(request_splash_surface(display_control, &mut next_request));
+                    pending_splash_surface_sent = false;
+                }
             } else if !should_show && visible {
                 visible = false;
                 unsafe { UI_TREE_MODE = u8::MAX };
@@ -436,6 +663,14 @@ pub extern "C" fn _start() -> ! {
                 pending_auth = None;
                 static_cached = false;
                 pending_draw_index = 0;
+                pending_splash_surface = None;
+                pending_splash_surface_sent = false;
+                pending_splash_draw = false;
+                pending_splash_draw_sequence = 0;
+                pending_splash_draw_index = 0;
+                splash_animator.clear(SPLASH_ANIMATION_INDEX);
+                splash_started = false;
+                splash_phase = SPLASH_PHASE_INTRO;
                 pending_cursor_surface = None;
                 pending_cursor_draw = None;
                 if cursor_surface.is_valid() {
@@ -446,9 +681,34 @@ pub extern "C" fn _start() -> ! {
                     destroy_surface(display_control, surface, &mut next_request);
                     surface = SurfaceHandle::EMPTY;
                 }
+                if splash_surface.is_valid() && pending_splash_destroy.is_none() {
+                    pending_splash_destroy =
+                        Some(destroy_request(splash_surface, &mut next_request));
+                }
             }
         }
         while common::ipc_receive_handle(display_response, &mut surface_response) == IpcStatus::Ok {
+            let splash_request = pending_splash_surface.filter(|_| pending_splash_surface_sent);
+            if let Some(request) = splash_request {
+                if surface_response.is_valid_for(request) {
+                    pending_splash_surface = None;
+                    pending_splash_surface_sent = false;
+                    if surface_response.status == logos_abi::GuiStatus::Ok {
+                        splash_surface = surface_response.surface;
+                        splash_started = splash_animator.start_animation(
+                            SPLASH_ANIMATION_INDEX,
+                            UiComputedStyle::DEFAULT,
+                            splash_animation(),
+                            common::current_ticks(),
+                        );
+                        splash_phase = SPLASH_PHASE_INTRO;
+                        pending_splash_draw = splash_started;
+                        pending_splash_draw_index = 0;
+                        proof_line(b"LogOS vNext: LockScreen splash ready");
+                    }
+                    continue;
+                }
+            }
             if pending_cursor_surface.is_some_and(|request| surface_response.is_valid_for(request))
             {
                 pending_cursor_surface = None;
@@ -602,6 +862,34 @@ pub extern "C" fn _start() -> ! {
             if motion_active {
                 pending_draw = Some(true);
                 pending_draw_index = 0;
+            }
+        }
+        if visible
+            && splash_started
+            && splash_surface.is_valid()
+            && pending_splash_destroy.is_none()
+            && !pending_splash_draw
+        {
+            let now_ticks = common::current_ticks();
+            if splash_phase == SPLASH_PHASE_LOADING && static_cached {
+                pending_splash_destroy = Some(destroy_request(splash_surface, &mut next_request));
+                splash_started = false;
+                splash_phase = SPLASH_PHASE_INTRO;
+            } else if splash_animator.next_deadline(now_ticks).is_some() {
+                pending_splash_draw = true;
+            } else if splash_phase == SPLASH_PHASE_INTRO && !static_cached {
+                splash_phase = SPLASH_PHASE_LOADING;
+                let _ = splash_animator.start_animation(
+                    SPLASH_ANIMATION_INDEX,
+                    UiComputedStyle::DEFAULT,
+                    splash_loading_animation(),
+                    now_ticks,
+                );
+                pending_splash_draw = true;
+            } else {
+                pending_splash_destroy = Some(destroy_request(splash_surface, &mut next_request));
+                splash_started = false;
+                splash_phase = SPLASH_PHASE_INTRO;
             }
         }
         common::wait_on_capabilities(&[
