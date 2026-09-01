@@ -297,15 +297,6 @@ fn draw_home(
             if query_is_empty { placeholder_text } else { logos_ui::UiText::EMPTY },
         );
     }
-    if mount {
-        let Some(panel_handle) = tree.tree().handle_at(usize::from(panel)).ok() else { return };
-        let _ = tree.start_animation(
-            panel_handle,
-            logos_ui::UiComputedStyle::DEFAULT,
-            logos_ui::UiAnimationPreset::In.spec(),
-            common::current_ticks(),
-        );
-    }
     let _ = tree.advance(common::current_ticks());
     let scene = match logos_ui_graphics::emit(
         surface,

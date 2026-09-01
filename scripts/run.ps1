@@ -389,7 +389,7 @@ function Framebuffer-HasHomePanel {
         return $false
     }
     $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
-    return $bytes[$index] -eq 11 -and $bytes[$index + 1] -eq 16 -and $bytes[$index + 2] -eq 21
+    return $bytes[$index] -eq 24 -and $bytes[$index + 1] -eq 37 -and $bytes[$index + 2] -eq 53
 }
 
 function Framebuffer-HasHomeSelectedCard {
@@ -666,6 +666,9 @@ try {
     if ($LockScreenProof) {
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen surface ready' $TimeoutSeconds)) {
         throw 'LockScreen surface did not become ready.'
+        }
+        if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen splash ready' $TimeoutSeconds)) {
+        throw 'LockScreen splash overlay did not become ready.'
         }
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen cursor surface ready' $TimeoutSeconds)) {
         throw 'LockScreen cursor surface did not become ready.'
