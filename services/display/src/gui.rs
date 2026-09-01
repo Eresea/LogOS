@@ -1064,7 +1064,8 @@ fn render_command(
         GuiDrawKind::Line
         | GuiDrawKind::FillRoundedRect
         | GuiDrawKind::StrokeRoundedRect
-        | GuiDrawKind::Shadow => {
+        | GuiDrawKind::Shadow
+        | GuiDrawKind::LogosMark => {
             render_modern(framebuffer, width, height, stride, format, command, clip)
         }
         GuiDrawKind::ClipRect => 0,
@@ -1209,6 +1210,7 @@ fn transformed_coverage(
         GuiDrawKind::FillRoundedRect | GuiDrawKind::StrokeRoundedRect => {
             rounded_source_coverage(command, x, y)
         }
+        GuiDrawKind::LogosMark => logos_mark_source_coverage(command, x, y),
         GuiDrawKind::GlyphRun => glyph_source_coverage(command, x, y, glyph_cache),
         GuiDrawKind::ClipRect => None,
     }
@@ -1328,8 +1330,70 @@ fn render_modern(
                 blur,
             )
         }
+        GuiDrawKind::LogosMark => {
+            render_logos_mark(framebuffer, width, height, stride, format, command, clip)
+        }
         _ => 0,
     }
+}
+
+fn render_logos_mark(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    command: GuiDrawCommand,
+    clip: GuiRect,
+) -> usize {
+    let clip = intersect(clip, GuiRect::new(0, 0, width as u32, height as u32));
+    let mut rendered = 0;
+    for y in clip.y..clip.y.saturating_add(clip.height as i32) {
+        for x in clip.x..clip.x.saturating_add(clip.width as i32) {
+            if let Some(coverage) = logos_mark_source_coverage(command, x, y) {
+                rendered +=
+                    plot(framebuffer, width, height, stride, format, x, y, command.color, coverage)
+                        as usize;
+            }
+        }
+    }
+    rendered
+}
+
+fn logos_mark_source_coverage(command: GuiDrawCommand, x: i32, y: i32) -> Option<u8> {
+    if command.width == 0 || command.height == 0 {
+        return None;
+    }
+    let local_x = x.saturating_sub(command.x);
+    let local_y = y.saturating_sub(command.y);
+    if local_x < 0
+        || local_y < 0
+        || local_x >= command.width as i32
+        || local_y >= command.height as i32
+    {
+        return None;
+    }
+    let normalized_x = local_x * 256 / command.width as i32;
+    let normalized_y = local_y * 256 / command.height as i32;
+    let dx = normalized_x - 128;
+    let dy = normalized_y - 128;
+    if dx * dx + dy * dy <= 24 * 24 {
+        return Some(u8::MAX);
+    }
+    let half_width = |distance: i32| (2 + distance * 16 / 74).min(18);
+    if (14..=88).contains(&normalized_y) && dx.abs() <= half_width(normalized_y - 14) {
+        return Some(u8::MAX);
+    }
+    if (168..=242).contains(&normalized_y) && dx.abs() <= half_width(242 - normalized_y) {
+        return Some(u8::MAX);
+    }
+    if (14..=88).contains(&normalized_x) && dy.abs() <= half_width(normalized_x - 14) {
+        return Some(u8::MAX);
+    }
+    if (168..=242).contains(&normalized_x) && dy.abs() <= half_width(242 - normalized_x) {
+        return Some(u8::MAX);
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2144,6 +2208,22 @@ mod tests {
         );
         assert_eq!(pixel(&stroke, 32, 16, 2), [255, 255, 255, 0]);
         assert_eq!(pixel(&stroke, 32, 16, 12), [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn logos_mark_renders_the_center_and_four_points() {
+        let bounds = GuiRect::new(16, 8, 48, 48);
+        let framebuffer = render_single(
+            GuiDrawCommand::logos_mark(bounds, 0xf2a33a),
+            bounds,
+            80,
+            64,
+            [0x10, 0x20, 0x30, 0],
+        );
+        assert_ne!(pixel(&framebuffer, 80, 40, 32), [0x10, 0x20, 0x30, 0]);
+        assert_ne!(pixel(&framebuffer, 80, 40, 12), [0x10, 0x20, 0x30, 0]);
+        assert_ne!(pixel(&framebuffer, 80, 20, 32), [0x10, 0x20, 0x30, 0]);
+        assert_eq!(pixel(&framebuffer, 80, 16, 8), [0x10, 0x20, 0x30, 0]);
     }
 
     #[test]

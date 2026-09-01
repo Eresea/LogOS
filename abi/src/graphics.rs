@@ -195,6 +195,7 @@ pub enum GuiDrawKind {
     FillRoundedRect = 6,
     StrokeRoundedRect = 7,
     Shadow = 8,
+    LogosMark = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,6 +271,12 @@ impl GuiDrawCommand {
 
     pub const fn fill_surface(color: u32) -> Self {
         Self::fill_rect(GuiRect::SURFACE, color)
+    }
+
+    pub const fn logos_mark(bounds: GuiRect, color: u32) -> Self {
+        let mut command = Self::fill_rect(bounds, color);
+        command.kind = GuiDrawKind::LogosMark;
+        command
     }
 
     pub const fn stroke_rect(bounds: GuiRect, color: u32, width: u32) -> Self {
@@ -446,6 +453,14 @@ impl GuiDrawCommand {
                         && valid_corner_radius(self.width, self.height, self.corner_radius())
                         && self.shadow_offset_x().unsigned_abs() <= MAX_GUI_SHADOW_OFFSET as u8
                         && self.shadow_offset_y().unsigned_abs() <= MAX_GUI_SHADOW_OFFSET as u8
+                }
+                GuiDrawKind::LogosMark => {
+                    self.text_len == 0
+                        && self.width != 0
+                        && self.height != 0
+                        && self.width <= 512
+                        && self.height <= 512
+                        && self.auxiliary == 0
                 }
             }
     }
@@ -777,6 +792,10 @@ mod tests {
         assert_eq!(shadow.color_alpha(), 0x55);
         assert_eq!(shadow.shadow_offset_x(), -3);
         assert_eq!(shadow.shadow_offset_y(), 5);
+
+        let mark = GuiDrawCommand::logos_mark(GuiRect::new(0, 0, 112, 112), 0xf2a33a);
+        assert!(mark.is_valid());
+        assert_eq!(mark.kind, GuiDrawKind::LogosMark);
     }
 
     #[test]
