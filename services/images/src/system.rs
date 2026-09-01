@@ -7,11 +7,48 @@ mod common;
 use core::mem;
 
 use logos_abi::{
-    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GuiDrawBatch,
-    GuiDrawCommand, GuiRect, IpcStatus, ManagerOperation, ManagerRequest, ManagerResponse,
-    ManagerState, SurfaceHandle,
+    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GUI_DRAW_FLAG_MORE,
+    GuiDrawCommand, GuiSceneOp, IpcStatus, MAX_GUI_NODES, ManagerOperation, ManagerRequest,
+    ManagerResponse, ManagerState, SurfaceHandle,
 };
-use logos_atrium::{STATUS_BAR_BOUNDS, STATUS_BAR_CLOSE_BOUNDS};
+use logos_atrium::{FULLSCREEN_SURFACE_BOUNDS, STATUS_BAR_BOUNDS, STATUS_BAR_CLOSE_BOUNDS};
+
+const MAX_SYSTEM_SCENE_OPS: usize = MAX_GUI_NODES + 2;
+
+#[derive(Clone, Copy)]
+struct SystemScene {
+    ops: [GuiSceneOp; MAX_SYSTEM_SCENE_OPS],
+    len: u8,
+}
+
+impl SystemScene {
+    const EMPTY_OP: GuiSceneOp = GuiSceneOp::commit(SurfaceHandle::EMPTY, 1);
+
+    const fn new() -> Self {
+        Self { ops: [Self::EMPTY_OP; MAX_SYSTEM_SCENE_OPS], len: 0 }
+    }
+
+    const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    fn push(&mut self, mut op: GuiSceneOp) -> bool {
+        let index = self.len();
+        if index >= MAX_SYSTEM_SCENE_OPS {
+            return false;
+        }
+        op.flags = GUI_DRAW_FLAG_MORE;
+        self.ops[index] = op;
+        self.len += 1;
+        true
+    }
+
+    fn finish(&mut self) {
+        if self.len != 0 {
+            self.ops[self.len() - 1].flags = 0;
+        }
+    }
+}
 
 const ATRIUM_REQUEST: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
@@ -58,31 +95,61 @@ fn state_name(state: ManagerState) -> &'static [u8] {
     }
 }
 
-fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) {
-    if let Some(command) = GuiDrawCommand::glyph_run(x, y, color, text) {
-        let _ = batch.push(command);
-    }
+#[cfg(feature = "qemu-proof")]
+fn proof_line(message: &[u8]) {
+    common::proof_line(message);
 }
 
-fn draw_status(draw: logos_abi::CapabilityHandle, surface: SurfaceHandle, sequence: u32) {
-    let mut base = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
-    base.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = base.push(GuiDrawCommand::fill_surface(0x101820));
-    let _ = base.push(GuiDrawCommand::fill_rect(STATUS_BAR_BOUNDS, 0x182535));
-    push_text(&mut base, 16, 10, 0xffffff, b"System");
-    let _ = common::ipc_send_scene_batch(draw, &base, 1);
+#[cfg(not(feature = "qemu-proof"))]
+fn proof_line(_message: &[u8]) {}
 
-    let mut controls = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
-    controls.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = controls.push(GuiDrawCommand::fill_rounded_rect(STATUS_BAR_CLOSE_BOUNDS, 0x9f3b3b, 6));
-    push_text(&mut controls, 616, 10, 0xffffff, b"X");
-    push_text(&mut controls, 20, 48, 0x7890aa, b"Service manager status");
-    let _ = common::ipc_send_scene_batch(draw, &controls, 4);
+#[allow(clippy::too_many_arguments)]
+fn push_text(
+    scene: &mut SystemScene,
+    surface: SurfaceHandle,
+    sequence: u32,
+    node_id: u32,
+    x: i32,
+    y: i32,
+    color: u32,
+    text: &[u8],
+) -> bool {
+    let Some(command) = GuiDrawCommand::glyph_run(x, y, color, text) else { return false };
+    scene.push(GuiSceneOp::upsert(surface, sequence, node_id, command))
+}
+
+fn build_status(surface: SurfaceHandle, sequence: u32) -> Option<SystemScene> {
+    let mut scene = SystemScene::new();
+    if !scene.push(GuiSceneOp::clear(surface, sequence))
+        || !scene.push(GuiSceneOp::upsert(
+            surface,
+            sequence,
+            1,
+            GuiDrawCommand::fill_rect(FULLSCREEN_SURFACE_BOUNDS, 0x101820),
+        ))
+        || !scene.push(GuiSceneOp::upsert(
+            surface,
+            sequence,
+            2,
+            GuiDrawCommand::fill_rect(STATUS_BAR_BOUNDS, 0x182535),
+        ))
+        || !push_text(&mut scene, surface, sequence, 3, 16, 10, 0xffffff, b"System")
+        || !scene.push(GuiSceneOp::upsert(
+            surface,
+            sequence,
+            4,
+            GuiDrawCommand::fill_rounded_rect(STATUS_BAR_CLOSE_BOUNDS, 0x9f3b3b, 6),
+        ))
+        || !push_text(&mut scene, surface, sequence, 5, 616, 10, 0xffffff, b"X")
+        || !push_text(&mut scene, surface, sequence, 6, 20, 48, 0x7890aa, b"Service manager status")
+    {
+        return None;
+    }
 
     let mut cursor = 0;
-    let mut row = 0i32;
+    let mut row = 0u32;
     loop {
-        let request_id = sequence.wrapping_add(row as u32).max(1);
+        let request_id = sequence.wrapping_add(row).max(1);
         let request =
             ManagerRequest { cursor, ..ManagerRequest::new(ManagerOperation::List, request_id) };
         let mut response = ManagerResponse::new(
@@ -97,20 +164,71 @@ fn draw_status(draw: logos_abi::CapabilityHandle, surface: SurfaceHandle, sequen
         }
         let record = response.record;
         let name_len = usize::from(record.name_len).min(record.name.len());
-        let y = 76 + row.saturating_mul(16);
-        let mut row_batch = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
-        row_batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-        push_text(&mut row_batch, 20, y, 0xd9e5f5, &record.name[..name_len]);
-        push_text(&mut row_batch, 190, y, 0x7ee787, state_name(record.state));
-        let _ = common::ipc_send_scene_batch(draw, &row_batch, 7 + row as u32 * 2);
+        let y = 76 + (row as i32).saturating_mul(16);
+        if !push_text(
+            &mut scene,
+            surface,
+            sequence,
+            7 + row * 2,
+            20,
+            y,
+            0xd9e5f5,
+            &record.name[..name_len],
+        ) || !push_text(
+            &mut scene,
+            surface,
+            sequence,
+            8 + row * 2,
+            190,
+            y,
+            0x7ee787,
+            state_name(record.state),
+        ) {
+            return None;
+        }
         row += 1;
         if response.cursor == u64::MAX || response.cursor <= cursor || row >= 4 {
             break;
         }
         cursor = response.cursor;
     }
-    let commit = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
-    let _ = common::ipc_send_scene_batch(draw, &commit, 15);
+    scene.finish();
+    proof_line(b"LogOS vNext: System scene built");
+    Some(scene)
+}
+
+fn flush_scene(
+    draw: logos_abi::CapabilityHandle,
+    scene: &SystemScene,
+    index: &mut usize,
+) -> IpcStatus {
+    while *index < scene.len() {
+        match common::ipc_send_handle(draw, &scene.ops[*index]) {
+            IpcStatus::Ok => *index += 1,
+            IpcStatus::Full => return IpcStatus::Full,
+            status => {
+                *index = scene.len();
+                return status;
+            }
+        }
+    }
+    IpcStatus::Ok
+}
+
+fn queue_status(
+    draw: logos_abi::CapabilityHandle,
+    surface: SurfaceHandle,
+    sequence: u32,
+    pending: &mut SystemScene,
+    pending_index: &mut usize,
+) {
+    if *pending_index < pending.len() {
+        return;
+    }
+    let Some(scene) = build_status(surface, sequence) else { return };
+    *pending = scene;
+    *pending_index = 0;
+    let _ = flush_scene(draw, pending, pending_index);
 }
 
 #[unsafe(no_mangle)]
@@ -126,6 +244,8 @@ pub extern "C" fn _start() -> ! {
     let mut sequence = 0u32;
     let mut surface = SurfaceHandle::EMPTY;
     let mut request_pending = false;
+    let mut pending_scene = SystemScene::new();
+    let mut pending_scene_index = 0usize;
     let mut heartbeat_ticks = 0u16;
     let mut response = AtriumSurfaceResponse::new(
         AtriumSurfaceRequest::new(AtriumApp::System, common::bootstrap_page().service, 1),
@@ -138,6 +258,13 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        if pending_scene_index < pending_scene.len() {
+            let _ = flush_scene(draw_cap, &pending_scene, &mut pending_scene_index);
+            if pending_scene_index < pending_scene.len() {
+                common::heartbeat();
+                continue;
+            }
+        }
         if !surface.is_valid() && !request_pending {
             let request = AtriumSurfaceRequest::new(
                 AtriumApp::System,
@@ -154,16 +281,37 @@ pub extern "C" fn _start() -> ! {
             if response.status == logos_abi::GuiStatus::Ok && response.surface.is_valid() {
                 surface = response.surface;
                 sequence = sequence.wrapping_add(1).max(1);
-                draw_status(draw_cap, surface, sequence);
+                queue_status(
+                    draw_cap,
+                    surface,
+                    sequence,
+                    &mut pending_scene,
+                    &mut pending_scene_index,
+                );
             } else if response.is_revoke() || response.status == logos_abi::GuiStatus::NotFound {
                 surface = SurfaceHandle::EMPTY;
             }
         }
         while common::ipc_receive_handle(input_cap, &mut input) == IpcStatus::Ok {
-            if input.surface == surface && input.is_valid() && surface.is_valid() {
+            if input.surface == surface
+                && input.is_valid()
+                && surface.is_valid()
+                && pending_scene_index == pending_scene.len()
+            {
                 sequence = sequence.wrapping_add(1).max(1);
-                draw_status(draw_cap, surface, sequence);
+                queue_status(
+                    draw_cap,
+                    surface,
+                    sequence,
+                    &mut pending_scene,
+                    &mut pending_scene_index,
+                );
             }
+        }
+
+        if pending_scene_index < pending_scene.len() {
+            common::heartbeat();
+            continue;
         }
 
         common::wait_on_capabilities(&[request_cap, response_cap, input_cap]);

@@ -5,6 +5,7 @@ param(
     [switch]$Interactive,
     [switch]$Proof,
     [switch]$LockScreenProof,
+    [switch]$SystemProof,
     [switch]$FetchProof,
     [switch]$NoNetwork,
     [switch]$NetworkProof,
@@ -28,6 +29,7 @@ $ErrorActionPreference = 'Stop'
 if ($Release -and $Debug) { throw 'Choose either -Release or -Debug, not both.' }
 if ($FetchProof -and -not $Proof) { throw '-FetchProof requires -Proof.' }
 if ($LockScreenProof -and -not $Proof) { throw '-LockScreenProof requires -Proof.' }
+if ($SystemProof -and -not $LockScreenProof) { throw '-SystemProof requires -LockScreenProof.' }
 if ($LockScreenProof -and -not $DiskImage) {
     throw '-LockScreenProof requires a fresh -DiskImage path.'
 }
@@ -401,6 +403,33 @@ function Framebuffer-HasHomeSelectedCard {
     return $bytes[$index] -eq 53 -and $bytes[$index + 1] -eq 107 -and $bytes[$index + 2] -eq 216
 }
 
+function Framebuffer-HasSystemStatusBar {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PpmLayout $bytes
+    $x = 100
+    $y = 20
+    $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
+    return $bytes[$index] -eq 24 -and $bytes[$index + 1] -eq 37 -and $bytes[$index + 2] -eq 53
+}
+
+function Framebuffer-HasSystemRows {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PpmLayout $bytes
+    for ($y = 76; $y -lt 145 -and $y -lt $layout.Height; $y++) {
+        for ($x = 20; $x -lt 250 -and $x -lt $layout.Width; $x++) {
+            $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
+            if ($bytes[$index] -ne 16 -or $bytes[$index + 1] -ne 24 -or $bytes[$index + 2] -ne 32) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
 function Framebuffer-HasNativeCursor {
     param([string]$Path, [int]$X, [int]$Y)
     if (-not (Test-Path $Path)) { return $false }
@@ -726,6 +755,24 @@ try {
         Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $homeFrame } } | Out-Null
         if (-not (Framebuffer-HasHomePanel $homeFrame) -or -not (Framebuffer-HasHomeSelectedCard $homeFrame)) {
             throw 'Post-login home surface did not publish its popover pixels.'
+        }
+        if ($SystemProof) {
+            $systemSceneMarker = Get-ProofMarkerCount 'LogOS vNext: System scene built'
+            1..3 | ForEach-Object {
+                Send-QmpKey $qmp 'down'
+                Start-Sleep -Milliseconds 100
+            }
+            Send-QmpKey $qmp 'ret'
+            Send-QmpKey $qmp 'ctrl-4'
+            if (-not (Wait-ProofMarkerAfter 'LogOS vNext: System scene built' $systemSceneMarker $TimeoutSeconds)) {
+                throw 'System service did not build its scene after activation.'
+            }
+            Start-Sleep -Seconds 2
+            $systemFrame = Join-Path $repoRoot "target\qemu-system-$PID.ppm"
+            Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $systemFrame } } | Out-Null
+            if (-not (Framebuffer-HasSystemStatusBar $systemFrame) -or -not (Framebuffer-HasSystemRows $systemFrame)) {
+                throw 'System surface did not publish its status bar and service rows.'
+            }
         }
 
         $homeMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium home surface ready'
