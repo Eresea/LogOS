@@ -81,3 +81,5 @@
 | [0078](0078-bounded-gpu-cursor.md) | Accepted | Core-owned bounded VirtIO-GPU hardware cursor with Display-owned image publication and software fallback |
 | [0079](0079-async-gpu-frame-submission.md) | Accepted | Core-owned double-buffered GPU resources with nonblocking dirty-region submission and bounded fence polling |
 | [0080](0080-service-image-memory-budget.md) | Accepted | Service ELF and aggregate load-plan budgets rise to 2048 KiB while preserving bounded admission and recommending smaller images |
+| [0081](0081-bounded-1280x800-ui-profile.md) | Accepted | Bounded 1280×800 UI profile, typed framework command menu, scaled glyph styling, and surface-local occlusion clipping |
+| [0082](0082-bounded-ui-motion.md) | Accepted | Fixed-point CSS-like transitions and bounded keyframe animation owned by UI hosts, with transform-aware Display ABI rasterization |

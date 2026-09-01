@@ -5,7 +5,10 @@ extern crate std;
 
 mod codegen;
 
-use logos_ui::{UiComponentContract, UiNodeKind, UiValueType};
+use logos_ui::{
+    UiAnimationDirection, UiAnimationFill, UiAnimationPreset, UiComponentContract, UiComputedStyle,
+    UiEasing, UiKeyframe, UiNodeKind, UiTransform, UiValueType,
+};
 
 pub use codegen::{UiCodegenError, write_rust};
 
@@ -20,13 +23,14 @@ pub use logos_ui::{
 
 pub const MAX_UI_SOURCE_BYTES: usize = 4096;
 pub const MAX_UI_DIAGNOSTICS: usize = 16;
+pub const MAX_UI_ANIMATIONS: usize = 8;
 pub const MAX_UI_HANDLERS: usize = 32;
 pub const MAX_UI_COMPONENT_CONTRACTS: usize = 16;
 pub const MAX_UI_VALUES: usize = 64;
 
 pub const UI_COMPONENT_NAMES: [&str; 5] =
     ["ui.button", "ui.column", "ui.form", "ui.input", "ui.text"];
-pub const UI_STYLE_NAMES: [&str; 20] = [
+pub const UI_STYLE_NAMES: [&str; 39] = [
     "h-full",
     "w-full",
     "flex-x",
@@ -47,6 +51,25 @@ pub const UI_STYLE_NAMES: [&str; 20] = [
     "text-4xl",
     "font-light",
     "opacity-50",
+    "transition-colors",
+    "transition-opacity",
+    "transition-transform",
+    "transition-all",
+    "duration-75",
+    "duration-150",
+    "duration-180",
+    "duration-300",
+    "duration-700",
+    "duration-1000",
+    "delay-75",
+    "ease-linear",
+    "ease-out",
+    "ease-in-out",
+    "ease-bezier-20-80-20-100",
+    "animate-in",
+    "fade",
+    "animate-pulse",
+    "animate-spin",
 ];
 pub const UI_BINDING_NAMES: [&str; 5] = ["value", "disabled", "form", "control", "canSubmit"];
 pub const UI_EVENT_NAMES: [&str; 3] = ["click", "submit", "changed"];
@@ -579,6 +602,7 @@ pub fn compile_with_context(source: &str, context: &UiCompileContext<'_>) -> UiB
         position: 0,
         document: UiDocument::EMPTY,
         diagnostics: UiDiagnostics::EMPTY,
+        animation_count: 0,
     };
     parser.parse_document();
     UiBuild { document: parser.document, diagnostics: parser.diagnostics }
@@ -592,6 +616,7 @@ struct Parser<'a> {
     position: usize,
     document: UiDocument,
     diagnostics: UiDiagnostics,
+    animation_count: usize,
 }
 
 impl Parser<'_> {
@@ -739,6 +764,7 @@ impl Parser<'_> {
             let offset = self.position;
             match self.peek() {
                 Some(b'{') => self.parse_styles(node_index),
+                Some(b'a') if self.starts_with(b"animation") => self.parse_animation(node_index),
                 Some(b'[') => self.parse_binding(node_index, contract),
                 Some(b'(') => self.parse_event(node_index, contract),
                 Some(b'#') => self.parse_node_name(node_index),
@@ -1011,9 +1037,9 @@ impl Parser<'_> {
                         for rule in rules.iter().take(rule_count) {
                             let accepted = match *rule {
                                 UiStyleRule::Base(style) => node.styles.push(style),
-                                UiStyleRule::Focus(style) => node
-                                    .state_styles
-                                    .push(UiStateStyle { state: UiStyleState::Focus, style }),
+                                UiStyleRule::State(state, style) => {
+                                    node.state_styles.push(UiStateStyle { state, style })
+                                }
                             };
                             if !accepted {
                                 self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
@@ -1038,6 +1064,201 @@ impl Parser<'_> {
             }
             rules[rule_count] = rule;
             rule_count += 1;
+        }
+    }
+
+    fn parse_animation(&mut self, node_index: Option<u16>) {
+        let offset = self.position;
+        self.position += b"animation".len();
+        self.skip_space();
+        if !self.consume_byte(b'{') {
+            self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+            return;
+        }
+        if self.animation_count == MAX_UI_ANIMATIONS {
+            self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
+            self.skip_balanced_block();
+            return;
+        }
+        let mut spec = logos_ui::UiAnimationSpec::EMPTY;
+        loop {
+            self.skip_space();
+            if self.consume_byte(b'}') {
+                break;
+            }
+            let mut name_buffer = [0u8; 32];
+            let name_len = {
+                let Some(name) = self.read_until(b'{', b'}').map(trim_space) else {
+                    self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                    self.skip_balanced_block();
+                    return;
+                };
+                if name.len() > name_buffer.len() {
+                    self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                    self.skip_balanced_block();
+                    return;
+                }
+                name_buffer[..name.len()].copy_from_slice(name);
+                name.len()
+            };
+            let name = &name_buffer[..name_len];
+            let keyframe_offset = parse_keyframe_offset(name);
+            let keyframe = self.peek() == Some(b'{');
+            let property = match name {
+                b"duration" => 0,
+                b"delay" => 1,
+                b"repeat" => 2,
+                b"direction" => 3,
+                b"fill" => 4,
+                b"ease" => 5,
+                _ => 6,
+            };
+            self.skip_space();
+            if keyframe {
+                self.position += 1;
+                let Some(offset_q16) = keyframe_offset else {
+                    self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                    self.skip_balanced_block();
+                    return;
+                };
+                let mut style = UiComputedStyle::DEFAULT;
+                let mut properties = 0;
+                let mut easing = UiEasing::EaseOut;
+                if !self.parse_keyframe_body(&mut style, &mut properties, &mut easing, offset) {
+                    return;
+                }
+                let keyframe = UiKeyframe { offset_q16, properties, style, easing };
+                if !spec.push(keyframe) {
+                    self.diagnostics.push(UiDiagnosticKind::Capacity, offset);
+                    return;
+                }
+                continue;
+            }
+            if !self.consume_byte(b':') {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                self.skip_balanced_block();
+                return;
+            }
+            let Some(value) = self.read_until(b';', b'}').map(trim_space) else {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                return;
+            };
+            let valid = match property {
+                0 => parse_ms(value).map(|value| spec.duration_ms = value).is_some(),
+                1 => parse_ms(value).map(|value| spec.delay_ms = value).is_some(),
+                2 => parse_bounded_repeat(value).map(|value| spec.repeat = value).is_some(),
+                3 => parse_direction(value).map(|value| spec.direction = value).is_some(),
+                4 => parse_fill(value).map(|value| spec.fill = value).is_some(),
+                5 => parse_easing(value).map(|value| spec.easing = value).is_some(),
+                _ => false,
+            };
+            if !valid {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                return;
+            }
+            if self.peek() == Some(b';') {
+                self.position += 1;
+            } else if self.peek() == Some(b'}') {
+                self.position += 1;
+                break;
+            }
+        }
+        if !spec.is_valid() {
+            self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+            return;
+        }
+        self.animation_count += 1;
+        if let Some(index) = node_index {
+            if let Some(node) = self.document.node_mut(index) {
+                node.animation = spec;
+            }
+        }
+    }
+
+    fn parse_keyframe_body(
+        &mut self,
+        style: &mut UiComputedStyle,
+        properties: &mut u8,
+        easing: &mut UiEasing,
+        offset: usize,
+    ) -> bool {
+        loop {
+            self.skip_space();
+            if self.consume_byte(b'}') {
+                return true;
+            }
+            let Some(name) = self.read_name() else {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                self.skip_balanced_block();
+                return false;
+            };
+            let name_bytes = name.as_bytes().strip_suffix(b":").unwrap_or(name.as_bytes());
+            self.skip_space();
+            if name_bytes == name.as_bytes() && !self.consume_byte(b':') {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                self.skip_balanced_block();
+                return false;
+            }
+            let Some(value) = self.read_until(b';', b'}').map(trim_space) else {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                return false;
+            };
+            let valid = match name_bytes {
+                b"opacity" => parse_ratio(value)
+                    .map(|value| {
+                        style.opacity_q16 = value;
+                        *properties |= 1 << 1;
+                    })
+                    .is_some(),
+                b"transform" => parse_transform(value)
+                    .map(|value| {
+                        style.transform = value;
+                        *properties |= 1 << 2;
+                    })
+                    .is_some(),
+                b"ease" => parse_easing(value).map(|value| *easing = value).is_some(),
+                _ => false,
+            };
+            if !valid {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                return false;
+            }
+            if self.peek() == Some(b';') {
+                self.position += 1;
+            } else if self.peek() == Some(b'}') {
+                self.position += 1;
+                return true;
+            }
+        }
+    }
+
+    fn read_until(&mut self, first: u8, second: u8) -> Option<&[u8]> {
+        let start = self.position;
+        while self.position < self.bytes.len()
+            && self.peek() != Some(first)
+            && self.peek() != Some(second)
+            && self.peek() != Some(b':')
+            && self.peek() != Some(b';')
+        {
+            self.position += 1;
+        }
+        if self.position == self.bytes.len() {
+            return None;
+        }
+        let value = &self.bytes[start..self.position];
+        Some(value)
+    }
+
+    fn skip_balanced_block(&mut self) {
+        let mut depth = 0usize;
+        while let Some(byte) = self.peek() {
+            self.position += 1;
+            match byte {
+                b'{' => depth += 1,
+                b'}' if depth == 0 => break,
+                b'}' => depth -= 1,
+                _ => {}
+            }
         }
     }
 
@@ -1214,15 +1435,181 @@ fn parse_tab_index(value: &[u8]) -> Option<i16> {
     if negative { result.checked_neg() } else { Some(result) }
 }
 
+fn parse_keyframe_offset(value: &[u8]) -> Option<u16> {
+    if value == b"from" {
+        return Some(0);
+    }
+    if value == b"to" {
+        return Some(u16::MAX);
+    }
+    let value = value.strip_suffix(b"%")?;
+    let percent =
+        if value.contains(&b'.') { parse_decimal(value, 100)? } else { parse_unsigned(value)? };
+    (percent <= 100).then_some((percent * 65_535 / 100) as u16)
+}
+
+fn parse_ms(value: &[u8]) -> Option<u16> {
+    let value = value.strip_suffix(b"ms")?;
+    let parsed = parse_unsigned(value)?;
+    (parsed <= u32::from(logos_ui::MAX_UI_MOTION_DURATION_MS)).then_some(parsed as u16)
+}
+
+fn parse_u8(value: &[u8]) -> Option<u8> {
+    let value = parse_unsigned(value)?;
+    (value <= u32::from(u8::MAX)).then_some(value as u8)
+}
+
+fn parse_bounded_repeat(value: &[u8]) -> Option<u8> {
+    let value = parse_u8(value)?;
+    (value <= 8).then_some(value)
+}
+
+fn parse_unsigned(value: &[u8]) -> Option<u32> {
+    if value.is_empty() {
+        return None;
+    }
+    let mut result = 0u32;
+    for byte in value {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        result = result.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+    }
+    Some(result)
+}
+
+fn parse_decimal(value: &[u8], scale: u32) -> Option<u32> {
+    let value = value.strip_prefix(b"+").unwrap_or(value);
+    let dot = value.iter().position(|byte| *byte == b'.');
+    let (whole, fraction) = dot.map_or((value, &[][..]), |dot| (&value[..dot], &value[dot + 1..]));
+    let whole = if whole.is_empty() { 0 } else { parse_unsigned(whole)? };
+    if fraction.len() > 4 || !fraction.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if fraction.is_empty() {
+        return whole.checked_mul(scale);
+    }
+    let fraction_value = parse_unsigned(fraction)?;
+    let divisor = 10u32.pow(fraction.len() as u32);
+    whole.checked_mul(scale)?.checked_add(fraction_value * scale / divisor)
+}
+
+fn parse_ratio(value: &[u8]) -> Option<u16> {
+    let scaled = if value.contains(&b'.') {
+        parse_decimal(value, 65_535)?
+    } else {
+        parse_unsigned(value)?.checked_mul(65_535)?
+    };
+    (scaled <= 65_535).then_some(scaled as u16)
+}
+
+fn parse_signed_unit(value: &[u8], suffix: &[u8], scale: u32) -> Option<i16> {
+    let value = value.strip_suffix(suffix)?;
+    let (negative, value) = value.strip_prefix(b"-").map_or((false, value), |value| (true, value));
+    let parsed = if value.contains(&b'.') {
+        parse_decimal(value, scale)?
+    } else {
+        parse_unsigned(value)?.checked_mul(scale)?
+    };
+    let signed = i32::try_from(parsed).ok()?.checked_mul(if negative { -1 } else { 1 })?;
+    i16::try_from(signed).ok()
+}
+
+fn parse_transform(value: &[u8]) -> Option<UiTransform> {
+    let mut transform = UiTransform::IDENTITY;
+    let mut found = false;
+    if let Some(inner) = function_argument(value, b"translateX(") {
+        transform.translate_x = parse_signed_unit(inner, b"px", 1)?;
+        found = true;
+    }
+    if let Some(inner) = function_argument(value, b"translateY(") {
+        transform.translate_y = parse_signed_unit(inner, b"px", 1)?;
+        found = true;
+    }
+    if let Some(inner) = function_argument(value, b"scale(") {
+        transform.scale_q8_8 = u16::try_from(parse_decimal(inner, 256)?).ok()?;
+        found = true;
+    }
+    if let Some(inner) = function_argument(value, b"rotate(") {
+        transform.rotation_degrees = parse_signed_unit(inner, b"deg", 1)?;
+        found = true;
+    }
+    found.then_some(transform)
+}
+
+fn function_argument<'a>(value: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let start = value.windows(name.len()).position(|window| window == name)? + name.len();
+    let end = value[start..].iter().position(|byte| *byte == b')')? + start;
+    Some(trim_space(&value[start..end]))
+}
+
+fn parse_direction(value: &[u8]) -> Option<UiAnimationDirection> {
+    match value {
+        b"normal" => Some(UiAnimationDirection::Normal),
+        b"reverse" => Some(UiAnimationDirection::Reverse),
+        b"alternate" => Some(UiAnimationDirection::Alternate),
+        b"alternate-reverse" => Some(UiAnimationDirection::AlternateReverse),
+        _ => None,
+    }
+}
+
+fn parse_fill(value: &[u8]) -> Option<UiAnimationFill> {
+    match value {
+        b"none" => Some(UiAnimationFill::None),
+        b"forwards" => Some(UiAnimationFill::Forwards),
+        b"backwards" => Some(UiAnimationFill::Backwards),
+        b"both" => Some(UiAnimationFill::Both),
+        _ => None,
+    }
+}
+
+fn parse_easing(value: &[u8]) -> Option<UiEasing> {
+    match value {
+        b"linear" => Some(UiEasing::Linear),
+        b"ease-in" => Some(UiEasing::EaseIn),
+        b"ease-out" => Some(UiEasing::EaseOut),
+        b"ease-in-out" => Some(UiEasing::EaseInOut),
+        _ => {
+            let args = value.strip_prefix(b"cubic-bezier(")?.strip_suffix(b")")?;
+            let mut values = [0i16; 4];
+            let mut count = 0;
+            for value in args.split(|byte| *byte == b',') {
+                if count == values.len() {
+                    return None;
+                }
+                let value = trim_space(value);
+                let negative = value.first() == Some(&b'-');
+                let value = value.strip_prefix(b"-").unwrap_or(value);
+                let percent = i16::try_from(parse_decimal(value, 100)?).ok()?;
+                values[count] = if negative { -percent } else { percent };
+                count += 1;
+            }
+            (count == 4).then_some(UiEasing::CubicBezier {
+                x1: values[0],
+                y1: values[1],
+                x2: values[2],
+                y2: values[3],
+            })
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UiStyleRule {
     Base(UiStyle),
-    Focus(UiStyle),
+    State(UiStyleState, UiStyle),
 }
 
 fn style_rule(token: &[u8]) -> Option<UiStyleRule> {
-    if let Some(style) = token.strip_prefix(b"focus:").and_then(style_token) {
-        return Some(UiStyleRule::Focus(style));
+    for (prefix, state) in [
+        (b"hover:".as_slice(), UiStyleState::Hover),
+        (b"focus:".as_slice(), UiStyleState::Focus),
+        (b"pressed:".as_slice(), UiStyleState::Pressed),
+        (b"disabled:".as_slice(), UiStyleState::Disabled),
+    ] {
+        if let Some(style) = token.strip_prefix(prefix).and_then(style_token) {
+            return Some(UiStyleRule::State(state, style));
+        }
     }
     style_token(token).map(UiStyleRule::Base)
 }
@@ -1246,9 +1633,30 @@ fn style_token(token: &[u8]) -> Option<UiStyle> {
         b"rounded-lg" => Some(UiStyle::RoundedLarge),
         b"rounded-full" => Some(UiStyle::RoundedFull),
         b"bg-accent" => Some(UiStyle::BackgroundAccent),
+        b"text-muted" => Some(UiStyle::TextMuted),
         b"text-4xl" => Some(UiStyle::Text4xl),
         b"font-light" => Some(UiStyle::FontLight),
         b"opacity-50" => Some(UiStyle::Opacity50),
+        b"transition-colors" => Some(UiStyle::TransitionColors),
+        b"transition-opacity" => Some(UiStyle::TransitionOpacity),
+        b"transition-transform" => Some(UiStyle::TransitionTransform),
+        b"transition-all" => Some(UiStyle::TransitionAll),
+        b"duration-75" => Some(UiStyle::Duration(75)),
+        b"duration-150" => Some(UiStyle::Duration(150)),
+        b"duration-180" => Some(UiStyle::Duration(180)),
+        b"duration-300" => Some(UiStyle::Duration(300)),
+        b"duration-700" => Some(UiStyle::Duration(700)),
+        b"duration-1000" => Some(UiStyle::Duration(1_000)),
+        b"delay-75" => Some(UiStyle::Delay(75)),
+        b"ease-linear" => Some(UiStyle::Ease(UiEasing::Linear)),
+        b"ease-out" => Some(UiStyle::Ease(UiEasing::EaseOut)),
+        b"ease-in-out" => Some(UiStyle::Ease(UiEasing::EaseInOut)),
+        b"ease-bezier-20-80-20-100" => {
+            Some(UiStyle::Ease(UiEasing::CubicBezier { x1: 20, y1: 80, x2: 20, y2: 100 }))
+        }
+        b"animate-in" | b"fade" => Some(UiStyle::Animation(UiAnimationPreset::In)),
+        b"animate-pulse" => Some(UiStyle::Animation(UiAnimationPreset::Pulse)),
+        b"animate-spin" => Some(UiStyle::Animation(UiAnimationPreset::Spin)),
         _ => spacing_style(token),
     }
 }
@@ -1336,6 +1744,54 @@ mod tests {
         assert_eq!(lint(LOGIN_PAGE).len(), 0);
         let blueprint = build.document.to_blueprint().unwrap();
         assert_eq!(blueprint.len(), 6);
+    }
+
+    #[test]
+    fn compiles_bounded_motion_utilities_and_inline_keyframes() {
+        let build = compile(
+            r#"<ui.button {transition-colors transition-opacity duration-150 ease-out hover:bg-accent pressed:opacity-50}
+                animation {
+                    duration: 240ms;
+                    delay: 0ms;
+                    repeat: 1;
+                    direction: normal;
+                    fill: both;
+                    ease: cubic-bezier(.2, .8, .2, 1);
+                    from { opacity: 0; transform: translateY(-8px) scale(.98) rotate(0deg); }
+                    60% { opacity: .92; transform: translateY(2px) scale(1.01) rotate(0deg); ease: ease-out; }
+                    to { opacity: 1; transform: translateY(0px) scale(1) rotate(0deg); }
+                }
+            />"#,
+        );
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        let node = build.document.node(0).unwrap();
+        assert!(node.styles.contains(UiStyle::TransitionColors));
+        assert!(node.styles.contains(UiStyle::Duration(150)));
+        assert_eq!(node.animation.keyframe_count, 3);
+        assert_eq!(node.animation.duration_ms, 240);
+        assert_eq!(node.animation.keyframes[1].offset_q16, 39_321);
+        assert!(
+            node.state_styles.entries[..node.state_styles.len as usize].contains(&UiStateStyle {
+                state: UiStyleState::Pressed,
+                style: UiStyle::Opacity50,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_motion_bounds() {
+        let too_long = compile(
+            r#"<ui.panel animation { duration: 2401ms; from { opacity: 0; } to { opacity: 1; } }/>"#,
+        );
+        assert!(!too_long.is_valid());
+        let unbounded_custom = compile(
+            r#"<ui.panel animation { repeat: 9; from { opacity: 0; } to { opacity: 1; } }/>"#,
+        );
+        assert!(!unbounded_custom.is_valid());
+        let duplicate = compile(
+            r#"<ui.panel animation { from { opacity: 0; } 20% { opacity: .5; } 20% { opacity: 1; } to { opacity: 1; } }/>"#,
+        );
+        assert!(!duplicate.is_valid());
     }
 
     #[test]

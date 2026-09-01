@@ -8,6 +8,7 @@ mod component_tree;
 mod components;
 mod events;
 mod layout;
+mod motion;
 mod reactive;
 mod runtime;
 mod template;
@@ -21,7 +22,8 @@ pub use component_tree::{
     UiBindingValueStore, UiComponentEvent, UiComponentTree, UiComponentTreeError,
 };
 pub use components::{
-    UI_KEY_BACKSPACE, UI_KEY_ENTER, UiButton, UiButtonEvent, UiInput, UiInputEventOutput, UiPanel,
+    UI_KEY_BACKSPACE, UI_KEY_DOWN, UI_KEY_ENTER, UI_KEY_LEFT, UI_KEY_RIGHT, UI_KEY_UP, UiButton,
+    UiButtonEvent, UiCommandMenu, UiCommandMenuEvent, UiInput, UiInputEventOutput, UiPanel,
 };
 pub use events::{
     MAX_UI_EVENT_ROUTES, MAX_UI_OUTPUT_EVENTS, UiEventError, UiEventRouter, UiEventType,
@@ -30,6 +32,12 @@ pub use events::{
 pub use layout::{
     UiEdges, UiLayoutAlignment, UiLayoutDirection, UiLayoutEngine, UiLayoutError, UiLayoutStyle,
     UiOverflow, UiSize,
+};
+pub use motion::{
+    MAX_UI_KEYFRAMES, MAX_UI_MOTION_DURATION_MS, UI_ANIMATION_INFINITE_REPEAT, UI_MOTION_FRAME_MS,
+    UiAnimationDirection, UiAnimationFill, UiAnimationPreset, UiAnimationSpec, UiAnimator,
+    UiComputedStyle, UiEasing, UiKeyframe, UiMotionStatus, UiTransform, UiTransitionProperty,
+    UiTransitionSpec,
 };
 pub use reactive::{
     MAX_UI_DEPENDENCIES, MAX_UI_DEPENDENCY_RECORDS, MAX_UI_INVALIDATIONS, MAX_UI_TRACE_ENTRIES,
@@ -48,5 +56,5 @@ pub use template::{
     UiBinding, UiBindingList, UiBindingProperty, UiConditionalStyle, UiConditionalStyleList,
     UiDocument, UiDocumentError, UiEvent, UiEventKind, UiExpression, UiName, UiNodeTemplate,
     UiStateStyle, UiStateStyleList, UiStyle, UiStyleConditions, UiStyleList, UiStyleResolveError,
-    UiStyleState, UiText,
+    UiStyleState, UiStyleStateFlags, UiText,
 };

@@ -1,8 +1,9 @@
 use core::fmt;
 
 use crate::{
-    UiBinding, UiBindingProperty, UiBuild, UiConditionalStyle, UiEventKind, UiExpression, UiName,
-    UiNodeKind, UiNodeTemplate, UiStateStyle, UiStyle, UiStyleState,
+    UiAnimationPreset, UiBinding, UiBindingProperty, UiBuild, UiConditionalStyle, UiEasing,
+    UiEventKind, UiExpression, UiName, UiNodeKind, UiNodeTemplate, UiStateStyle, UiStyle,
+    UiStyleState,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,6 +90,8 @@ fn write_node<W: fmt::Write>(
         write_line(output, format_line(index, "event", "logos_ui::UiEvent::EMPTY", false))?;
     }
 
+    write_animation(output, index, node)?;
+
     write!(output, "    let node_{index} = logos_ui::UiNodeTemplate {{ kind: ")
         .map_err(|_| UiCodegenError::Output)?;
     write_node_kind(output, node.kind)?;
@@ -106,7 +109,7 @@ fn write_node<W: fmt::Write>(
     write_expression(output, node.text_binding)?;
     write!(
         output,
-        ", bindings: node_{index}_bindings, event: node_{index}_event, styles: node_{index}_styles, state_styles: node_{index}_state_styles, conditional_styles: node_{index}_conditional_styles, tab_index: {}i16 }};",
+        ", bindings: node_{index}_bindings, event: node_{index}_event, styles: node_{index}_styles, state_styles: node_{index}_state_styles, conditional_styles: node_{index}_conditional_styles, tab_index: {}i16, animation: node_{index}_animation }};",
         node.tab_index
     )
     .map_err(|_| UiCodegenError::Output)?;
@@ -117,6 +120,77 @@ fn write_node<W: fmt::Write>(
     )
     .map_err(|_| UiCodegenError::Output)?;
     Ok(())
+}
+
+fn write_animation<W: fmt::Write>(
+    output: &mut W,
+    index: usize,
+    node: &UiNodeTemplate,
+) -> Result<(), UiCodegenError> {
+    if node.animation.keyframe_count == 0 {
+        return write_line(
+            output,
+            format_line(index, "animation", "logos_ui::UiAnimationSpec::EMPTY", false),
+        );
+    }
+    write_line(output, format_line(index, "animation", "logos_ui::UiAnimationSpec::EMPTY", true))?;
+    writeln!(output, "    node_{index}_animation.duration_ms = {};", node.animation.duration_ms)
+        .map_err(|_| UiCodegenError::Output)?;
+    writeln!(output, "    node_{index}_animation.delay_ms = {};", node.animation.delay_ms)
+        .map_err(|_| UiCodegenError::Output)?;
+    writeln!(output, "    node_{index}_animation.repeat = {};", node.animation.repeat)
+        .map_err(|_| UiCodegenError::Output)?;
+    writeln!(
+        output,
+        "    node_{index}_animation.direction = {};",
+        direction_expr(node.animation.direction)
+    )
+    .map_err(|_| UiCodegenError::Output)?;
+    writeln!(output, "    node_{index}_animation.fill = {};", fill_expr(node.animation.fill))
+        .map_err(|_| UiCodegenError::Output)?;
+    write!(output, "    node_{index}_animation.easing = ").map_err(|_| UiCodegenError::Output)?;
+    write_easing(output, node.animation.easing)?;
+    write_line(output, ";")?;
+    for keyframe in node.animation.keyframes.iter().take(usize::from(node.animation.keyframe_count))
+    {
+        write!(
+            output,
+            "    assert!(node_{index}_animation.push(logos_ui::UiKeyframe {{ offset_q16: {}, properties: {}, style: logos_ui::UiComputedStyle {{ fill_color: {}, text_color: {}, opacity_q16: {}, transform: logos_ui::UiTransform {{ translate_x: {}, translate_y: {}, scale_q8_8: {}, rotation_degrees: {} }} }}, easing: ",
+            keyframe.offset_q16,
+            keyframe.properties,
+            keyframe.style.fill_color,
+            keyframe.style.text_color,
+            keyframe.style.opacity_q16,
+            keyframe.style.transform.translate_x,
+            keyframe.style.transform.translate_y,
+            keyframe.style.transform.scale_q8_8,
+            keyframe.style.transform.rotation_degrees,
+        )
+        .map_err(|_| UiCodegenError::Output)?;
+        write_easing(output, keyframe.easing)?;
+        write_line(output, " }));")?;
+    }
+    Ok(())
+}
+
+fn direction_expr(direction: logos_ui::UiAnimationDirection) -> &'static str {
+    match direction {
+        logos_ui::UiAnimationDirection::Normal => "logos_ui::UiAnimationDirection::Normal",
+        logos_ui::UiAnimationDirection::Reverse => "logos_ui::UiAnimationDirection::Reverse",
+        logos_ui::UiAnimationDirection::Alternate => "logos_ui::UiAnimationDirection::Alternate",
+        logos_ui::UiAnimationDirection::AlternateReverse => {
+            "logos_ui::UiAnimationDirection::AlternateReverse"
+        }
+    }
+}
+
+fn fill_expr(fill: logos_ui::UiAnimationFill) -> &'static str {
+    match fill {
+        logos_ui::UiAnimationFill::None => "logos_ui::UiAnimationFill::None",
+        logos_ui::UiAnimationFill::Forwards => "logos_ui::UiAnimationFill::Forwards",
+        logos_ui::UiAnimationFill::Backwards => "logos_ui::UiAnimationFill::Backwards",
+        logos_ui::UiAnimationFill::Both => "logos_ui::UiAnimationFill::Both",
+    }
 }
 
 fn write_binding<W: fmt::Write>(
@@ -246,7 +320,10 @@ fn write_node_kind<W: fmt::Write>(output: &mut W, kind: UiNodeKind) -> Result<()
 
 fn write_state<W: fmt::Write>(output: &mut W, state: UiStyleState) -> Result<(), UiCodegenError> {
     match state {
+        UiStyleState::Hover => write!(output, "logos_ui::UiStyleState::Hover"),
         UiStyleState::Focus => write!(output, "logos_ui::UiStyleState::Focus"),
+        UiStyleState::Pressed => write!(output, "logos_ui::UiStyleState::Pressed"),
+        UiStyleState::Disabled => write!(output, "logos_ui::UiStyleState::Disabled"),
     }
     .map_err(|_| UiCodegenError::Output)
 }
@@ -270,11 +347,60 @@ fn write_style<W: fmt::Write>(output: &mut W, style: UiStyle) -> Result<(), UiCo
         UiStyle::RoundedLarge => write!(output, "logos_ui::UiStyle::RoundedLarge"),
         UiStyle::RoundedFull => write!(output, "logos_ui::UiStyle::RoundedFull"),
         UiStyle::BackgroundAccent => write!(output, "logos_ui::UiStyle::BackgroundAccent"),
+        UiStyle::TextMuted => write!(output, "logos_ui::UiStyle::TextMuted"),
         UiStyle::Text4xl => write!(output, "logos_ui::UiStyle::Text4xl"),
         UiStyle::FontLight => write!(output, "logos_ui::UiStyle::FontLight"),
         UiStyle::Opacity50 => write!(output, "logos_ui::UiStyle::Opacity50"),
+        UiStyle::TransitionColors => write!(output, "logos_ui::UiStyle::TransitionColors"),
+        UiStyle::TransitionOpacity => write!(output, "logos_ui::UiStyle::TransitionOpacity"),
+        UiStyle::TransitionTransform => {
+            write!(output, "logos_ui::UiStyle::TransitionTransform")
+        }
+        UiStyle::TransitionAll => write!(output, "logos_ui::UiStyle::TransitionAll"),
+        UiStyle::Duration(value) => write!(output, "logos_ui::UiStyle::Duration({value})"),
+        UiStyle::Delay(value) => write!(output, "logos_ui::UiStyle::Delay({value})"),
+        UiStyle::Ease(value) => {
+            write!(output, "logos_ui::UiStyle::Ease(").map_err(|_| UiCodegenError::Output)?;
+            write_easing(output, value)?;
+            write!(output, ")")
+        }
+        UiStyle::Animation(preset) => match preset {
+            UiAnimationPreset::In => {
+                write!(output, "logos_ui::UiStyle::Animation(logos_ui::UiAnimationPreset::In)")
+            }
+            UiAnimationPreset::Pulse => {
+                write!(output, "logos_ui::UiStyle::Animation(logos_ui::UiAnimationPreset::Pulse)")
+            }
+            UiAnimationPreset::Spin => {
+                write!(output, "logos_ui::UiStyle::Animation(logos_ui::UiAnimationPreset::Spin)")
+            }
+        },
     }
     .map_err(|_| UiCodegenError::Output)
+}
+
+fn write_easing<W: fmt::Write>(output: &mut W, easing: UiEasing) -> Result<(), UiCodegenError> {
+    let name = match easing {
+        UiEasing::Linear => "Linear",
+        UiEasing::EaseIn => "EaseIn",
+        UiEasing::EaseOut => "EaseOut",
+        UiEasing::EaseInOut => "EaseInOut",
+        UiEasing::EaseInQuad => "EaseInQuad",
+        UiEasing::EaseOutQuad => "EaseOutQuad",
+        UiEasing::EaseInOutQuad => "EaseInOutQuad",
+        UiEasing::EaseInCubic => "EaseInCubic",
+        UiEasing::EaseOutCubic => "EaseOutCubic",
+        UiEasing::EaseInOutCubic => "EaseInOutCubic",
+        UiEasing::EaseOutBack => "EaseOutBack",
+        UiEasing::CubicBezier { x1, y1, x2, y2 } => {
+            return write!(
+                output,
+                "logos_ui::UiEasing::CubicBezier {{ x1: {x1}, y1: {y1}, x2: {x2}, y2: {y2} }}"
+            )
+            .map_err(|_| UiCodegenError::Output);
+        }
+    };
+    write!(output, "logos_ui::UiEasing::{name}").map_err(|_| UiCodegenError::Output)
 }
 
 fn write_name<W: fmt::Write>(output: &mut W, name: UiName) -> Result<(), UiCodegenError> {

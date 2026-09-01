@@ -15,15 +15,17 @@ use logos_ui_forms::{BoundedText, Control, FormState, ValidationError};
 
 pub const MAX_FIELD_BYTES: usize = 32;
 pub const MAX_RETRIES: u8 = 3;
-pub const USERNAME_BOUNDS: GuiRect = GuiRect::new(128, 120, 384, 40);
-pub const PASSWORD_BOUNDS: GuiRect = GuiRect::new(128, 176, 384, 40);
-pub const CONFIRM_PASSWORD_BOUNDS: GuiRect = GuiRect::new(128, 280, 384, 40);
-pub const SUBMIT_BOUNDS: GuiRect = GuiRect::new(128, 232, 384, 40);
-pub const CLAIM_USERNAME_BOUNDS: GuiRect = GuiRect::new(128, 168, 384, 40);
-pub const CLAIM_PASSWORD_BOUNDS: GuiRect = GuiRect::new(128, 224, 384, 40);
-pub const CLAIM_SUBMIT_BOUNDS: GuiRect = GuiRect::new(128, 336, 384, 40);
-const CLAIM_CONFIRM_POINTER_BOUNDS: GuiRect = GuiRect::new(128, 280, 384, 56);
-const CLAIM_SUBMIT_POINTER_BOUNDS: GuiRect = GuiRect::new(128, 336, 384, 56);
+const FIELD_WIDTH: u32 = 384;
+const FIELD_X: i32 = (logos_abi::DEFAULT_SCREEN_WIDTH as i32 - FIELD_WIDTH as i32) / 2;
+pub const USERNAME_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 120, FIELD_WIDTH, 40);
+pub const PASSWORD_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 176, FIELD_WIDTH, 40);
+pub const CONFIRM_PASSWORD_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 280, FIELD_WIDTH, 40);
+pub const SUBMIT_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 232, FIELD_WIDTH, 40);
+pub const CLAIM_USERNAME_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 168, FIELD_WIDTH, 40);
+pub const CLAIM_PASSWORD_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 224, FIELD_WIDTH, 40);
+pub const CLAIM_SUBMIT_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 336, FIELD_WIDTH, 40);
+const CLAIM_CONFIRM_POINTER_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 280, FIELD_WIDTH, 56);
+const CLAIM_SUBMIT_POINTER_BOUNDS: GuiRect = GuiRect::new(FIELD_X, 336, FIELD_WIDTH, 56);
 
 pub type LoginText = BoundedText<MAX_FIELD_BYTES>;
 
@@ -588,6 +590,10 @@ const _: () = assert!(core::mem::size_of::<LockScreen>() <= 640);
 mod tests {
     use super::*;
 
+    fn x(offset: i32) -> i16 {
+        (USERNAME_BOUNDS.x + offset) as i16
+    }
+
     #[test]
     fn claim_and_login_input_is_bounded() {
         let mut lock = LockScreen::new();
@@ -691,26 +697,26 @@ mod tests {
     fn pointer_selects_fields_and_submits_login() {
         let mut lock = LockScreen::new();
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(200, 205, 2, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(72), 205, 2, PointerState::Down).unwrap()),
             LockScreenAction::Ignored
         );
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(200, 205, 1, PointerState::Move).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(72), 205, 1, PointerState::Move).unwrap()),
             LockScreenAction::Ignored
         );
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(200, 205, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(72), 205, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::Password);
         let _ = lock.input(InputMessage::text(b"secret").unwrap());
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(200, 145, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(72), 145, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         let _ = lock.input(InputMessage::text(b"alice").unwrap());
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(260, 265, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(132), 265, 1, PointerState::Down).unwrap()),
             LockScreenAction::Submit(UserOperation::Login)
         );
     }
@@ -720,7 +726,7 @@ mod tests {
         let mut lock = LockScreen::new();
         lock.set_unclaimed();
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(200, 290, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(72), 290, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::ConfirmPassword);
@@ -730,19 +736,19 @@ mod tests {
     fn pointer_targets_match_rendered_control_edges() {
         let mut lock = LockScreen::new();
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(150, 125, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(22), 125, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::Username);
 
         lock.set_unclaimed();
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(150, 340, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(22), 340, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::Submit);
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(150, 290, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(22), 290, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::ConfirmPassword);
@@ -753,12 +759,12 @@ mod tests {
         let mut lock = LockScreen::new();
         lock.set_unclaimed();
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(150, 180, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(22), 180, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::Username);
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(150, 240, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(22), 240, 1, PointerState::Down).unwrap()),
             LockScreenAction::Changed
         );
         assert_eq!(lock.field(), LockScreenField::Password);
@@ -768,20 +774,21 @@ mod tests {
     fn pointer_move_tracks_hover_and_button_click_uses_submit_component() {
         let mut lock = LockScreen::new();
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(200, 205, 0, PointerState::Move).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(72), 205, 0, PointerState::Move).unwrap()),
             LockScreenAction::Ignored
         );
         assert_eq!(lock.hovered(), Some(LockScreenField::Password));
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(200, 205, 0, PointerState::Move).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(72), 205, 0, PointerState::Move).unwrap()),
             LockScreenAction::Ignored
         );
 
         let _ = lock.input(InputMessage::text(b"alice").unwrap());
-        let _ = lock.pointer_input(InputMessage::pointer(200, 205, 1, PointerState::Down).unwrap());
+        let _ =
+            lock.pointer_input(InputMessage::pointer(x(72), 205, 1, PointerState::Down).unwrap());
         let _ = lock.input(InputMessage::text(b"secret").unwrap());
         assert_eq!(
-            lock.pointer_input(InputMessage::pointer(260, 265, 1, PointerState::Down).unwrap()),
+            lock.pointer_input(InputMessage::pointer(x(132), 265, 1, PointerState::Down).unwrap()),
             LockScreenAction::Submit(UserOperation::Login)
         );
     }

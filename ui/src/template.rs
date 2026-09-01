@@ -1,6 +1,7 @@
 use crate::runtime::{
     MAX_UI_NODES, TAB_INDEX_NONE, UiBlueprint, UiError, UiInteraction, UiNodeKind,
 };
+use crate::{UiAnimationPreset, UiEasing, UiTransitionProperty, UiTransitionSpec};
 use crate::{UiLayoutAlignment, UiLayoutDirection, UiLayoutStyle};
 
 pub const MAX_UI_NAME_BYTES: usize = 24;
@@ -138,7 +139,10 @@ impl UiBindingList {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiStyleState {
+    Hover,
     Focus,
+    Pressed,
+    Disabled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -251,9 +255,18 @@ pub enum UiStyle {
     RoundedLarge,
     RoundedFull,
     BackgroundAccent,
+    TextMuted,
     Text4xl,
     FontLight,
     Opacity50,
+    TransitionColors,
+    TransitionOpacity,
+    TransitionTransform,
+    TransitionAll,
+    Duration(u16),
+    Delay(u16),
+    Ease(UiEasing),
+    Animation(UiAnimationPreset),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,6 +321,41 @@ impl UiStyleList {
             }
         }
         layout
+    }
+
+    pub fn transition_spec(&self) -> UiTransitionSpec {
+        let mut spec = UiTransitionSpec::DEFAULT;
+        for token in self.tokens[..self.len as usize].iter().copied() {
+            match token {
+                UiStyle::TransitionColors => {
+                    spec = spec.with_property(UiTransitionProperty::Colors)
+                }
+                UiStyle::TransitionOpacity => {
+                    spec = spec.with_property(UiTransitionProperty::Opacity)
+                }
+                UiStyle::TransitionTransform => {
+                    spec = spec.with_property(UiTransitionProperty::Transform)
+                }
+                UiStyle::TransitionAll => {
+                    spec = spec
+                        .with_property(UiTransitionProperty::Colors)
+                        .with_property(UiTransitionProperty::Opacity)
+                        .with_property(UiTransitionProperty::Transform)
+                }
+                UiStyle::Duration(value) => spec.duration_ms = value,
+                UiStyle::Delay(value) => spec.delay_ms = value,
+                UiStyle::Ease(value) => spec.easing = value,
+                _ => {}
+            }
+        }
+        spec
+    }
+
+    pub fn animation_preset(&self) -> Option<UiAnimationPreset> {
+        self.tokens[..self.len as usize].iter().copied().find_map(|token| match token {
+            UiStyle::Animation(preset) => Some(preset),
+            _ => None,
+        })
     }
 }
 
@@ -390,6 +438,7 @@ pub struct UiNodeTemplate {
     pub state_styles: UiStateStyleList,
     pub conditional_styles: UiConditionalStyleList,
     pub tab_index: i16,
+    pub animation: crate::UiAnimationSpec,
 }
 
 impl UiNodeTemplate {
@@ -405,11 +454,23 @@ impl UiNodeTemplate {
         state_styles: UiStateStyleList::EMPTY,
         conditional_styles: UiConditionalStyleList::EMPTY,
         tab_index: TAB_INDEX_NONE,
+        animation: crate::UiAnimationSpec::EMPTY,
     };
 
     pub fn resolve_styles(
         &self,
         focused: bool,
+        conditions: &UiStyleConditions,
+    ) -> Result<UiStyleList, UiStyleResolveError> {
+        self.resolve_styles_for_state(
+            UiStyleStateFlags { focus: focused, ..UiStyleStateFlags::default() },
+            conditions,
+        )
+    }
+
+    pub fn resolve_styles_for_state(
+        &self,
+        state: UiStyleStateFlags,
         conditions: &UiStyleConditions,
     ) -> Result<UiStyleList, UiStyleResolveError> {
         let mut resolved = UiStyleList::EMPTY;
@@ -418,7 +479,7 @@ impl UiNodeTemplate {
         }
         for state_style in self.state_styles.entries.iter().take(usize::from(self.state_styles.len))
         {
-            if state_style.state == UiStyleState::Focus && focused {
+            if state.contains(state_style.state) {
                 resolved.push_unique(state_style.style)?;
             }
         }
@@ -430,6 +491,25 @@ impl UiNodeTemplate {
             }
         }
         Ok(resolved)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UiStyleStateFlags {
+    pub hover: bool,
+    pub focus: bool,
+    pub pressed: bool,
+    pub disabled: bool,
+}
+
+impl UiStyleStateFlags {
+    pub const fn contains(self, state: UiStyleState) -> bool {
+        match state {
+            UiStyleState::Hover => self.hover,
+            UiStyleState::Focus => self.focus,
+            UiStyleState::Pressed => self.pressed,
+            UiStyleState::Disabled => self.disabled,
+        }
     }
 }
 

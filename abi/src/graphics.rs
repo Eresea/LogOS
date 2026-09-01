@@ -9,6 +9,7 @@ pub const MAX_GUI_TEXT_BYTES: usize = 32;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
 pub const GUI_TEXT_FLAG_LIGHT: u32 = 1 << 0;
+pub const GUI_TEXT_FLAG_DOUBLE: u32 = 1 << 1;
 pub const MAX_GUI_CORNER_RADIUS: u8 = 32;
 pub const MAX_GUI_STROKE_WIDTH: u8 = 8;
 pub const MAX_GUI_LINE_WIDTH: u8 = 8;
@@ -198,6 +199,32 @@ pub enum GuiDrawKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
+pub struct GuiTransform {
+    pub translate_x: i16,
+    pub translate_y: i16,
+    pub scale_q8_8: u16,
+    pub rotation_degrees: i16,
+    pub reserved: u16,
+}
+
+impl GuiTransform {
+    pub const IDENTITY: Self =
+        Self { translate_x: 0, translate_y: 0, scale_q8_8: 256, rotation_degrees: 0, reserved: 0 };
+
+    pub const fn is_identity(self) -> bool {
+        self.translate_x == 0
+            && self.translate_y == 0
+            && self.scale_q8_8 == 256
+            && self.rotation_degrees == 0
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.scale_q8_8 != 0 && self.scale_q8_8 <= 1_024 && self.reserved == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct GuiDrawCommand {
     pub kind: GuiDrawKind,
     pub flags: u8,
@@ -210,6 +237,7 @@ pub struct GuiDrawCommand {
     pub color: u32,
     pub auxiliary: u32,
     pub text: [u8; MAX_GUI_TEXT_BYTES],
+    pub transform: GuiTransform,
 }
 
 impl GuiDrawCommand {
@@ -226,6 +254,7 @@ impl GuiDrawCommand {
             color: 0,
             auxiliary: 0,
             text: [0; MAX_GUI_TEXT_BYTES],
+            transform: GuiTransform::IDENTITY,
         }
     }
 
@@ -324,7 +353,7 @@ impl GuiDrawCommand {
         if text.len() > MAX_GUI_TEXT_BYTES {
             return None;
         }
-        if text_flags & !GUI_TEXT_FLAG_LIGHT != 0 {
+        if text_flags & !(GUI_TEXT_FLAG_LIGHT | GUI_TEXT_FLAG_DOUBLE) != 0 {
             return None;
         }
         let mut command = Self::empty(GuiDrawKind::GlyphRun);
@@ -344,6 +373,15 @@ impl GuiDrawCommand {
     pub const fn color_alpha(self) -> u8 {
         let alpha = (self.color >> 24) as u8;
         if alpha == 0 { u8::MAX } else { alpha }
+    }
+
+    pub const fn is_identity_transform(self) -> bool {
+        self.transform.is_identity()
+    }
+
+    pub const fn with_transform(mut self, transform: GuiTransform) -> Self {
+        self.transform = transform;
+        self
     }
 
     pub const fn corner_radius(self) -> u8 {
@@ -374,6 +412,7 @@ impl GuiDrawCommand {
     pub const fn is_valid(self) -> bool {
         self.flags == 0
             && self.reserved == 0
+            && self.transform.is_valid()
             && self.text_len as usize <= MAX_GUI_TEXT_BYTES
             && match self.kind {
                 GuiDrawKind::FillRect | GuiDrawKind::StrokeRect | GuiDrawKind::ClipRect => {
@@ -385,7 +424,8 @@ impl GuiDrawCommand {
                         && self.auxiliary <= MAX_GUI_LINE_WIDTH as u32
                 }
                 GuiDrawKind::GlyphRun => {
-                    self.text_len != 0 && self.auxiliary & !GUI_TEXT_FLAG_LIGHT == 0
+                    self.text_len != 0
+                        && self.auxiliary & !(GUI_TEXT_FLAG_LIGHT | GUI_TEXT_FLAG_DOUBLE) == 0
                 }
                 GuiDrawKind::FillRoundedRect => {
                     self.text_len == 0
@@ -779,7 +819,7 @@ mod tests {
         assert_eq!(regular.auxiliary, 0);
         assert_eq!(light.auxiliary, GUI_TEXT_FLAG_LIGHT);
         assert!(light.is_valid());
-        assert!(GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, 2, b"A").is_none());
+        assert!(GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, 1 << 2, b"A").is_none());
     }
 
     #[test]

@@ -117,7 +117,12 @@ const LOCKSCREEN_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability
     logos_abi::IpcRights::Send,
 );
 const MAX_PENDING_SURFACE_COMMANDS: usize = logos_atrium::MAX_ATRIUM_SURFACES * 2;
-const CURSOR_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 400);
+const CURSOR_BOUNDS: GuiRect = GuiRect::new(
+    0,
+    0,
+    logos_abi::DEFAULT_SCREEN_WIDTH as u32,
+    logos_abi::DEFAULT_SCREEN_HEIGHT as u32,
+);
 
 #[derive(Clone, Copy)]
 struct ProgramSurfaceCapabilities {
@@ -129,6 +134,10 @@ struct ProgramSurfaceCapabilities {
 
 static mut ATRIUM: logos_atrium::Atrium = logos_atrium::Atrium::new();
 static mut CALCULATOR: logos_atrium::Calculator = logos_atrium::Calculator::new();
+static mut COMMAND_MENU_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentTree::new();
+static mut PENDING_HOME_SCENE: logos_ui_graphics::UiSceneFrame =
+    logos_ui_graphics::UiSceneFrame::new();
+static mut PENDING_HOME_SCENE_INDEX: usize = 0;
 
 fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) {
     if let Some(command) = GuiDrawCommand::glyph_run(x, y, color, text) {
@@ -158,57 +167,187 @@ fn push_surface_text(
 fn draw_home(
     display: logos_abi::CapabilityHandle,
     surface: SurfaceHandle,
-    launcher_index: usize,
+    atrium: &logos_atrium::Atrium,
     sequence: u32,
 ) {
-    let mut batch = GuiDrawBatch::new(surface, sequence, GuiRect::SURFACE);
-    batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = batch.push(GuiDrawCommand::fill_surface(0x101820));
-    let _ = batch.push(GuiDrawCommand::shadow(
-        GuiRect::new(120, 48, 400, 320),
-        0x55000000,
-        16,
-        3,
-        0,
-        4,
-    ));
-    let _ = batch.push(GuiDrawCommand::fill_rounded_rect(
-        logos_atrium::COMMAND_MENU_BOUNDS,
-        0x182535,
-        16,
-    ));
-    let _ = common::ipc_send_scene_batch(display, &batch, 1);
-
-    let mut header = GuiDrawBatch::new(surface, sequence, GuiRect::new(128, 56, 384, 48));
-    header.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    push_text(&mut header, 160, 82, 0xffffff, b"Command menu");
-    push_text(&mut header, 160, 100, 0xb8c7da, b"Choose an app to open");
-    let _ = common::ipc_send_scene_batch(display, &header, 4);
-
-    let labels: [&[u8]; 4] = [b"Calculator", b"Files", b"Terminal", b"System"];
-    for (index, label) in labels.into_iter().enumerate() {
-        let bounds = logos_atrium::command_menu_item_bounds(index);
-        let mut item = GuiDrawBatch::new(surface, sequence, bounds);
-        item.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-        let selected = index == launcher_index;
-        let _ = item.push(GuiDrawCommand::fill_rounded_rect(
-            bounds,
-            if selected { 0x2f6f66 } else { 0x203040 },
-            8,
-        ));
-        push_text(
-            &mut item,
-            bounds.x + 16,
-            bounds.y + 11,
-            if selected { 0xffffff } else { 0xd9e5f5 },
-            label,
-        );
-        let _ = common::ipc_send_scene_batch(display, &item, 6 + index as u32 * 2);
+    let mut blueprint = logos_ui::UiBlueprint::new();
+    let root = blueprint.push_root(logos_ui::UiNodeKind::Root, 1).ok();
+    let Some(root) = root else { return };
+    let panel = blueprint.push_child(logos_ui::UiNodeKind::Panel, root, 2).ok();
+    let Some(panel) = panel else { return };
+    let mut panel_styles = logos_ui::UiStyleList::EMPTY;
+    if !panel_styles.push(logos_ui::UiStyle::RoundedLarge)
+        || blueprint.set_styles(panel, panel_styles).is_err()
+    {
+        return;
     }
+    let title = blueprint.push_child(logos_ui::UiNodeKind::Label, panel, 3).ok();
+    let input = blueprint.push_child(logos_ui::UiNodeKind::TextInput, panel, 4).ok();
+    let placeholder = blueprint.push_child(logos_ui::UiNodeKind::Label, panel, 5).ok();
+    let Some(title) = title else { return };
+    let Some(input) = input else { return };
+    let Some(placeholder) = placeholder else { return };
+    let mut buttons = [0u16; 4];
+    for (index, button_slot) in buttons.iter_mut().enumerate() {
+        let Some(button) =
+            blueprint.push_child(logos_ui::UiNodeKind::Button, panel, 10 + index as u16).ok()
+        else {
+            return;
+        };
+        *button_slot = button;
+    }
+    let footer = blueprint.push_child(logos_ui::UiNodeKind::Label, panel, 20).ok();
+    let Some(footer) = footer else { return };
+    let Some(title_text) = logos_ui::UiText::from_bytes(b"What do you want to open?") else {
+        return;
+    };
+    let Some(placeholder_text) = logos_ui::UiText::from_bytes(b"Search apps...") else {
+        return;
+    };
+    let Some(footer_text) = logos_ui::UiText::from_bytes(b"Up/Down select   Enter open") else {
+        return;
+    };
+    if blueprint.set_text(title, title_text).is_err()
+        || blueprint.set_text(placeholder, placeholder_text).is_err()
+        || blueprint.set_text(footer, footer_text).is_err()
+    {
+        return;
+    }
+    let mut title_styles = logos_ui::UiStyleList::EMPTY;
+    let mut placeholder_styles = logos_ui::UiStyleList::EMPTY;
+    let mut footer_styles = logos_ui::UiStyleList::EMPTY;
+    if !title_styles.push(logos_ui::UiStyle::Text4xl)
+        || !title_styles.push(logos_ui::UiStyle::FontLight)
+        || !placeholder_styles.push(logos_ui::UiStyle::TextMuted)
+        || !footer_styles.push(logos_ui::UiStyle::TextMuted)
+    {
+        return;
+    }
+    if blueprint.set_styles(title, title_styles).is_err()
+        || blueprint.set_styles(placeholder, placeholder_styles).is_err()
+        || blueprint.set_styles(footer, footer_styles).is_err()
+    {
+        return;
+    }
+    let tree = unsafe { &mut *core::ptr::addr_of_mut!(COMMAND_MENU_TREE) };
+    let mount = tree.tree().is_empty();
+    if mount {
+        let Ok(new_tree) = logos_ui::UiComponentTree::from_blueprint(&blueprint) else {
+            return;
+        };
+        *tree = new_tree;
+    }
+    let set_bounds = |tree: &mut logos_ui::UiComponentTree, index: u16, bounds: GuiRect| {
+        let Some(handle) = tree.tree().handle_at(usize::from(index)).ok() else { return false };
+        tree.tree_mut()
+            .set_bounds(
+                handle,
+                logos_ui::UiRect::new(bounds.x, bounds.y, bounds.width, bounds.height),
+            )
+            .is_ok()
+    };
+    if !set_bounds(tree, root, logos_atrium::FULLSCREEN_SURFACE_BOUNDS)
+        || !set_bounds(tree, panel, logos_atrium::COMMAND_MENU_BOUNDS)
+        || !set_bounds(tree, title, GuiRect::new(384, 160, 512, 40))
+        || !set_bounds(tree, input, GuiRect::new(384, 216, 512, 56))
+        || !set_bounds(tree, placeholder, GuiRect::new(384, 216, 512, 56))
+        || !set_bounds(tree, footer, GuiRect::new(384, 632, 512, 24))
+    {
+        return;
+    }
+    let query = atrium.launcher_query();
+    let query_is_empty = query.as_bytes().is_empty();
+    let Some(input_handle) = tree.tree().handle_at(usize::from(input)).ok() else { return };
+    let _ = tree.set_value(input_handle, query);
+    let _ = tree.focus(input_handle);
+    let labels = logos_atrium::COMMAND_MENU_LABELS;
+    for (index, button) in buttons.into_iter().enumerate() {
+        let visible = index < atrium.launcher_result_count();
+        let bounds =
+            if visible { logos_atrium::command_menu_item_bounds(index) } else { GuiRect::EMPTY };
+        if !set_bounds(tree, button, bounds) {
+            return;
+        }
+        let Some(handle) = tree.tree().handle_at(usize::from(button)).ok() else { return };
+        let label = atrium
+            .launcher_result_app(index)
+            .and_then(|app| {
+                logos_atrium::COMMAND_MENU_ITEMS.iter().position(|candidate| *candidate == app)
+            })
+            .and_then(|app_index| labels.get(app_index).copied())
+            .unwrap_or(&[]);
+        let Some(text) = logos_ui::UiText::from_bytes(label) else { return };
+        if tree.set_text(handle, text).is_err() {
+            return;
+        }
+        let mut styles = logos_ui::UiStyleList::EMPTY;
+        if visible
+            && atrium.launcher_result_app(index) == Some(atrium.launcher_app())
+            && !styles.push(logos_ui::UiStyle::BackgroundAccent)
+        {
+            return;
+        }
+        if tree.set_styles(handle, styles).is_err() {
+            return;
+        }
+    }
+    if let Ok(placeholder_handle) = tree.tree().handle_at(usize::from(placeholder)) {
+        let _ = tree.set_text(
+            placeholder_handle,
+            if query_is_empty { placeholder_text } else { logos_ui::UiText::EMPTY },
+        );
+    }
+    if mount {
+        let Some(panel_handle) = tree.tree().handle_at(usize::from(panel)).ok() else { return };
+        let _ = tree.start_animation(
+            panel_handle,
+            logos_ui::UiComputedStyle::DEFAULT,
+            logos_ui::UiAnimationPreset::In.spec(),
+            common::current_ticks(),
+        );
+    }
+    let _ = tree.advance(common::current_ticks());
+    let scene = match logos_ui_graphics::emit(
+        surface,
+        sequence,
+        tree,
+        logos_ui_graphics::UiSceneTheme::DEFAULT,
+    ) {
+        Ok(scene) => scene,
+        Err(_) => {
+            return;
+        }
+    };
+    unsafe {
+        *core::ptr::addr_of_mut!(PENDING_HOME_SCENE) = scene;
+        *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = 0;
+    }
+    let _ = flush_pending_home_scene(display);
+}
 
-    let mut footer = GuiDrawBatch::new(surface, sequence, GuiRect::new(128, 324, 384, 36));
-    push_text(&mut footer, 160, 346, 0xb8c7da, b"Up/Down select   Enter open");
-    let _ = common::ipc_send_scene_batch(display, &footer, 14);
+fn flush_pending_home_scene(display: logos_abi::CapabilityHandle) -> IpcStatus {
+    let mut index = unsafe { *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX) };
+    let len = unsafe { (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len() };
+    while index < len {
+        let Some(operation) =
+            (unsafe { *core::ptr::addr_of!(PENDING_HOME_SCENE) }).as_slice().get(index).copied()
+        else {
+            break;
+        };
+        match common::ipc_send_handle(display, &operation) {
+            IpcStatus::Ok => index += 1,
+            IpcStatus::Full => {
+                unsafe { *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = index };
+                return IpcStatus::Full;
+            }
+            status => {
+                unsafe { *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = len };
+                return status;
+            }
+        }
+    }
+    unsafe { *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = len };
+    IpcStatus::Ok
 }
 
 fn draw_calculator_ui(
@@ -550,11 +689,25 @@ fn render(
     calculator: &logos_atrium::Calculator,
     sequence: &mut u32,
 ) {
+    let home_scene_pending = unsafe {
+        *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
+            < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
+    };
+    if home_scene_pending {
+        let _ = flush_pending_home_scene(display);
+        let still_pending = unsafe {
+            *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
+                < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
+        };
+        if still_pending {
+            return;
+        }
+    }
     let Some(home) = atrium.home_surface().is_valid().then_some(atrium.home_surface()) else {
         return;
     };
     *sequence = sequence.wrapping_add(1).max(1);
-    draw_home(display, home, atrium.launcher_index(), *sequence);
+    draw_home(display, home, atrium, *sequence);
     if let Some(surface) = atrium.focused_surface() {
         draw_app(display, surface, calculator, *sequence);
     }
@@ -571,7 +724,7 @@ fn queue_home_surface(
     }
     let mut request =
         GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, next_request_id(next));
-    request.bounds = GuiRect::new(0, 0, 640, 400);
+    request.bounds = logos_atrium::FULLSCREEN_SURFACE_BOUNDS;
     request.z_order = 1;
     if common::ipc_send_handle(display_control, &request) == IpcStatus::Ok {
         *pending_surface = Some((request, None));
@@ -705,8 +858,8 @@ pub extern "C" fn _start() -> ! {
     let mut pending_draw: Option<GuiSceneOp> = None;
     let mut cursor_surface = SurfaceHandle::EMPTY;
     let mut pending_cursor_surface = queue_cursor_surface(display_control, &mut next_request);
-    let mut cursor_x = 320i16;
-    let mut cursor_y = 200i16;
+    let mut cursor_x = (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16;
+    let mut cursor_y = (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i16;
     let mut cursor_sequence = 1u32;
     let mut pending_cursor_draw: Option<GuiSceneOp> = None;
     let mut surface_commands = SurfaceCommandQueue::new();
@@ -1321,8 +1474,8 @@ pub extern "C" fn _start() -> ! {
                 deferred_event = deferred;
             }
             if let Some(pointer) = event.pointer_event() {
-                cursor_x = pointer.x.clamp(0, 639);
-                cursor_y = pointer.y.clamp(0, 399);
+                cursor_x = pointer.x.clamp(0, (logos_abi::DEFAULT_SCREEN_WIDTH - 1) as i16);
+                cursor_y = pointer.y.clamp(0, (logos_abi::DEFAULT_SCREEN_HEIGHT - 1) as i16);
                 if cursor_surface.is_valid() {
                     let cursor = cursor_op(
                         cursor_surface,
@@ -1616,6 +1769,20 @@ pub extern "C" fn _start() -> ! {
                     cursor_surface = SurfaceHandle::EMPTY;
                 }
             }
+        }
+        let now_ticks = common::current_ticks();
+        let menu_motion_active = unsafe {
+            (&*core::ptr::addr_of!(COMMAND_MENU_TREE)).next_deadline(now_ticks).is_some()
+        };
+        if menu_motion_active {
+            render(display, atrium, calculator, &mut sequence);
+        }
+        let home_scene_pending = unsafe {
+            *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
+                < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
+        };
+        if home_scene_pending {
+            let _ = flush_pending_home_scene(display);
         }
         let mut wait_capabilities = [logos_abi::CapabilityHandle::EMPTY; 24];
         let mut wait_count = 0;

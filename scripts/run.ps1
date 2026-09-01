@@ -100,7 +100,7 @@ if ($networkEnabled) {
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
 $inputTracePath = Join-Path $target "qemu-input-$PID.trace"
 $inputDebugLogPath = Join-Path $target "qemu-input-$PID.log"
-$display = if ($interactiveMode) { 'gtk,zoom-to-fit=on' } else { 'none' }
+$display = if ($interactiveMode) { 'gtk,zoom-to-fit=off' } else { 'none' }
 $qemuArgs = @(
     '-machine', 'q35', '-m', '256M', '-smp', $Cpus,
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
@@ -111,10 +111,10 @@ $qemuArgs = @(
 )
 if ($VirtioGpu) {
     $qemuArgs += @('-device', 'virtio-gpu-pci,id=video0')
-} elseif ($Proof) {
-    $qemuArgs += @('-device', 'VGA,id=video0')
 } else {
-    $qemuArgs += @('-vga', 'std')
+    # Keep the host window and relative pointer coordinates in the same
+    # geometry as the GOP mode selected by the kernel.
+    $qemuArgs += @('-device', 'VGA,id=video0,xres=1280,yres=800')
 }
 if ($networkEnabled) {
     if ($Proof) {
@@ -341,7 +341,8 @@ function Framebuffer-HasPixels {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [IO.File]::ReadAllBytes($Path)
-    for ($index = 15; $index -lt $bytes.Length; $index++) {
+    $layout = Get-PpmLayout $bytes
+    for ($index = $layout.Offset; $index -lt $bytes.Length; $index++) {
         if ($bytes[$index] -ne 0) { return $true }
     }
     return $false
@@ -351,7 +352,8 @@ function Framebuffer-HasWhitePixels {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [IO.File]::ReadAllBytes($Path)
-    for ($index = 15; $index -lt $bytes.Length; $index += 3) {
+    $layout = Get-PpmLayout $bytes
+    for ($index = $layout.Offset; $index -lt $bytes.Length; $index += 3) {
         if ($bytes[$index] -eq 255 -and $bytes[$index + 1] -eq 255 -and $bytes[$index + 2] -eq 255) {
             return $true
         }
@@ -363,8 +365,40 @@ function Framebuffer-HasLockscreenPanel {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [IO.File]::ReadAllBytes($Path)
-    $index = 15 + ((300 * 640 + 300) * 3)
+    $layout = Get-PpmLayout $bytes
+    # Sample just beside the centered cursor so the proof checks the panel,
+    # not the cursor's adaptive bright/dark core.
+    $centerX = [int]($layout.Width / 2) - 20
+    $centerY = [int]($layout.Height / 2)
+    $index = $layout.Offset + (($centerY * $layout.Width + $centerX) * 3)
     return $bytes[$index] -eq 24 -and $bytes[$index + 1] -eq 37 -and $bytes[$index + 2] -eq 53
+}
+
+function Framebuffer-HasHomePanel {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PpmLayout $bytes
+    # This point is inside the home popover, away from text, the cursor, and
+    # the rounded shadow. It must not remain the root background.
+    $x = 500
+    $y = 140
+    if ($x -lt 0 -or $y -lt 0 -or $x -ge $layout.Width -or $y -ge $layout.Height) {
+        return $false
+    }
+    $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
+    return $bytes[$index] -eq 11 -and $bytes[$index + 1] -eq 16 -and $bytes[$index + 2] -eq 21
+}
+
+function Framebuffer-HasHomeSelectedCard {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PpmLayout $bytes
+    $x = 400
+    $y = 320
+    $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
+    return $bytes[$index] -eq 53 -and $bytes[$index + 1] -eq 107 -and $bytes[$index + 2] -eq 216
 }
 
 function Framebuffer-HasNativeCursor {
@@ -373,7 +407,9 @@ function Framebuffer-HasNativeCursor {
     $bytes = [IO.File]::ReadAllBytes($Path)
     # The software cursor is an adaptive circular shape with an opaque core.
     $points = @(@(0, 0), @(1, 0), @(-1, 0), @(0, 1), @(0, -1))
-    $origin = 15 + (($Y * 640 + $X) * 3)
+    $layout = Get-PpmLayout $bytes
+    if ($X -lt 0 -or $Y -lt 0 -or $X -ge $layout.Width -or $Y -ge $layout.Height) { return $false }
+    $origin = $layout.Offset + (($Y * $layout.Width + $X) * 3)
     $red = $bytes[$origin]
     $green = $bytes[$origin + 1]
     $blue = $bytes[$origin + 2]
@@ -381,12 +417,34 @@ function Framebuffer-HasNativeCursor {
     $isDark = $red -le 32 -and $green -le 32 -and $blue -le 32
     if (-not ($isBright -or $isDark)) { return $false }
     foreach ($point in $points) {
-        $index = 15 + (((($Y + $point[1]) * 640) + $X + $point[0]) * 3)
+        $pointX = $X + $point[0]
+        $pointY = $Y + $point[1]
+        if ($pointX -lt 0 -or $pointY -lt 0 -or $pointX -ge $layout.Width -or $pointY -ge $layout.Height) { return $false }
+        $index = $layout.Offset + ((($pointY * $layout.Width) + $pointX) * 3)
         if ($bytes[$index] -ne $red -or $bytes[$index + 1] -ne $green -or $bytes[$index + 2] -ne $blue) {
             return $false
         }
     }
     return $true
+}
+
+function Get-PpmLayout {
+    param([byte[]]$Bytes)
+    $newlineCount = 0
+    $headerEnd = 0
+    for ($index = 0; $index -lt [Math]::Min($Bytes.Length, 128); $index++) {
+        if ($Bytes[$index] -eq 10) {
+            $newlineCount++
+            if ($newlineCount -eq 3) {
+                $headerEnd = $index + 1
+                break
+            }
+        }
+    }
+    if ($headerEnd -eq 0) { throw 'Invalid PPM header.' }
+    $header = [Text.Encoding]::ASCII.GetString($Bytes, 0, $headerEnd).Trim() -split '\s+'
+    if ($header.Count -lt 4 -or $header[0] -ne 'P6') { throw 'Unsupported framebuffer dump.' }
+    @{ Offset = $headerEnd; Width = [int]$header[1]; Height = [int]$header[2] }
 }
 
 function Wait-QmpFramebufferStable {
@@ -538,7 +596,7 @@ try {
         if (-not (Wait-QmpFramebufferStable $qmp $pointerBefore $TimeoutSeconds)) {
         throw 'QEMU pointer proof did not observe a rendered framebuffer.'
         }
-        if (-not $VirtioGpu -and -not (Framebuffer-HasNativeCursor $pointerBefore 321 200)) {
+        if (-not $VirtioGpu -and -not (Framebuffer-HasNativeCursor $pointerBefore 641 400)) {
         throw 'QEMU pointer proof did not observe the native cursor on LockScreen.'
         }
         if ($VirtioGpu -and -not (Wait-ProofMarker 'LogOS vNext: VirtIO GPU cursor ready' $TimeoutSeconds)) {
@@ -572,7 +630,7 @@ try {
         if (-not (Wait-ProofMarker 'LogOS vNext: VirtIO GPU cursor moved' $TimeoutSeconds)) {
             throw 'QEMU pointer motion did not move the VirtIO-GPU cursor plane.'
         }
-        } elseif (-not (Framebuffer-HasNativeCursor $pointerAfter 361 180)) {
+        } elseif (-not (Framebuffer-HasNativeCursor $pointerAfter 681 380)) {
         throw 'QEMU pointer motion did not move the native cursor to the decoded position.'
         }
     }
@@ -589,7 +647,12 @@ try {
         # Exercise the rendered register controls with the mouse: username,
         # password, confirmation, then the submit target.
         $pointerTargetCount = Get-ProofMarkerCount 'LogOS vNext: LockScreen pointer target accepted'
-        Send-QmpPointerMotion $qmp -170 -20
+        # The claim controls are centered in the 1280x800 viewport. Start at
+        # the decoder's centered pointer position and walk the rendered rows.
+        Send-QmpPointerMotion $qmp 0 -100
+        Send-QmpPointerMotion $qmp 0 -100
+        Send-QmpPointerMotion $qmp 0 -100
+        Send-QmpPointerMotion $qmp 0 -12
         Send-QmpPointerButton $qmp $true
         Send-QmpPointerButton $qmp $false
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' $pointerTargetCount $TimeoutSeconds)) {
@@ -657,6 +720,12 @@ try {
         }
         if (-not (Wait-ProofMarker 'LogOS vNext: Atrium home surface ready' $TimeoutSeconds)) {
             throw 'Home surface did not become ready after explicit login.'
+        }
+        Start-Sleep -Seconds 2
+        $homeFrame = Join-Path $repoRoot "target\qemu-home-$PID.ppm"
+        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $homeFrame } } | Out-Null
+        if (-not (Framebuffer-HasHomePanel $homeFrame) -or -not (Framebuffer-HasHomeSelectedCard $homeFrame)) {
+            throw 'Post-login home surface did not publish its popover pixels.'
         }
 
         $homeMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium home surface ready'

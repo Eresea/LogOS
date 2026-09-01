@@ -5,6 +5,10 @@ use crate::{UiComponent, UiComponentContract, UiEventDisposition};
 
 pub const UI_KEY_ENTER: u16 = 2;
 pub const UI_KEY_BACKSPACE: u16 = 3;
+pub const UI_KEY_UP: u16 = 12;
+pub const UI_KEY_DOWN: u16 = 13;
+pub const UI_KEY_LEFT: u16 = 14;
+pub const UI_KEY_RIGHT: u16 = 15;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiButtonEvent {
@@ -235,6 +239,151 @@ impl Default for UiPanel {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiCommandMenuEvent {
+    SelectionChanged { index: u8 },
+    QueryChanged { value: UiText },
+    Submitted { index: u8 },
+}
+
+/// Bounded keyboard behavior for a command menu. Layout and painting stay in
+/// the host tree, while selection policy remains reusable and testable.
+#[derive(Clone, Copy)]
+pub struct UiCommandMenu {
+    item_count: u8,
+    selected: u8,
+    query: [u8; MAX_UI_TEXT_BYTES],
+    query_len: u8,
+}
+
+impl UiCommandMenu {
+    pub const fn new(item_count: u8) -> Self {
+        let item_count = if item_count == 0 {
+            1
+        } else if item_count > 8 {
+            8
+        } else {
+            item_count
+        };
+        Self { item_count, selected: 0, query: [0; MAX_UI_TEXT_BYTES], query_len: 0 }
+    }
+
+    pub const fn item_count(self) -> u8 {
+        self.item_count
+    }
+
+    pub const fn selected(self) -> u8 {
+        self.selected
+    }
+
+    pub fn query(self) -> UiText {
+        UiText::from_bytes(&self.query[..usize::from(self.query_len)]).unwrap_or(UiText::EMPTY)
+    }
+
+    pub fn set_item_count(&mut self, item_count: u8) -> bool {
+        let item_count = item_count.min(8);
+        let changed = self.item_count != item_count;
+        self.item_count = item_count;
+        if item_count == 0 {
+            self.selected = 0;
+        } else if self.selected >= item_count {
+            self.selected = item_count - 1;
+        }
+        changed
+    }
+
+    pub fn append_text(&mut self, text: &[u8]) -> bool {
+        let available = MAX_UI_TEXT_BYTES.saturating_sub(usize::from(self.query_len));
+        let count = text.len().min(available);
+        if count == 0 {
+            return false;
+        }
+        let start = usize::from(self.query_len);
+        self.query[start..start + count].copy_from_slice(&text[..count]);
+        self.query_len += count as u8;
+        true
+    }
+
+    pub fn clear_query(&mut self) -> bool {
+        if self.query_len == 0 {
+            return false;
+        }
+        self.query.fill(0);
+        self.query_len = 0;
+        true
+    }
+
+    pub fn pop_query_scalar(&mut self) -> bool {
+        if self.query_len == 0 {
+            return false;
+        }
+        self.query_len -= 1;
+        while self.query_len > 0 && self.query[usize::from(self.query_len)] & 0xc0 == 0x80 {
+            self.query_len -= 1;
+        }
+        true
+    }
+
+    pub fn set_selected(&mut self, index: u8) -> bool {
+        if self.item_count == 0 {
+            return false;
+        }
+        let index = index.min(self.item_count - 1);
+        if self.selected == index {
+            return false;
+        }
+        self.selected = index;
+        true
+    }
+
+    pub fn handle_event(
+        &mut self,
+        event: UiInputEvent,
+        output: &mut UiOutput<UiCommandMenuEvent>,
+    ) -> Result<UiEventDisposition, UiOutputError> {
+        let UiInputEvent::KeyDown { code, modifiers: 0 } = event else {
+            if let UiInputEvent::TextInput { scalar } = event {
+                let mut encoded = [0; 4];
+                let width = encode_scalar(scalar, &mut encoded);
+                if width != 0 && self.append_text(&encoded[..width]) {
+                    output.emit(UiCommandMenuEvent::QueryChanged { value: self.query() })?;
+                    return Ok(UiEventDisposition::Consumed);
+                }
+            }
+            return Ok(UiEventDisposition::Ignored);
+        };
+        let next = match code {
+            UI_KEY_UP | UI_KEY_LEFT => self.selected.saturating_sub(1),
+            UI_KEY_DOWN | UI_KEY_RIGHT => (self.selected + 1).min(self.item_count - 1),
+            UI_KEY_ENTER => {
+                if self.item_count == 0 {
+                    return Ok(UiEventDisposition::Consumed);
+                }
+                output.emit(UiCommandMenuEvent::Submitted { index: self.selected })?;
+                return Ok(UiEventDisposition::Consumed);
+            }
+            UI_KEY_BACKSPACE => {
+                if self.pop_query_scalar() {
+                    output.emit(UiCommandMenuEvent::QueryChanged { value: self.query() })?;
+                    return Ok(UiEventDisposition::Consumed);
+                }
+                return Ok(UiEventDisposition::Ignored);
+            }
+            _ => return Ok(UiEventDisposition::Ignored),
+        };
+        if self.set_selected(next) {
+            output.emit(UiCommandMenuEvent::SelectionChanged { index: self.selected })?;
+        }
+        Ok(UiEventDisposition::Consumed)
+    }
+}
+
+impl Default for UiCommandMenu {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
 impl UiComponent for UiPanel {
     type Output = ();
     const CONTRACT: UiComponentContract = UiComponentContract::for_kind(crate::UiNodeKind::Panel);
@@ -396,5 +545,47 @@ mod tests {
         assert!(input.clear_value());
         assert_eq!(input.value(), UiText::EMPTY);
         assert!(!input.clear_value());
+    }
+
+    #[test]
+    fn command_menu_selection_is_bounded_and_typed() {
+        let mut menu = UiCommandMenu::new(4);
+        let mut output = UiOutput::new();
+        menu.handle_event(UiInputEvent::KeyDown { code: UI_KEY_DOWN, modifiers: 0 }, &mut output)
+            .unwrap();
+        assert_eq!(menu.selected(), 1);
+        assert_eq!(output.pop(), Some(UiCommandMenuEvent::SelectionChanged { index: 1 }));
+        for _ in 0..8 {
+            menu.handle_event(
+                UiInputEvent::KeyDown { code: UI_KEY_DOWN, modifiers: 0 },
+                &mut output,
+            )
+            .unwrap();
+        }
+        assert_eq!(menu.selected(), 3);
+        output.clear();
+        menu.handle_event(UiInputEvent::KeyDown { code: UI_KEY_ENTER, modifiers: 0 }, &mut output)
+            .unwrap();
+        assert_eq!(output.pop(), Some(UiCommandMenuEvent::Submitted { index: 3 }));
+    }
+
+    #[test]
+    fn command_menu_query_is_bounded_and_editable() {
+        let mut menu = UiCommandMenu::new(4);
+        let mut output = UiOutput::new();
+        menu.handle_event(UiInputEvent::TextInput { scalar: u32::from('x') }, &mut output).unwrap();
+        assert_eq!(menu.query(), UiText::from_bytes(b"x").unwrap());
+        assert_eq!(
+            output.pop(),
+            Some(UiCommandMenuEvent::QueryChanged { value: UiText::from_bytes(b"x").unwrap() })
+        );
+        menu.set_item_count(1);
+        menu.handle_event(
+            UiInputEvent::KeyDown { code: UI_KEY_BACKSPACE, modifiers: 0 },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(menu.query(), UiText::EMPTY);
+        assert_eq!(output.pop(), Some(UiCommandMenuEvent::QueryChanged { value: UiText::EMPTY }));
     }
 }

@@ -61,7 +61,12 @@ const SHELL_RESPONSE_CAPABILITY: common::CapabilitySpec = common::capability_con
     core::mem::size_of::<UserResponse>(),
     logos_abi::IpcRights::Receive,
 );
-const CURSOR_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 400);
+const CURSOR_BOUNDS: GuiRect = GuiRect::new(
+    0,
+    0,
+    logos_abi::DEFAULT_SCREEN_WIDTH as u32,
+    logos_abi::DEFAULT_SCREEN_HEIGHT as u32,
+);
 static mut LOCKSCREEN: logos_lockscreen::LockScreen = logos_lockscreen::LockScreen::new();
 static mut LOGIN_UI_BUILD: logos_ui_compiler::UiBuild =
     logos_ui_compiler::UiBuild::from_document(logos_ui::UiDocument::EMPTY);
@@ -70,6 +75,7 @@ static mut REGISTER_UI_BUILD: logos_ui_compiler::UiBuild =
 static mut LOGIN_UI_READY: bool = false;
 static mut REGISTER_UI_READY: bool = false;
 static mut UI_TREE: UiComponentTree = UiComponentTree::new();
+static mut UI_TREE_MODE: u8 = u8::MAX;
 
 fn initialize_ui_build(claim: bool) {
     unsafe {
@@ -114,8 +120,13 @@ fn draw_ui(
 ) -> (IpcStatus, usize) {
     let build = ui_build(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
     let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
-    if tree.reset_from_document(&build.document).is_err() {
-        return (IpcStatus::Malformed, 0);
+    let mode = u8::from(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
+    let mount = tree.tree().is_empty() || unsafe { *core::ptr::addr_of!(UI_TREE_MODE) != mode };
+    if mount {
+        if tree.reset_from_document(&build.document).is_err() {
+            return (IpcStatus::Malformed, 0);
+        }
+        unsafe { UI_TREE_MODE = mode };
     }
     let Some(layout) = logos_shell::LoginLayout::from_build(build, CURSOR_BOUNDS) else {
         return (IpcStatus::Malformed, 0);
@@ -208,6 +219,11 @@ fn draw_ui(
     if tree.set_disabled(submit, !lock.form().can_submit()).is_err() {
         return (IpcStatus::Malformed, 0);
     }
+    let now_ticks = common::current_ticks();
+    if mount && tree.apply_document_animations(&build.document, now_ticks).is_err() {
+        return (IpcStatus::Malformed, 0);
+    }
+    let _ = tree.advance(now_ticks);
     let scene = match logos_ui_graphics::emit(
         surface,
         sequence,
@@ -268,7 +284,7 @@ fn next_id(next: &mut u32) -> u32 {
 
 fn request_surface(_display: logos_abi::CapabilityHandle, next: &mut u32) -> GuiSurfaceRequest {
     let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, next_id(next));
-    request.bounds = GuiRect::new(0, 0, 640, 400);
+    request.bounds = CURSOR_BOUNDS;
     request.z_order = 1;
     request
 }
@@ -321,7 +337,10 @@ pub extern "C" fn _start() -> ! {
     let mut pending_surface_sent = false;
     let mut cursor_surface = SurfaceHandle::EMPTY;
     let mut pending_cursor_surface = None;
-    let mut cursor = (320i16, 200i16);
+    let mut cursor = (
+        (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16,
+        (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i16,
+    );
     let mut cursor_sequence = 1u32;
     let mut pending_cursor_draw: Option<GuiSceneOp> = None;
     let mut pending_draw: Option<bool> = None;
@@ -412,6 +431,7 @@ pub extern "C" fn _start() -> ! {
                 }
             } else if !should_show && visible {
                 visible = false;
+                unsafe { UI_TREE_MODE = u8::MAX };
                 pending_surface = None;
                 pending_auth = None;
                 static_cached = false;
@@ -493,7 +513,10 @@ pub extern "C" fn _start() -> ! {
                 let password_len = lock.credentials().1.len();
                 let confirmation_len = lock.confirmation().len();
                 if let Some(pointer) = event.pointer_event() {
-                    cursor = (pointer.x.clamp(0, 639), pointer.y.clamp(0, 399));
+                    cursor = (
+                        pointer.x.clamp(0, (logos_abi::DEFAULT_SCREEN_WIDTH - 1) as i16),
+                        pointer.y.clamp(0, (logos_abi::DEFAULT_SCREEN_HEIGHT - 1) as i16),
+                    );
                     cursor_sequence = cursor_sequence.wrapping_add(1).max(1);
                     if cursor_surface.is_valid() {
                         let cursor = cursor_op(
@@ -570,6 +593,15 @@ pub extern "C" fn _start() -> ! {
                     pending_cursor_draw = None;
                     cursor_surface = SurfaceHandle::EMPTY;
                 }
+            }
+        }
+        if visible && pending_draw.is_none() && surface.is_valid() {
+            let now_ticks = common::current_ticks();
+            let motion_active =
+                unsafe { (&*core::ptr::addr_of!(UI_TREE)).next_deadline(now_ticks).is_some() };
+            if motion_active {
+                pending_draw = Some(true);
+                pending_draw_index = 0;
             }
         }
         common::wait_on_capabilities(&[

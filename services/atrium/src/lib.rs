@@ -6,16 +6,22 @@ extern crate std;
 use core::fmt::Write;
 
 use logos_abi::{
-    GuiRect, InputMessage, KeyCode, KeyState, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, PointerState,
-    ServiceHandle, SurfaceHandle,
+    GuiRect, InputMessage, KeyCode, KeyState, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, MessageKind,
+    PointerState, ServiceHandle, SurfaceHandle,
 };
 
 pub const MAX_ATRIUM_SURFACES: usize = 4;
 pub const MAX_CALCULATOR_TEXT: usize = 32;
 pub const SURFACE_MOVE_STEP: i32 = 32;
-pub const FULLSCREEN_SURFACE_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 400);
-pub const STATUS_BAR_BOUNDS: GuiRect = GuiRect::new(0, 0, 640, 32);
-pub const STATUS_BAR_CLOSE_BOUNDS: GuiRect = GuiRect::new(600, 0, 40, 32);
+pub const FULLSCREEN_SURFACE_BOUNDS: GuiRect = GuiRect::new(
+    0,
+    0,
+    logos_abi::DEFAULT_SCREEN_WIDTH as u32,
+    logos_abi::DEFAULT_SCREEN_HEIGHT as u32,
+);
+pub const STATUS_BAR_BOUNDS: GuiRect =
+    GuiRect::new(0, 0, logos_abi::DEFAULT_SCREEN_WIDTH as u32, 64);
+pub const STATUS_BAR_CLOSE_BOUNDS: GuiRect = GuiRect::new(1200, 0, 80, 64);
 pub const CALCULATOR_BUTTON_LEFT: i32 = 20;
 pub const CALCULATOR_BUTTON_TOP: i32 = 100;
 pub const CALCULATOR_BUTTON_WIDTH: i32 = 56;
@@ -69,11 +75,12 @@ pub enum AppId {
 
 pub const COMMAND_MENU_ITEMS: [AppId; 4] =
     [AppId::Calculator, AppId::Files, AppId::Terminal, AppId::System];
-pub const COMMAND_MENU_BOUNDS: GuiRect = GuiRect::new(128, 56, 384, 304);
-pub const COMMAND_MENU_ITEM_LEFT: i32 = 152;
-pub const COMMAND_MENU_ITEM_TOP: i32 = 112;
-pub const COMMAND_MENU_ITEM_WIDTH: u32 = 336;
-pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 36;
+pub const COMMAND_MENU_LABELS: [&[u8]; 4] = [b"Calculator", b"Files", b"Terminal", b"System"];
+pub const COMMAND_MENU_BOUNDS: GuiRect = GuiRect::new(320, 120, 640, 560);
+pub const COMMAND_MENU_ITEM_LEFT: i32 = 384;
+pub const COMMAND_MENU_ITEM_TOP: i32 = 304;
+pub const COMMAND_MENU_ITEM_WIDTH: u32 = 512;
+pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 64;
 pub const COMMAND_MENU_ITEM_GAP: i32 = 12;
 
 pub const fn command_menu_item_bounds(index: usize) -> GuiRect {
@@ -84,6 +91,15 @@ pub const fn command_menu_item_bounds(index: usize) -> GuiRect {
         COMMAND_MENU_ITEM_WIDTH,
         COMMAND_MENU_ITEM_HEIGHT,
     )
+}
+
+fn query_matches(label: &[u8], query: &[u8]) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    label.windows(query.len()).any(|window| {
+        window.iter().zip(query.iter()).all(|(label, query)| label.eq_ignore_ascii_case(query))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,7 +178,8 @@ pub struct Atrium {
     surfaces: [Option<Surface>; MAX_ATRIUM_SURFACES],
     focused: Option<usize>,
     pointer_capture: Option<SurfaceHandle>,
-    launcher_index: usize,
+    command_menu: logos_ui::UiCommandMenu,
+    command_menu_matches: [u8; COMMAND_MENU_ITEMS.len()],
     next_surface_id: u16,
     next_focus_order: u32,
     home_surface: SurfaceHandle,
@@ -176,7 +193,8 @@ impl Atrium {
             surfaces: [None; MAX_ATRIUM_SURFACES],
             focused: None,
             pointer_capture: None,
-            launcher_index: 0,
+            command_menu: logos_ui::UiCommandMenu::new(COMMAND_MENU_ITEMS.len() as u8),
+            command_menu_matches: [0, 1, 2, 3],
             next_surface_id: 1,
             next_focus_order: 1,
             home_surface: SurfaceHandle::EMPTY,
@@ -189,20 +207,41 @@ impl Atrium {
     }
 
     pub const fn launcher_index(&self) -> usize {
-        self.launcher_index
+        let selected = self.command_menu.selected() as usize;
+        if selected < self.command_menu.item_count() as usize {
+            self.command_menu_matches[selected] as usize
+        } else {
+            0
+        }
+    }
+
+    pub const fn launcher_result_count(&self) -> usize {
+        self.command_menu.item_count() as usize
+    }
+
+    pub const fn launcher_result_app(&self, index: usize) -> Option<AppId> {
+        if index >= self.launcher_result_count() || index >= self.command_menu_matches.len() {
+            return None;
+        }
+        Some(COMMAND_MENU_ITEMS[self.command_menu_matches[index] as usize])
+    }
+
+    pub fn launcher_query(&self) -> logos_ui::UiText {
+        self.command_menu.query()
     }
 
     pub const fn launcher_app(&self) -> AppId {
-        COMMAND_MENU_ITEMS[self.launcher_index]
+        COMMAND_MENU_ITEMS[self.launcher_index()]
     }
 
     pub fn command_menu_item_at(&mut self, x: i32, y: i32) -> Option<AppId> {
         if self.phase != AtriumPhase::Home {
             return None;
         }
-        for (index, app) in COMMAND_MENU_ITEMS.into_iter().enumerate() {
+        for index in 0..self.launcher_result_count() {
+            let Some(app) = self.launcher_result_app(index) else { continue };
             if command_menu_item_bounds(index).contains(x, y) {
-                self.launcher_index = index;
+                self.command_menu.set_selected(index as u8);
                 return Some(app);
             }
         }
@@ -466,13 +505,22 @@ impl Atrium {
     }
 
     pub fn input(&mut self, input: &InputMessage) -> AtriumAction {
+        if self.phase != AtriumPhase::Home {
+            return AtriumAction::None;
+        }
+        if self.focused.is_none() && matches!(input.kind, MessageKind::Text | MessageKind::Paste) {
+            if let Some(text) = input.text_bytes() {
+                if self.command_menu.append_text(text) {
+                    self.refresh_command_menu_results();
+                    return AtriumAction::LauncherChanged;
+                }
+            }
+            return AtriumAction::None;
+        }
         if input.state != KeyState::Pressed && input.state != KeyState::Repeat {
             return AtriumAction::None;
         }
         let code = KeyCode::from_raw(input.code);
-        if self.phase != AtriumPhase::Home {
-            return AtriumAction::None;
-        }
         if input.modifiers & MOD_ALT != 0 && code == KeyCode::function(4) {
             return AtriumAction::CloseFocused;
         }
@@ -481,6 +529,11 @@ impl Atrium {
             && self.focused_surface().is_some_and(|surface| surface.app == AppId::Terminal)
         {
             return AtriumAction::None;
+        }
+        if self.focused.is_none() || input.code != KeyCode::ENTER.raw() {
+            if let Some(action) = self.command_menu_action(input.code) {
+                return action;
+            }
         }
         match (input.modifiers & MOD_CTRL != 0, code) {
             (true, KeyCode::TAB) => AtriumAction::FocusNext,
@@ -493,25 +546,6 @@ impl Atrium {
             (false, KeyCode::TAB) => AtriumAction::FocusNext,
             (false, KeyCode::BackTab) => AtriumAction::FocusPrevious,
             (false, KeyCode::ESCAPE) => AtriumAction::CloseFocused,
-            (false, KeyCode::ENTER) if self.focused.is_none() => {
-                AtriumAction::Launch(self.launcher_app())
-            }
-            (false, KeyCode::UP) => {
-                self.launcher_index = self.launcher_index.saturating_sub(1);
-                AtriumAction::LauncherChanged
-            }
-            (false, KeyCode::DOWN) => {
-                self.launcher_index = (self.launcher_index + 1).min(COMMAND_MENU_ITEMS.len() - 1);
-                AtriumAction::LauncherChanged
-            }
-            (false, KeyCode::LEFT) => {
-                self.launcher_index = self.launcher_index.saturating_sub(1);
-                AtriumAction::LauncherChanged
-            }
-            (false, KeyCode::RIGHT) => {
-                self.launcher_index = (self.launcher_index + 1).min(COMMAND_MENU_ITEMS.len() - 1);
-                AtriumAction::LauncherChanged
-            }
             (true, _) => match code.character_byte() {
                 Some(b'l') => AtriumAction::Logout,
                 // The default decoder is French AZERTY, where the number-row
@@ -525,6 +559,38 @@ impl Atrium {
             },
             _ => AtriumAction::None,
         }
+    }
+
+    fn command_menu_action(&mut self, code: u16) -> Option<AtriumAction> {
+        let mut output = logos_ui::UiOutput::new();
+        self.command_menu
+            .handle_event(logos_ui::UiInputEvent::KeyDown { code, modifiers: 0 }, &mut output)
+            .ok()?;
+        match output.pop()? {
+            logos_ui::UiCommandMenuEvent::SelectionChanged { .. } => {
+                Some(AtriumAction::LauncherChanged)
+            }
+            logos_ui::UiCommandMenuEvent::QueryChanged { .. } => {
+                self.refresh_command_menu_results();
+                Some(AtriumAction::LauncherChanged)
+            }
+            logos_ui::UiCommandMenuEvent::Submitted { index } => {
+                self.launcher_result_app(usize::from(index)).map(AtriumAction::Launch)
+            }
+        }
+    }
+
+    fn refresh_command_menu_results(&mut self) {
+        let query_value = self.command_menu.query();
+        let query = query_value.as_bytes();
+        let mut count = 0;
+        for (index, label) in COMMAND_MENU_LABELS.into_iter().enumerate() {
+            if query_matches(label, query) {
+                self.command_menu_matches[count] = index as u8;
+                count += 1;
+            }
+        }
+        self.command_menu.set_item_count(count as u8);
     }
 
     pub fn apply_action(&mut self, action: AtriumAction) -> Result<(), AtriumError> {
@@ -551,7 +617,10 @@ impl Atrium {
         self.surfaces = [None; MAX_ATRIUM_SURFACES];
         self.focused = None;
         self.pointer_capture = None;
-        self.launcher_index = 0;
+        self.command_menu.clear_query();
+        self.command_menu.set_item_count(COMMAND_MENU_ITEMS.len() as u8);
+        self.command_menu_matches = [0, 1, 2, 3];
+        self.command_menu.set_selected(0);
         self.next_focus_order = 1;
     }
 
@@ -979,6 +1048,22 @@ mod tests {
     }
 
     #[test]
+    fn command_menu_filters_text_and_launches_the_selected_result() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        assert_eq!(
+            atrium.input(&InputMessage::text(b"calcu").unwrap()),
+            AtriumAction::LauncherChanged
+        );
+        assert_eq!(atrium.launcher_result_count(), 1);
+        assert_eq!(atrium.launcher_app(), AppId::Calculator);
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0)),
+            AtriumAction::Launch(AppId::Calculator)
+        );
+    }
+
+    #[test]
     fn app_surfaces_are_fullscreen_and_close_button_is_bounded() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
@@ -991,7 +1076,7 @@ mod tests {
             assert_eq!(request.mode(), SurfaceMode::Tiled);
         }
         assert!(STATUS_BAR_BOUNDS.contains(320, 16));
-        assert!(STATUS_BAR_CLOSE_BOUNDS.contains(620, 16));
+        assert!(STATUS_BAR_CLOSE_BOUNDS.contains(1240, 32));
         assert!(!STATUS_BAR_CLOSE_BOUNDS.contains(599, 16));
     }
 
@@ -1211,10 +1296,10 @@ mod tests {
             let row = index / 4;
             let column = index % 4;
             let x = CALCULATOR_BUTTON_LEFT
-                + column as i32 * (CALCULATOR_BUTTON_WIDTH + CALCULATOR_BUTTON_GAP)
+                + column * (CALCULATOR_BUTTON_WIDTH + CALCULATOR_BUTTON_GAP)
                 + 1;
             let y = CALCULATOR_BUTTON_TOP
-                + row as i32 * (CALCULATOR_BUTTON_HEIGHT + CALCULATOR_BUTTON_GAP)
+                + row * (CALCULATOR_BUTTON_HEIGHT + CALCULATOR_BUTTON_GAP)
                 + 1;
             let event = InputMessage::pointer(x as i16, y as i16, 1, PointerState::Down).unwrap();
             assert!(calculator.input(&event));

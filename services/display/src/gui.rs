@@ -1,8 +1,8 @@
 use logos_abi::{
-    GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind,
-    GuiNodeOperation, GuiRect, GuiSceneOp, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest,
-    GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
-    MAX_GUI_SURFACES, SurfaceHandle,
+    GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch,
+    GuiDrawCommand, GuiDrawKind, GuiNodeOperation, GuiRect, GuiSceneOp, GuiStatus,
+    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS,
+    MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, SurfaceHandle,
 };
 
 #[derive(Clone, Copy)]
@@ -610,9 +610,10 @@ impl GuiSurfaceRegistry {
         if self.plan.entry_count == MAX_GUI_PLAN_COMMANDS {
             return;
         }
+        let occluder = intersect(*clip, command_rect(command));
         let occluder_start = self.plan.occluder_count + usize::from(is_opaque_occluder(command));
         if is_opaque_occluder(command) && self.plan.occluder_count < MAX_GUI_PLAN_OCCLUDERS {
-            self.plan.occluders[self.plan.occluder_count] = command_rect(command);
+            self.plan.occluders[self.plan.occluder_count] = occluder;
             self.plan.occluder_count += 1;
         }
         self.plan.entries[self.plan.entry_count] = Some(RenderPlanEntry {
@@ -772,12 +773,18 @@ fn union(left: GuiRect, right: GuiRect) -> GuiRect {
 }
 
 fn command_rect(command: GuiDrawCommand) -> GuiRect {
+    transform_rect(base_command_rect(command), command.transform)
+}
+
+fn base_command_rect(command: GuiDrawCommand) -> GuiRect {
     match command.kind {
         GuiDrawKind::GlyphRun => GuiRect::new(
             command.x,
             command.y,
-            u32::from(command.text_len).saturating_mul(super::GLYPH_WIDTH as u32),
-            super::GLYPH_HEIGHT as u32,
+            u32::from(command.text_len)
+                .saturating_mul(super::GLYPH_WIDTH as u32)
+                .saturating_mul(text_scale(command)),
+            (super::GLYPH_HEIGHT as u32).saturating_mul(text_scale(command)),
         ),
         GuiDrawKind::Line => expand_rect(
             GuiRect::new(command.x, command.y, command.width, command.height),
@@ -786,6 +793,86 @@ fn command_rect(command: GuiDrawCommand) -> GuiRect {
         GuiDrawKind::Shadow => shadow_bounds(command),
         _ => GuiRect::new(command.x, command.y, command.width, command.height),
     }
+}
+
+fn transform_rect(rect: GuiRect, transform: logos_abi::GuiTransform) -> GuiRect {
+    if rect.is_empty() || transform.is_identity() {
+        return rect;
+    }
+    let corners = [
+        (rect.x, rect.y),
+        (rect.x.saturating_add(rect.width as i32), rect.y),
+        (rect.x, rect.y.saturating_add(rect.height as i32)),
+        (rect.x.saturating_add(rect.width as i32), rect.y.saturating_add(rect.height as i32)),
+    ];
+    let mut min_x = i64::MAX;
+    let mut min_y = i64::MAX;
+    let mut max_x = i64::MIN;
+    let mut max_y = i64::MIN;
+    for (x, y) in corners {
+        let (x, y) = transform_point(x as i64, y as i64, rect, transform);
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    GuiRect::new(
+        min_x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        min_y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        max_x.saturating_sub(min_x).clamp(0, i64::from(u32::MAX)) as u32,
+        max_y.saturating_sub(min_y).clamp(0, i64::from(u32::MAX)) as u32,
+    )
+}
+
+fn transform_point(
+    x: i64,
+    y: i64,
+    rect: GuiRect,
+    transform: logos_abi::GuiTransform,
+) -> (i64, i64) {
+    let center_x = i64::from(rect.x) + i64::from(rect.width) / 2;
+    let center_y = i64::from(rect.y) + i64::from(rect.height) / 2;
+    let dx = (x - center_x) * i64::from(transform.scale_q8_8) / 256;
+    let dy = (y - center_y) * i64::from(transform.scale_q8_8) / 256;
+    let (sin, cos) = sin_cos_degrees(transform.rotation_degrees);
+    (
+        center_x
+            + (dx * i64::from(cos) - dy * i64::from(sin)) / 32_767
+            + i64::from(transform.translate_x),
+        center_y
+            + (dx * i64::from(sin) + dy * i64::from(cos)) / 32_767
+            + i64::from(transform.translate_y),
+    )
+}
+
+const SIN_15_Q15: [i32; 7] = [0, 8_481, 16_384, 23_170, 28_378, 31_651, 32_767];
+
+fn sin_cos_degrees(degrees: i16) -> (i32, i32) {
+    let degrees = i32::from(degrees).rem_euclid(360);
+    let quarter = if degrees <= 90 {
+        degrees
+    } else if degrees <= 180 {
+        180 - degrees
+    } else if degrees <= 270 {
+        degrees - 180
+    } else {
+        360 - degrees
+    };
+    let sine = quarter_sine(quarter);
+    let sine = if degrees > 180 { -sine } else { sine };
+    let cosine = quarter_sine((90 - quarter).abs());
+    let cosine = if degrees > 90 && degrees <= 270 { -cosine } else { cosine };
+    (sine, cosine)
+}
+
+fn quarter_sine(degrees: i32) -> i32 {
+    let degrees = degrees.clamp(0, 90);
+    let index = (degrees / 15) as usize;
+    if index == 6 {
+        return SIN_15_Q15[6];
+    }
+    let remainder = degrees % 15;
+    SIN_15_Q15[index] + (SIN_15_Q15[index + 1] - SIN_15_Q15[index]) * remainder / 15
 }
 
 fn expand_rect(rect: GuiRect, padding: i32) -> GuiRect {
@@ -817,11 +904,18 @@ fn shadow_bounds(command: GuiDrawCommand) -> GuiRect {
 
 fn is_surface_fill(command: GuiDrawCommand) -> bool {
     command.kind == GuiDrawKind::FillRect
+        && command.is_identity_transform()
         && GuiRect::new(command.x, command.y, command.width, command.height) == GuiRect::SURFACE
 }
 
 fn is_opaque_occluder(command: GuiDrawCommand) -> bool {
-    command.kind == GuiDrawKind::FillRect && color_alpha(command.color) == u8::MAX
+    command.kind == GuiDrawKind::FillRect
+        && command.is_identity_transform()
+        && color_alpha(command.color) == u8::MAX
+}
+
+fn text_scale(command: GuiDrawCommand) -> u32 {
+    if command.auxiliary & GUI_TEXT_FLAG_DOUBLE != 0 { 2 } else { 1 }
 }
 
 fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
@@ -889,6 +983,18 @@ fn render_command(
 ) -> usize {
     if clip.is_empty() {
         return 0;
+    }
+    if !command.is_identity_transform() {
+        return render_transformed(
+            framebuffer,
+            width,
+            height,
+            stride,
+            format,
+            glyph_cache,
+            command,
+            clip,
+        );
     }
     match command.kind {
         GuiDrawKind::FillRect => {
@@ -965,6 +1071,7 @@ fn render_command(
         GuiDrawKind::GlyphRun => {
             let mut rendered = 0;
             let packed = super::pixel_bytes(command.color, format);
+            let scale = text_scale(command) as i32;
             let clip_left = clip.x.max(0) as usize;
             let clip_top = clip.y.max(0) as usize;
             let clip_right =
@@ -975,15 +1082,15 @@ fn render_command(
                 command.text[..command.text_len as usize].iter().copied().enumerate()
             {
                 let glyph = glyph_cache.get(u32::from(byte));
-                let base_x = command.x + (index * super::GLYPH_WIDTH) as i32;
-                let first_x =
-                    (clip_left as i32 - base_x).max(0).min(super::GLYPH_WIDTH as i32) as usize;
-                let last_x =
-                    (clip_right as i32 - base_x).max(0).min(super::GLYPH_WIDTH as i32) as usize;
-                let first_y =
-                    (clip_top as i32 - command.y).max(0).min(super::GLYPH_HEIGHT as i32) as usize;
-                let last_y = (clip_bottom as i32 - command.y).max(0).min(super::GLYPH_HEIGHT as i32)
-                    as usize;
+                let base_x = command.x + (index * super::GLYPH_WIDTH) as i32 * scale;
+                let first_x = ((clip_left as i32 - base_x).max(0) / scale)
+                    .min(super::GLYPH_WIDTH as i32) as usize;
+                let last_x = ((clip_right as i32 - base_x + scale - 1).max(0) / scale)
+                    .min(super::GLYPH_WIDTH as i32) as usize;
+                let first_y = ((clip_top as i32 - command.y).max(0) / scale)
+                    .min(super::GLYPH_HEIGHT as i32) as usize;
+                let last_y = ((clip_bottom as i32 - command.y + scale - 1).max(0) / scale)
+                    .min(super::GLYPH_HEIGHT as i32) as usize;
                 for glyph_y in first_y..last_y {
                     for glyph_x in first_x..last_x {
                         let coverage = glyph.rows[glyph_y][glyph_x];
@@ -993,20 +1100,22 @@ fn render_command(
                             coverage
                         };
                         if coverage != 0 {
-                            let x = base_x + glyph_x as i32;
-                            let y = command.y + glyph_y as i32;
-                            rendered += plot_packed(
-                                framebuffer,
-                                width,
-                                height,
-                                stride,
-                                format,
-                                x,
-                                y,
-                                command.color,
-                                packed,
-                                coverage,
-                            ) as usize;
+                            for y_offset in 0..scale {
+                                for x_offset in 0..scale {
+                                    rendered += plot_packed(
+                                        framebuffer,
+                                        width,
+                                        height,
+                                        stride,
+                                        format,
+                                        base_x + glyph_x as i32 * scale + x_offset,
+                                        command.y + glyph_y as i32 * scale + y_offset,
+                                        command.color,
+                                        packed,
+                                        coverage,
+                                    ) as usize;
+                                }
+                            }
                         }
                     }
                 }
@@ -1014,6 +1123,143 @@ fn render_command(
             rendered
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_transformed(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    glyph_cache: &mut super::GlyphCache,
+    command: GuiDrawCommand,
+    clip: GuiRect,
+) -> usize {
+    let source = base_command_rect(command);
+    if source.is_empty() {
+        return 0;
+    }
+    let left = clip.x.max(0).min(width as i32);
+    let top = clip.y.max(0).min(height as i32);
+    let right = clip.x.saturating_add(clip.width as i32).max(0).min(width as i32);
+    let bottom = clip.y.saturating_add(clip.height as i32).max(0).min(height as i32);
+    let mut rendered = 0;
+    for y in top..bottom {
+        for x in left..right {
+            let Some((source_x, source_y)) =
+                inverse_transform_point(x as i64, y as i64, source, command.transform)
+            else {
+                continue;
+            };
+            let Some(coverage) = transformed_coverage(command, source_x, source_y, glyph_cache)
+            else {
+                continue;
+            };
+            rendered +=
+                plot(framebuffer, width, height, stride, format, x, y, command.color, coverage)
+                    as usize;
+        }
+    }
+    rendered
+}
+
+fn inverse_transform_point(
+    x: i64,
+    y: i64,
+    rect: GuiRect,
+    transform: logos_abi::GuiTransform,
+) -> Option<(i32, i32)> {
+    let center_x = i64::from(rect.x) + i64::from(rect.width) / 2;
+    let center_y = i64::from(rect.y) + i64::from(rect.height) / 2;
+    let dx = x - center_x - i64::from(transform.translate_x);
+    let dy = y - center_y - i64::from(transform.translate_y);
+    let (sin, cos) = sin_cos_degrees(transform.rotation_degrees);
+    let scale = i64::from(transform.scale_q8_8);
+    if scale == 0 {
+        return None;
+    }
+    let source_x = center_x + (dx * i64::from(cos) + dy * i64::from(sin)) * 256 / (scale * 32_767);
+    let source_y = center_y + (dy * i64::from(cos) - dx * i64::from(sin)) * 256 / (scale * 32_767);
+    Some((source_x as i32, source_y as i32))
+}
+
+fn transformed_coverage(
+    command: GuiDrawCommand,
+    x: i32,
+    y: i32,
+    glyph_cache: &mut super::GlyphCache,
+) -> Option<u8> {
+    let source = base_command_rect(command);
+    if !source.contains(x, y) {
+        return None;
+    }
+    match command.kind {
+        GuiDrawKind::FillRect | GuiDrawKind::Shadow | GuiDrawKind::Line => Some(u8::MAX),
+        GuiDrawKind::StrokeRect => {
+            let edge = command.auxiliary.max(1).min(command.width.min(command.height));
+            let local_x = x.saturating_sub(command.x) as u32;
+            let local_y = y.saturating_sub(command.y) as u32;
+            (local_x < edge
+                || local_y < edge
+                || local_x >= command.width.saturating_sub(edge)
+                || local_y >= command.height.saturating_sub(edge))
+            .then_some(u8::MAX)
+        }
+        GuiDrawKind::FillRoundedRect | GuiDrawKind::StrokeRoundedRect => {
+            rounded_source_coverage(command, x, y)
+        }
+        GuiDrawKind::GlyphRun => glyph_source_coverage(command, x, y, glyph_cache),
+        GuiDrawKind::ClipRect => None,
+    }
+}
+
+fn glyph_source_coverage(
+    command: GuiDrawCommand,
+    x: i32,
+    y: i32,
+    glyph_cache: &mut super::GlyphCache,
+) -> Option<u8> {
+    let scale = text_scale(command) as i32;
+    let local_x = x.saturating_sub(command.x);
+    let local_y = y.saturating_sub(command.y);
+    if local_x < 0 || local_y < 0 {
+        return None;
+    }
+    let glyph_index = (local_x / (super::GLYPH_WIDTH as i32 * scale)) as usize;
+    if glyph_index >= command.text_len as usize {
+        return None;
+    }
+    let glyph_x = (local_x / scale) as usize % super::GLYPH_WIDTH;
+    let glyph_y = (local_y / scale) as usize;
+    if glyph_y >= super::GLYPH_HEIGHT {
+        return None;
+    }
+    let glyph = glyph_cache.get(u32::from(command.text[glyph_index]));
+    let coverage = glyph.rows[glyph_y][glyph_x];
+    if coverage == 0 {
+        None
+    } else if command.auxiliary & GUI_TEXT_FLAG_LIGHT != 0 {
+        Some((u16::from(coverage) * 3 / 4) as u8)
+    } else {
+        Some(coverage)
+    }
+}
+
+fn rounded_source_coverage(command: GuiDrawCommand, x: i32, y: i32) -> Option<u8> {
+    let radius = i32::from(command.corner_radius());
+    if radius == 0 {
+        return Some(u8::MAX);
+    }
+    let local_x = x - command.x;
+    let local_y = y - command.y;
+    let right = command.width as i32 - 1;
+    let bottom = command.height as i32 - 1;
+    let near_x = if local_x < radius { radius } else { right - radius };
+    let near_y = if local_y < radius { radius } else { bottom - radius };
+    let dx = local_x - near_x;
+    let dy = local_y - near_y;
+    if dx * dx + dy * dy <= radius * radius { Some(u8::MAX) } else { None }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2079,6 +2325,31 @@ mod tests {
         registry.compose(&mut backend, &damage, count);
         assert_eq!(backend.commands.last().unwrap().text_len, 7);
         assert_eq!(&backend.commands.last().unwrap().text[..7], b"FPS:060");
+    }
+
+    #[test]
+    fn surface_fill_occlusion_is_clipped_to_its_surface() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 64, 32)))
+            .unwrap()
+            .surface;
+        let modal = registry
+            .create(8, request(GuiSurfaceOperation::CreateModal, 2, GuiRect::new(16, 8, 16, 16)))
+            .unwrap()
+            .surface;
+        let mut root_batch = GuiDrawBatch::new(root, 1, GuiRect::SURFACE);
+        assert!(root_batch.push(GuiDrawCommand::fill_surface(0x101820)));
+        assert!(root_batch.push(GuiDrawCommand::glyph_run(2, 2, 0xffffff, b"root").unwrap()));
+        registry.update(7, root_batch).unwrap();
+        let mut modal_batch = GuiDrawBatch::new(modal, 1, GuiRect::SURFACE);
+        assert!(modal_batch.push(GuiDrawCommand::fill_surface(0x203040)));
+        registry.update(8, modal_batch).unwrap();
+
+        let (damage, count) = registry.take_damage();
+        let mut backend = RecordingBackend { commands: std::vec::Vec::new() };
+        registry.compose(&mut backend, &damage, count);
+        assert!(backend.commands.iter().any(|command| command.text_len == 4));
     }
 
     #[test]

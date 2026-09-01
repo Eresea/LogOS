@@ -186,9 +186,13 @@ pub struct PointerDecoder {
 
 impl PointerDecoder {
     pub const fn new() -> Self {
-        // The GUI profile is fixed at 640x400, so relative motion starts at
-        // the same centered position used by Atrium and LockScreen.
-        Self { packet: [0; 3], packet_len: 0, x: 320, y: 200, buttons: 0 }
+        Self {
+            packet: [0; 3],
+            packet_len: 0,
+            x: (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16,
+            y: (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i16,
+            buttons: 0,
+        }
     }
 
     pub const fn position(&self) -> (i16, i16) {
@@ -212,8 +216,8 @@ impl PointerDecoder {
         }
         let dx = self.packet[1] as i8 as i16;
         let dy = self.packet[2] as i8 as i16;
-        self.x = self.x.saturating_add(dx);
-        self.y = self.y.saturating_sub(dy);
+        self.x = self.x.saturating_add(dx).clamp(0, (logos_abi::DEFAULT_SCREEN_WIDTH - 1) as i16);
+        self.y = self.y.saturating_sub(dy).clamp(0, (logos_abi::DEFAULT_SCREEN_HEIGHT - 1) as i16);
         let buttons = status & logos_abi::POINTER_BUTTONS_MASK;
         let state = if buttons != self.buttons {
             if buttons & !self.buttons != 0 { PointerState::Down } else { PointerState::Up }
@@ -566,12 +570,18 @@ mod tests {
     #[test]
     fn pointer_packets_decode_to_semantic_events() {
         let mut decoder = PointerDecoder::new();
-        assert_eq!(decoder.position(), (320, 200));
+        assert_eq!(
+            decoder.position(),
+            (
+                (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16,
+                (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i16,
+            )
+        );
         assert_eq!(decoder.feed(0x08), None);
         assert_eq!(decoder.feed(4), None);
         let event = decoder.feed(2).unwrap();
-        assert_eq!(event.pointer_event().unwrap().x, 324);
-        assert_eq!(event.pointer_event().unwrap().y, 198);
+        assert_eq!(event.pointer_event().unwrap().x, 644);
+        assert_eq!(event.pointer_event().unwrap().y, 398);
 
         let _ = decoder.feed(0x09);
         let _ = decoder.feed(0);
@@ -588,7 +598,13 @@ mod tests {
         assert_eq!(decoder.feed(0x48), None);
         assert_eq!(decoder.feed(0), None);
         assert_eq!(decoder.feed(0), None);
-        assert_eq!(decoder.position(), (320, 200));
+        assert_eq!(
+            decoder.position(),
+            (
+                (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16,
+                (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i16,
+            )
+        );
     }
 
     #[test]

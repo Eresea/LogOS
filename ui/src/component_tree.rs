@@ -4,9 +4,10 @@ use crate::events::{
 };
 use crate::runtime::{UiError, UiNodeHandle, UiNodeKind, UiTree};
 use crate::{
-    UiBinding, UiBindingProperty, UiButton, UiButtonEvent, UiComponent, UiEventDisposition,
-    UiExpression, UiInput, UiInputEventOutput, UiInteractive, UiPanel, UiStyleConditions,
-    UiStyleList, UiText,
+    UiAnimationSpec, UiAnimator, UiBinding, UiBindingProperty, UiButton, UiButtonEvent,
+    UiComponent, UiComputedStyle, UiEventDisposition, UiExpression, UiInput, UiInputEventOutput,
+    UiInteractive, UiMotionStatus, UiPanel, UiStyleConditions, UiStyleList, UiStyleStateFlags,
+    UiText, UiTransitionSpec,
 };
 
 pub const MAX_UI_COMPONENTS: usize = crate::MAX_UI_NODES;
@@ -206,6 +207,10 @@ pub struct UiComponentTree {
     tree: UiTree,
     components: [UiComponentSlot; MAX_UI_COMPONENTS],
     focused: UiNodeHandle,
+    hovered: UiNodeHandle,
+    pressed: UiNodeHandle,
+    animator: UiAnimator,
+    clock_ticks: u64,
 }
 
 impl UiComponentTree {
@@ -226,7 +231,15 @@ impl UiComponentTree {
             let spec = blueprint.spec(index).ok_or(UiComponentTreeError::Stale)?;
             *component = UiComponentSlot::from_kind(spec.kind);
         }
-        Ok(Self { tree, components, focused: UiNodeHandle::EMPTY })
+        Ok(Self {
+            tree,
+            components,
+            focused: UiNodeHandle::EMPTY,
+            hovered: UiNodeHandle::EMPTY,
+            pressed: UiNodeHandle::EMPTY,
+            animator: UiAnimator::new(),
+            clock_ticks: 0,
+        })
     }
 
     pub const fn new() -> Self {
@@ -234,6 +247,10 @@ impl UiComponentTree {
             tree: UiTree::new(),
             components: [UiComponentSlot::EMPTY; MAX_UI_COMPONENTS],
             focused: UiNodeHandle::EMPTY,
+            hovered: UiNodeHandle::EMPTY,
+            pressed: UiNodeHandle::EMPTY,
+            animator: UiAnimator::new(),
+            clock_ticks: 0,
         }
     }
 
@@ -251,6 +268,10 @@ impl UiComponentTree {
         self.tree = tree;
         self.components = components;
         self.focused = UiNodeHandle::EMPTY;
+        self.hovered = UiNodeHandle::EMPTY;
+        self.pressed = UiNodeHandle::EMPTY;
+        self.animator = UiAnimator::new();
+        self.clock_ticks = 0;
         Ok(())
     }
 
@@ -267,8 +288,15 @@ impl UiComponentTree {
 
     pub fn destroy(&mut self, handle: UiNodeHandle) -> Result<(), UiComponentTreeError> {
         self.tree.destroy(handle).map_err(map_tree_error)?;
+        self.animator.clear(usize::from(handle.slot));
         if self.tree.node(self.focused).is_err() {
             self.focused = UiNodeHandle::EMPTY;
+        }
+        if self.tree.node(self.hovered).is_err() {
+            self.hovered = UiNodeHandle::EMPTY;
+        }
+        if self.tree.node(self.pressed).is_err() {
+            self.pressed = UiNodeHandle::EMPTY;
         }
         Ok(())
     }
@@ -305,7 +333,9 @@ impl UiComponentTree {
             | UiInputEvent::PointerMove { x, y } => (x, y),
             _ => return Err(UiComponentTreeError::NotComponent),
         };
-        let Some(target) = self.hit_test(x, y) else { return Ok(None) };
+        let target = self.hit_test(x, y);
+        self.update_pointer_state(target, event)?;
+        let Some(target) = target else { return Ok(None) };
         if matches!(event, UiInputEvent::PointerDown { .. }) {
             self.focus(target)?;
         }
@@ -326,7 +356,9 @@ impl UiComponentTree {
             | UiInputEvent::PointerMove { x, y } => (x, y),
             _ => return Err(UiComponentTreeError::NotComponent),
         };
-        let Some(target) = self.hit_test(x, y) else { return Ok(None) };
+        let target = self.hit_test(x, y);
+        self.update_pointer_state(target, event)?;
+        let Some(target) = target else { return Ok(None) };
         if matches!(event, UiInputEvent::PointerDown { .. }) {
             self.focus(target)?;
         }
@@ -345,6 +377,114 @@ impl UiComponentTree {
 
     pub const fn focused(&self) -> UiNodeHandle {
         self.focused
+    }
+
+    pub const fn hovered(&self) -> UiNodeHandle {
+        self.hovered
+    }
+
+    pub const fn pressed(&self) -> UiNodeHandle {
+        self.pressed
+    }
+
+    pub const fn animator(&self) -> &UiAnimator {
+        &self.animator
+    }
+
+    pub fn start_transition(
+        &mut self,
+        handle: UiNodeHandle,
+        style: UiComputedStyle,
+        transition: UiTransitionSpec,
+        now_ticks: u64,
+    ) -> Result<bool, UiComponentTreeError> {
+        let node = self.tree.node(handle).map_err(map_tree_error)?;
+        let current = UiComputedStyle {
+            opacity_q16: node.opacity_q16,
+            transform: node.transform,
+            ..UiComputedStyle::DEFAULT
+        };
+        if !self.animator.start_transition(
+            usize::from(handle.slot),
+            current,
+            style,
+            transition,
+            now_ticks,
+        ) {
+            return Err(UiComponentTreeError::Capacity);
+        }
+        let current = self.animator.value(usize::from(handle.slot)).unwrap_or(style);
+        self.tree
+            .set_motion_style(handle, current.opacity_q16, current.transform)
+            .map_err(map_tree_error)
+    }
+
+    pub fn start_animation(
+        &mut self,
+        handle: UiNodeHandle,
+        base: UiComputedStyle,
+        animation: UiAnimationSpec,
+        now_ticks: u64,
+    ) -> Result<bool, UiComponentTreeError> {
+        if !self.animator.start_animation(usize::from(handle.slot), base, animation, now_ticks) {
+            return Err(UiComponentTreeError::Capacity);
+        }
+        let current = self.animator.value(usize::from(handle.slot)).unwrap_or(base);
+        self.tree
+            .set_motion_style(handle, current.opacity_q16, current.transform)
+            .map_err(map_tree_error)
+    }
+
+    pub fn advance(&mut self, now_ticks: u64) -> UiMotionStatus {
+        self.clock_ticks = now_ticks;
+        let status = self.animator.advance(now_ticks);
+        for index in 0..MAX_UI_COMPONENTS {
+            let Some(style) = self.animator.value(index) else { continue };
+            let Ok(handle) = self.tree.handle_at(index) else { continue };
+            let _ = self.tree.set_motion_style(handle, style.opacity_q16, style.transform);
+        }
+        status
+    }
+
+    pub fn next_deadline(&self, now_ticks: u64) -> Option<u64> {
+        self.animator.next_deadline(now_ticks)
+    }
+
+    fn update_pointer_state(
+        &mut self,
+        target: Option<UiNodeHandle>,
+        event: UiInputEvent,
+    ) -> Result<(), UiComponentTreeError> {
+        if matches!(event, UiInputEvent::PointerMove { .. }) && target != Some(self.hovered) {
+            if self.hovered.is_valid() {
+                self.tree.set_hovered(self.hovered, false).map_err(map_tree_error)?;
+            }
+            if let Some(target) = target {
+                self.tree.set_hovered(target, true).map_err(map_tree_error)?;
+            }
+            self.hovered = target.unwrap_or(UiNodeHandle::EMPTY);
+        }
+        match event {
+            UiInputEvent::PointerDown { .. } => {
+                if self.pressed != target.unwrap_or(UiNodeHandle::EMPTY) {
+                    if self.pressed.is_valid() {
+                        self.tree.set_pressed(self.pressed, false).map_err(map_tree_error)?;
+                    }
+                    if let Some(target) = target {
+                        self.tree.set_pressed(target, true).map_err(map_tree_error)?;
+                    }
+                    self.pressed = target.unwrap_or(UiNodeHandle::EMPTY);
+                }
+            }
+            UiInputEvent::PointerUp { .. } => {
+                if self.pressed.is_valid() {
+                    self.tree.set_pressed(self.pressed, false).map_err(map_tree_error)?;
+                    self.pressed = UiNodeHandle::EMPTY;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     pub fn focus(&mut self, handle: UiNodeHandle) -> Result<(), UiComponentTreeError> {
@@ -468,7 +608,28 @@ impl UiComponentTree {
         handle: UiNodeHandle,
         styles: UiStyleList,
     ) -> Result<bool, UiComponentTreeError> {
-        self.tree.set_styles(handle, styles).map_err(map_tree_error)
+        let current = self.tree.node(handle).map_err(map_tree_error)?.opacity_q16;
+        let changed = self.tree.set_styles(handle, styles).map_err(map_tree_error)?;
+        let target = if styles.contains(crate::UiStyle::Opacity50) { 32_768 } else { u16::MAX };
+        let transition = styles.transition_spec();
+        if changed && current != target && transition.includes(crate::UiTransitionProperty::Opacity)
+        {
+            let node = self.tree.node(handle).map_err(map_tree_error)?;
+            let from = UiComputedStyle {
+                opacity_q16: current,
+                transform: node.transform,
+                ..UiComputedStyle::DEFAULT
+            };
+            let to = UiComputedStyle { opacity_q16: target, ..from };
+            let _ = self.animator.start_transition(
+                usize::from(handle.slot),
+                from,
+                to,
+                transition,
+                self.clock_ticks,
+            );
+        }
+        Ok(changed)
     }
 
     pub fn apply_document_styles(
@@ -479,10 +640,48 @@ impl UiComponentTree {
     ) -> Result<bool, UiComponentTreeError> {
         let node = document.node(usize::from(node_index)).ok_or(UiComponentTreeError::Stale)?;
         let handle = self.tree.handle_at(usize::from(node_index)).map_err(map_tree_error)?;
-        let focused = self.tree.node(handle).map_err(map_tree_error)?.interaction.is_focused();
-        let styles =
-            node.resolve_styles(focused, conditions).map_err(|_| UiComponentTreeError::Capacity)?;
+        let interaction = self.tree.node(handle).map_err(map_tree_error)?.interaction;
+        let styles = node
+            .resolve_styles_for_state(
+                UiStyleStateFlags {
+                    hover: interaction.is_hovered(),
+                    focus: interaction.is_focused(),
+                    pressed: interaction.is_pressed(),
+                    disabled: interaction.is_disabled(),
+                },
+                conditions,
+            )
+            .map_err(|_| UiComponentTreeError::Capacity)?;
         self.set_styles(handle, styles)
+    }
+
+    pub fn apply_document_animations(
+        &mut self,
+        document: &crate::UiDocument,
+        now_ticks: u64,
+    ) -> Result<usize, UiComponentTreeError> {
+        let mut started = 0;
+        for index in 0..document.node_count() {
+            let node = document.node(index).ok_or(UiComponentTreeError::Stale)?;
+            let handle = self.tree.handle_at(index).map_err(map_tree_error)?;
+            let animation = if node.animation.is_valid() {
+                Some(node.animation)
+            } else {
+                let styles = self.tree.node(handle).map_err(map_tree_error)?.styles;
+                styles.animation_preset().map(|preset| preset.spec())
+            };
+            if let Some(animation) = animation {
+                let base = UiComputedStyle {
+                    opacity_q16: self.tree.node(handle).map_err(map_tree_error)?.opacity_q16,
+                    transform: self.tree.node(handle).map_err(map_tree_error)?.transform,
+                    ..UiComputedStyle::DEFAULT
+                };
+                if self.start_animation(handle, base, animation, now_ticks).is_ok() {
+                    started += 1;
+                }
+            }
+        }
+        Ok(started)
     }
 
     pub fn apply_binding(

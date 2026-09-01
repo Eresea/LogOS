@@ -29,11 +29,11 @@ pub use device_api::{
     DeviceState, DeviceStatus, MAX_DEVICES,
 };
 pub use graphics::{
-    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch,
-    GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiNodeOperation, GuiRect, GuiSceneOp,
-    GuiSessionContext, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
-    MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
-    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
+    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT,
+    GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiNodeOperation, GuiRect,
+    GuiSceneOp, GuiSessionContext, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest,
+    GuiSurfaceResponse, GuiTransform, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS,
+    MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
 };
 
 pub use package_ipc::{
@@ -67,7 +67,7 @@ pub use user_api::{
     UserStorageRequest, UserStorageResponse, UserStorageStatus,
 };
 
-pub const ABI_VERSION: u16 = 5;
+pub const ABI_VERSION: u16 = 6;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
 pub const MAX_COLUMNS: usize = 160;
@@ -76,8 +76,10 @@ pub const DEFAULT_COLUMNS: usize = 80;
 pub const DEFAULT_ROWS: usize = 25;
 pub const DISPLAY_CELL_WIDTH: usize = 8;
 pub const DISPLAY_CELL_HEIGHT: usize = 16;
-pub const MIN_FRAMEBUFFER_WIDTH: usize = DEFAULT_COLUMNS * DISPLAY_CELL_WIDTH;
-pub const MIN_FRAMEBUFFER_HEIGHT: usize = DEFAULT_ROWS * DISPLAY_CELL_HEIGHT;
+pub const DEFAULT_SCREEN_WIDTH: usize = 1280;
+pub const DEFAULT_SCREEN_HEIGHT: usize = 800;
+pub const MIN_FRAMEBUFFER_WIDTH: usize = DEFAULT_SCREEN_WIDTH;
+pub const MIN_FRAMEBUFFER_HEIGHT: usize = DEFAULT_SCREEN_HEIGHT;
 pub const MAX_SCROLLBACK_LINES: usize = 2048;
 pub const MAX_HISTORY_ENTRIES: usize = 64;
 pub const MAX_HISTORY_BYTES: usize = 256;

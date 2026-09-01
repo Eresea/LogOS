@@ -1,6 +1,8 @@
 #![no_std]
 
-use logos_abi::{GUI_DRAW_FLAG_MORE, GuiDrawCommand, GuiSceneOp, MAX_GUI_NODES, SurfaceHandle};
+use logos_abi::{
+    GUI_DRAW_FLAG_MORE, GuiDrawCommand, GuiSceneOp, GuiTransform, MAX_GUI_NODES, SurfaceHandle,
+};
 use logos_ui::{UiComponentTree, UiNode, UiNodeKind, UiRect, UiStyle};
 
 pub const MAX_UI_SCENE_OPS: usize = MAX_GUI_NODES + 2;
@@ -14,6 +16,7 @@ pub struct UiSceneTheme {
     pub accent: u32,
     pub focus: u32,
     pub text: u32,
+    pub muted: u32,
 }
 
 impl UiSceneTheme {
@@ -24,6 +27,7 @@ impl UiSceneTheme {
         accent: 0x356bd8,
         focus: 0x4b82f2,
         text: 0xffffff,
+        muted: 0xb8c7da,
     };
 }
 
@@ -120,7 +124,10 @@ fn emit_node(
                 frame,
                 index,
                 0,
-                GuiDrawCommand::fill_rect(to_gui_rect(bounds), color(theme.surface, node)),
+                with_transform(
+                    GuiDrawCommand::fill_rect(to_gui_rect(bounds), color(theme.surface, node)),
+                    node,
+                ),
             )?;
         }
         UiNodeKind::Panel | UiNodeKind::Form => {
@@ -135,7 +142,16 @@ fn emit_node(
             )?;
         }
         UiNodeKind::Label => {
-            push_text(output, surface, frame, index, node, node.text.as_bytes(), theme.text, 0)?;
+            push_text(
+                output,
+                surface,
+                frame,
+                index,
+                node,
+                node.text.as_bytes(),
+                text_color(node, theme),
+                0,
+            )?;
         }
         UiNodeKind::Button => {
             push_shadow(output, surface, frame, index, node, bounds)?;
@@ -147,7 +163,16 @@ fn emit_node(
                 1,
                 fill_command(bounds, control_color(node, theme), node),
             )?;
-            push_text(output, surface, frame, index, node, node.text.as_bytes(), theme.text, 2)?;
+            push_text(
+                output,
+                surface,
+                frame,
+                index,
+                node,
+                node.text.as_bytes(),
+                text_color(node, theme),
+                2,
+            )?;
         }
         UiNodeKind::TextInput => {
             push_shadow(output, surface, frame, index, node, bounds)?;
@@ -160,7 +185,16 @@ fn emit_node(
                 fill_command(bounds, control_color(node, theme), node),
             )?;
             let value = tree.value(node.handle).unwrap_or(node.text);
-            push_text(output, surface, frame, index, node, value.as_bytes(), theme.text, 2)?;
+            push_text(
+                output,
+                surface,
+                frame,
+                index,
+                node,
+                value.as_bytes(),
+                text_color(node, theme),
+                2,
+            )?;
         }
     }
     Ok(())
@@ -184,21 +218,28 @@ fn push_text(
     let mut chunk = 0;
     while offset < text.len() {
         let end = offset.saturating_add(logos_abi::MAX_GUI_TEXT_BYTES).min(text.len());
-        let x_offset = offset.saturating_mul(GUI_GLYPH_WIDTH) as i32;
+        let scale = text_scale(node);
+        let x_offset = offset.saturating_mul(GUI_GLYPH_WIDTH).saturating_mul(scale) as i32;
         let node_id = if chunk == 0 {
             (index as u32).saturating_mul(3).saturating_add(fragment + 1)
         } else {
             0x8000_0000 | index as u32
         };
-        let Some(command) = GuiDrawCommand::glyph_run(
-            node.bounds.x.saturating_add(4).saturating_add(x_offset),
-            node.bounds.y.saturating_add(4),
+        let text_height = logos_display_text_height(scale);
+        let y =
+            node.bounds.y.saturating_add(
+                node.bounds.height.saturating_sub(text_height).saturating_div(2) as i32,
+            );
+        let Some(command) = GuiDrawCommand::glyph_run_styled(
+            node.bounds.x.saturating_add(12).saturating_add(x_offset),
+            y,
             color(text_color, node),
+            text_flags(node),
             &text[offset..end],
         ) else {
             return Err(UiSceneError::Capacity);
         };
-        push_upsert_id(output, surface, frame, node_id, command)?;
+        push_upsert_id(output, surface, frame, node_id, with_transform(command, node))?;
         offset = end;
         chunk += 1;
     }
@@ -223,7 +264,10 @@ fn push_shadow(
         frame,
         index,
         0,
-        GuiDrawCommand::shadow(to_gui_rect(bounds), 0x55000000, radius, 3, 0, 3),
+        with_transform(
+            GuiDrawCommand::shadow(to_gui_rect(bounds), 0x55000000, radius, 3, 0, 3),
+            node,
+        ),
     )
 }
 
@@ -273,13 +317,24 @@ fn visible_bounds(node: &UiNode) -> UiRect {
     if node.clip.is_empty() { node.bounds } else { intersect(node.bounds, node.clip) }
 }
 
-fn fill_command(bounds: UiRect, color: u32, node: &UiNode) -> GuiDrawCommand {
+fn fill_command(bounds: UiRect, raw_color: u32, node: &UiNode) -> GuiDrawCommand {
+    let color = color(raw_color, node);
     let rect = to_gui_rect(bounds);
     let radius = corner_radius(bounds, node);
     if radius != 0 {
-        return GuiDrawCommand::fill_rounded_rect(rect, color, radius);
+        return with_transform(GuiDrawCommand::fill_rounded_rect(rect, color, radius), node);
     }
-    GuiDrawCommand::fill_rect(rect, color)
+    with_transform(GuiDrawCommand::fill_rect(rect, color), node)
+}
+
+fn with_transform(command: GuiDrawCommand, node: &UiNode) -> GuiDrawCommand {
+    command.with_transform(GuiTransform {
+        translate_x: node.transform.translate_x,
+        translate_y: node.transform.translate_y,
+        scale_q8_8: node.transform.scale_q8_8,
+        rotation_degrees: node.transform.rotation_degrees,
+        reserved: 0,
+    })
 }
 
 fn corner_radius(bounds: UiRect, node: &UiNode) -> u8 {
@@ -310,12 +365,33 @@ fn control_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
     }
 }
 
-fn color(value: u32, node: &UiNode) -> u32 {
-    if node.styles.contains(UiStyle::Opacity50) {
-        (value & 0x00ff_ffff) | 0x8000_0000
-    } else {
-        value
+fn text_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
+    if node.styles.contains(UiStyle::TextMuted) { theme.muted } else { theme.text }
+}
+
+fn text_scale(node: &UiNode) -> usize {
+    if node.styles.contains(UiStyle::Text4xl) { 2 } else { 1 }
+}
+
+fn text_flags(node: &UiNode) -> u32 {
+    let mut flags = 0;
+    if node.styles.contains(UiStyle::FontLight) {
+        flags |= logos_abi::GUI_TEXT_FLAG_LIGHT;
     }
+    if text_scale(node) == 2 {
+        flags |= logos_abi::GUI_TEXT_FLAG_DOUBLE;
+    }
+    flags
+}
+
+const fn logos_display_text_height(scale: usize) -> u32 {
+    (16 * scale) as u32
+}
+
+fn color(value: u32, node: &UiNode) -> u32 {
+    let style_alpha = if node.styles.contains(UiStyle::Opacity50) { 128 } else { 255 };
+    let motion_alpha = (u32::from(node.opacity_q16) * style_alpha / 65_535) as u8;
+    (value & 0x00ff_ffff) | (u32::from(motion_alpha.max(1)) << 24)
 }
 
 fn to_gui_rect(rect: UiRect) -> logos_abi::GuiRect {
@@ -465,5 +541,30 @@ mod tests {
         assert_eq!(scene.as_slice()[1].node_id, 1);
         assert_eq!(scene.as_slice()[2].node_id, 4);
         assert_eq!(scene.as_slice()[3].node_id, 0x8000_0001);
+    }
+
+    #[test]
+    fn text_styles_emit_scaled_and_vertically_centered_glyphs() {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let button = blueprint.push_child(UiNodeKind::Button, root, 2).unwrap();
+        blueprint.set_text(button, UiText::from_bytes(b"Open").unwrap()).unwrap();
+        let mut styles = logos_ui::UiStyleList::EMPTY;
+        assert!(styles.push(UiStyle::Text4xl));
+        blueprint.set_styles(button, styles).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 100, 80));
+        set_bounds(&mut tree, 1, UiRect::new(8, 8, 80, 48));
+
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        let text = scene
+            .as_slice()
+            .iter()
+            .find(|operation| operation.command.kind == logos_abi::GuiDrawKind::GlyphRun)
+            .unwrap();
+        assert_eq!(text.command.auxiliary, logos_abi::GUI_TEXT_FLAG_DOUBLE);
+        assert_eq!(text.command.x, 20);
+        assert_eq!(text.command.y, 16);
     }
 }

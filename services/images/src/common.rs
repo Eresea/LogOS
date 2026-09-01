@@ -1164,12 +1164,12 @@ pub fn wait_on_capabilities_ready(
             events.push(event);
         }
         let ready = wait_on_event_handles(&events);
-        return ready.and_then(|event| {
+        ready.and_then(|event| {
             events
                 .iter()
                 .position(|candidate| *candidate == event)
                 .and_then(|index| capabilities.get(index).copied())
-        });
+        })
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -1265,7 +1265,7 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle]) -> Option<logos_abi:
             unsafe { *EVENT_SET_CACHE.0.get() = EventSetCacheState::empty() };
         }
         heartbeat();
-        return ready;
+        ready
     }
     #[cfg(not(target_os = "none"))]
     {

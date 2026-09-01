@@ -1852,7 +1852,7 @@ fn configure_keyboard() -> bool {
         if !ready {
             return false;
         }
-        return wait_keyboard_ack();
+        wait_keyboard_ack()
     }
 }
 

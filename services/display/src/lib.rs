@@ -568,9 +568,11 @@ impl Display {
             self.gui.invalidate_rect(Self::cursor_bounds(old.x, old.y));
         }
         self.cursor_order = self.cursor_order.wrapping_add(1).max(1);
+        let x = (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i32;
+        let y = (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i32;
         self.cursor_layers[index] =
-            CursorLayer { surface, x: 320, y: 200, pressed: false, order: self.cursor_order };
-        self.gui.invalidate_rect(Self::cursor_bounds(320, 200));
+            CursorLayer { surface, x, y, pressed: false, order: self.cursor_order };
+        self.gui.invalidate_rect(Self::cursor_bounds(x, y));
     }
 
     pub fn is_cursor_surface(&self, surface: SurfaceHandle) -> bool {

@@ -148,6 +148,7 @@ name = "logos-atrium"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-ui",
 ]
 
 [[package]]

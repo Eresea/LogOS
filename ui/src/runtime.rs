@@ -2,6 +2,7 @@ pub const MAX_UI_NODES: usize = 32;
 const NO_PARENT: u16 = u16::MAX;
 pub const TAB_INDEX_NONE: i16 = -1;
 
+use crate::UiTransform;
 use crate::layout::{UiLayoutStyle, UiSize};
 use crate::template::{UiStyle, UiStyleList, UiText};
 
@@ -60,6 +61,8 @@ pub struct UiInteraction {
     tab_index: i16,
     disabled: bool,
     focused: bool,
+    hovered: bool,
+    pressed: bool,
 }
 
 impl UiInteraction {
@@ -68,6 +71,8 @@ impl UiInteraction {
             tab_index: if kind.is_interactive() { 0 } else { TAB_INDEX_NONE },
             disabled: false,
             focused: false,
+            hovered: false,
+            pressed: false,
         }
     }
 
@@ -87,6 +92,14 @@ impl UiInteraction {
         self.tab_index >= 0 && !self.disabled
     }
 
+    pub const fn is_hovered(self) -> bool {
+        self.hovered
+    }
+
+    pub const fn is_pressed(self) -> bool {
+        self.pressed
+    }
+
     pub fn set_tab_index(&mut self, tab_index: i16) {
         self.tab_index = tab_index;
     }
@@ -95,11 +108,21 @@ impl UiInteraction {
         self.disabled = disabled;
         if disabled {
             self.focused = false;
+            self.hovered = false;
+            self.pressed = false;
         }
     }
 
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused && !self.disabled && self.tab_index >= 0;
+    }
+
+    pub fn set_hovered(&mut self, hovered: bool) {
+        self.hovered = hovered && !self.disabled;
+    }
+
+    pub fn set_pressed(&mut self, pressed: bool) {
+        self.pressed = pressed && !self.disabled;
     }
 }
 
@@ -133,6 +156,14 @@ pub trait UiInteractive {
 
     fn set_focused(&mut self, focused: bool) {
         self.interaction_mut().set_focused(focused);
+    }
+
+    fn set_hovered(&mut self, hovered: bool) {
+        self.interaction_mut().set_hovered(hovered);
+    }
+
+    fn set_pressed(&mut self, pressed: bool) {
+        self.interaction_mut().set_pressed(pressed);
     }
 }
 
@@ -372,6 +403,8 @@ pub struct UiNode {
     pub interaction: UiInteraction,
     pub layout: UiLayoutStyle,
     pub intrinsic_size: UiSize,
+    pub transform: UiTransform,
+    pub opacity_q16: u16,
 }
 
 impl UiNode {
@@ -389,6 +422,8 @@ impl UiNode {
         interaction: UiInteraction::for_kind(UiNodeKind::Panel),
         layout: UiLayoutStyle::EMPTY,
         intrinsic_size: UiSize::ZERO,
+        transform: UiTransform::IDENTITY,
+        opacity_q16: u16::MAX,
     };
 }
 
@@ -519,6 +554,8 @@ impl UiTree {
             interaction,
             layout,
             intrinsic_size,
+            transform: UiTransform::IDENTITY,
+            opacity_q16: u16::MAX,
         };
         self.count += 1;
         Ok(handle)
@@ -573,7 +610,7 @@ impl UiTree {
             let clipped = node.clip.is_empty() || node.clip.contains(x, y);
             if node.kind.is_interactive()
                 && node.interaction.is_focusable()
-                && node.bounds.contains(x, y)
+                && node.transform.contains(node.bounds, x, y)
                 && clipped
                 && node.order >= order
             {
@@ -608,6 +645,28 @@ impl UiTree {
         let node = self.node_mut(handle)?;
         let before = node.interaction;
         node.interaction.set_focused(focused);
+        if node.interaction == before {
+            return Ok(false);
+        }
+        node.dirty = true;
+        Ok(true)
+    }
+
+    pub fn set_hovered(&mut self, handle: UiNodeHandle, hovered: bool) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        let before = node.interaction;
+        node.interaction.set_hovered(hovered);
+        if node.interaction == before {
+            return Ok(false);
+        }
+        node.dirty = true;
+        Ok(true)
+    }
+
+    pub fn set_pressed(&mut self, handle: UiNodeHandle, pressed: bool) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        let before = node.interaction;
+        node.interaction.set_pressed(pressed);
         if node.interaction == before {
             return Ok(false);
         }
@@ -676,6 +735,36 @@ impl UiTree {
             node.dirty = true;
         }
         Ok(())
+    }
+
+    pub fn set_transform(
+        &mut self,
+        handle: UiNodeHandle,
+        transform: UiTransform,
+    ) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        if node.transform == transform {
+            return Ok(false);
+        }
+        node.transform = transform;
+        node.dirty = true;
+        Ok(true)
+    }
+
+    pub fn set_motion_style(
+        &mut self,
+        handle: UiNodeHandle,
+        opacity_q16: u16,
+        transform: UiTransform,
+    ) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        if node.opacity_q16 == opacity_q16 && node.transform == transform {
+            return Ok(false);
+        }
+        node.opacity_q16 = opacity_q16;
+        node.transform = transform;
+        node.dirty = true;
+        Ok(true)
     }
 
     pub fn children(
