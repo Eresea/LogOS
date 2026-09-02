@@ -21,6 +21,7 @@ pub use logos_abi::FramebufferFormat as PixelFormat;
 
 pub const GLYPH_WIDTH: usize = 8;
 pub const GLYPH_HEIGHT: usize = 16;
+const TERMINAL_CHROME_HEIGHT: u32 = 32;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_TILE_SIZE: u32 = 64;
@@ -385,7 +386,10 @@ fn fill_row(row: &mut [u8], pixel: [u8; 4]) {
 fn terminal_cell_rect(surface: GuiRect, row: usize, column: usize) -> GuiRect {
     GuiRect::new(
         surface.x.saturating_add((column * GLYPH_WIDTH) as i32),
-        surface.y.saturating_add((row * GLYPH_HEIGHT) as i32),
+        surface
+            .y
+            .saturating_add(TERMINAL_CHROME_HEIGHT as i32)
+            .saturating_add((row * GLYPH_HEIGHT) as i32),
         GLYPH_WIDTH as u32,
         GLYPH_HEIGHT as u32,
     )
@@ -1150,11 +1154,17 @@ impl Display {
         damage_count: usize,
     ) -> usize {
         let screen = GuiRect::new(0, 0, width as u32, height as u32);
+        let content = GuiRect::new(
+            surface.x,
+            surface.y.saturating_add(TERMINAL_CHROME_HEIGHT as i32),
+            surface.width,
+            surface.height.saturating_sub(TERMINAL_CHROME_HEIGHT),
+        );
         let columns = cell_columns.min(surface.width as usize / GLYPH_WIDTH);
-        let rows = cell_rows.min(surface.height as usize / GLYPH_HEIGHT);
+        let rows = cell_rows.min(content.height as usize / GLYPH_HEIGHT);
         let mut damage_bounds = GuiRect::EMPTY;
         for damage_rect in damage[..damage_count].iter().copied() {
-            let clipped = intersect(intersect(damage_rect, surface), screen);
+            let clipped = intersect(intersect(damage_rect, content), screen);
             if clipped.is_empty() {
                 continue;
             }
@@ -1165,7 +1175,7 @@ impl Display {
             return 0;
         }
         let local_left = damage_bounds.x.saturating_sub(surface.x).max(0) as usize;
-        let local_top = damage_bounds.y.saturating_sub(surface.y).max(0) as usize;
+        let local_top = damage_bounds.y.saturating_sub(content.y).max(0) as usize;
         let local_right = damage_bounds
             .x
             .saturating_add(damage_bounds.width as i32)
@@ -1174,7 +1184,7 @@ impl Display {
         let local_bottom = damage_bounds
             .y
             .saturating_add(damage_bounds.height as i32)
-            .saturating_sub(surface.y)
+            .saturating_sub(content.y)
             .max(0) as usize;
         let first_column = (local_left / GLYPH_WIDTH).min(columns);
         let last_column = local_right.saturating_add(GLYPH_WIDTH - 1) / GLYPH_WIDTH;
@@ -1797,37 +1807,45 @@ mod tests {
 
         let mut root =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
-        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 64);
         let root_handle = display.gui_mut().create(11, root).unwrap().surface;
         let mut root_batch =
-            logos_abi::GuiDrawBatch::new(root_handle, 1, logos_abi::GuiRect::new(0, 0, 64, 32));
+            logos_abi::GuiDrawBatch::new(root_handle, 1, logos_abi::GuiRect::new(0, 0, 64, 64));
         assert!(root_batch.push(logos_abi::GuiDrawCommand::fill_surface(0x203040)));
         display.gui_mut().update(11, root_batch).unwrap();
 
         let mut terminal_surface =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
         terminal_surface.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
-        terminal_surface.bounds = logos_abi::GuiRect::new(16, 8, 16, 16);
+        terminal_surface.bounds = logos_abi::GuiRect::new(16, 8, 16, 48);
         terminal_surface.z_order = 2;
         let handle = display.gui_mut().create(11, terminal_surface).unwrap().surface;
         assert_eq!(display.gui().terminal_bounds(), Some(terminal_surface.bounds));
+        let mut chrome = logos_abi::GuiDrawBatch::new(handle, 1, terminal_surface.bounds);
+        assert!(chrome.push(logos_abi::GuiDrawCommand::fill_rect(
+            logos_abi::GuiRect::new(16, 8, 16, 32),
+            0x405060,
+        )));
+        display.gui_mut().update(11, chrome).unwrap();
         terminal.surface = logos_abi::SurfaceHandle::new(0, 1, 99).unwrap();
         assert_eq!(display.apply(1, &terminal), Err(DisplayError::InvalidMessage));
         terminal.surface = handle;
         display.apply(1, &terminal).unwrap();
 
-        let mut framebuffer = std::vec![0; 64 * 32 * 4];
+        let mut framebuffer = std::vec![0; 64 * 64 * 4];
         loop {
-            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+            display.render_gui(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
             if !display.render_pending() {
                 break;
             }
         }
 
-        let background = (8 * 64 + 16) * 4;
+        let title_bar = (8 * 64 + 16) * 4;
+        assert_eq!(&framebuffer[title_bar..title_bar + 4], &[0x60, 0x50, 0x40, 0]);
+        let background = (40 * 64 + 16) * 4;
         assert_eq!(&framebuffer[background..background + 4], &[0x30, 0x20, 0x10, 0]);
         assert!(
-            framebuffer[(8 * 64 + 16) * 4..(24 * 64 + 32) * 4]
+            framebuffer[(40 * 64 + 16) * 4..(56 * 64 + 32) * 4]
                 .chunks_exact(4)
                 .any(|pixel| pixel[..3] == [0xff, 0xff, 0xff])
         );

@@ -138,6 +138,7 @@ static mut COMMAND_MENU_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentT
 static mut PENDING_HOME_SCENE: logos_ui_graphics::UiSceneFrame =
     logos_ui_graphics::UiSceneFrame::new();
 static mut PENDING_HOME_SCENE_INDEX: usize = 0;
+static mut HOME_SCENE_HIDDEN: bool = false;
 
 fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) {
     if let Some(command) = GuiDrawCommand::glyph_run(x, y, color, text) {
@@ -397,7 +398,8 @@ fn draw_surface_chrome(
     let bounds = surface.bounds;
     let mut base = GuiDrawBatch::new(surface.reference, sequence, bounds);
     base.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let status_bar = GuiRect::new(bounds.x, bounds.y, bounds.width, 32);
+    let status_bar =
+        GuiRect::new(bounds.x, bounds.y, bounds.width, logos_atrium::STATUS_BAR_BOUNDS.height);
     if opaque {
         let _ = base.push(GuiDrawCommand::fill_surface(0x101820));
     }
@@ -409,14 +411,15 @@ fn draw_surface_chrome(
     if more {
         close.flags = logos_abi::GUI_DRAW_FLAG_MORE;
     }
+    let close_local = logos_atrium::surface_close_bounds(bounds);
     let close_bounds = GuiRect::new(
-        bounds.x.saturating_add(logos_atrium::STATUS_BAR_CLOSE_BOUNDS.x),
-        bounds.y.saturating_add(logos_atrium::STATUS_BAR_CLOSE_BOUNDS.y),
-        logos_atrium::STATUS_BAR_CLOSE_BOUNDS.width,
-        logos_atrium::STATUS_BAR_CLOSE_BOUNDS.height,
+        bounds.x.saturating_add(close_local.x),
+        bounds.y.saturating_add(close_local.y),
+        close_local.width,
+        close_local.height,
     );
     let _ = close.push(GuiDrawCommand::fill_rounded_rect(close_bounds, 0x9f3b3b, 6));
-    push_surface_text(&mut close, bounds, 616, 10, 0xffffff, b"X");
+    push_surface_text(&mut close, bounds, close_local.x.saturating_add(16), 10, 0xffffff, b"X");
     let _ = common::ipc_send_scene_batch(display, &close, 4);
 }
 
@@ -697,8 +700,20 @@ fn render(
     let Some(home) = atrium.home_surface().is_valid().then_some(atrium.home_surface()) else {
         return;
     };
-    *sequence = sequence.wrapping_add(1).max(1);
-    draw_home(display, home, atrium, *sequence);
+    if atrium.focused_surface().is_some() {
+        let hidden = unsafe { *core::ptr::addr_of!(HOME_SCENE_HIDDEN) };
+        if !hidden {
+            *sequence = sequence.wrapping_add(1).max(1);
+            let clear = GuiSceneOp::clear(home, *sequence);
+            if common::ipc_send_handle(display, &clear) == IpcStatus::Ok {
+                unsafe { *core::ptr::addr_of_mut!(HOME_SCENE_HIDDEN) = true };
+            }
+        }
+    } else {
+        unsafe { *core::ptr::addr_of_mut!(HOME_SCENE_HIDDEN) = false };
+        *sequence = sequence.wrapping_add(1).max(1);
+        draw_home(display, home, atrium, *sequence);
+    }
     if let Some(surface) = atrium.focused_surface() {
         draw_app(display, surface, calculator, *sequence);
     }
@@ -829,19 +844,10 @@ pub extern "C" fn _start() -> ! {
     let mut last_terminal_request: Option<AtriumSurfaceRequest> = None;
     let mut last_system_request: Option<AtriumSurfaceRequest> = None;
     let mut terminal_client = logos_abi::ServiceHandle::EMPTY;
-    let mut system_client = common::discover_capabilities_contract(
-        logos_abi::IpcRights::Receive,
-        logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
-        core::mem::size_of::<AtriumSurfaceRequest>(),
-    )
-    .ok()
-    .and_then(|records| {
-        records
-            .into_iter()
-            .find(|(_, capability)| *capability == system_surface_request)
-            .map(|(client, _)| client)
-    })
-    .unwrap_or(logos_abi::ServiceHandle::EMPTY);
+    // The System service may publish its request capability after Atrium starts.
+    // Bind the client from the first valid request instead of rejecting that request
+    // when the startup directory snapshot was not ready yet.
+    let mut system_client = logos_abi::ServiceHandle::EMPTY;
     let mut pending_client_response: Option<AtriumSurfaceResponse> = None;
     let mut deferred_terminal_revoke: Option<SurfaceHandle> = None;
     let mut deferred_system_revoke: Option<SurfaceHandle> = None;
@@ -1024,9 +1030,11 @@ pub extern "C" fn _start() -> ! {
         while common::ipc_receive_handle(system_surface_request, &mut system_request)
             == IpcStatus::Ok
         {
+            let client_matches =
+                !system_client.is_valid() || system_request.client() == system_client;
             if !system_request.is_valid()
                 || system_request.app() != Some(AtriumApp::System)
-                || system_request.client() != system_client
+                || !client_matches
             {
                 let response_was_empty = pending_client_response.is_none();
                 queue_terminal_response(
@@ -1529,7 +1537,8 @@ pub extern "C" fn _start() -> ! {
                     let local_x = i32::from(pointer.x).saturating_sub(surface.bounds.x);
                     let local_y = i32::from(pointer.y).saturating_sub(surface.bounds.y);
                     let close_clicked = pointer.state == PointerState::Down
-                        && logos_atrium::STATUS_BAR_CLOSE_BOUNDS.contains(local_x, local_y);
+                        && logos_atrium::surface_close_bounds(surface.bounds)
+                            .contains(local_x, local_y);
                     let local = InputMessage::pointer(
                         local_x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
                         local_y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,

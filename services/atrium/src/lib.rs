@@ -19,9 +19,10 @@ pub const FULLSCREEN_SURFACE_BOUNDS: GuiRect = GuiRect::new(
     logos_abi::DEFAULT_SCREEN_WIDTH as u32,
     logos_abi::DEFAULT_SCREEN_HEIGHT as u32,
 );
+pub const TERMINAL_SURFACE_BOUNDS: GuiRect = GuiRect::new(160, 96, 960, 608);
 pub const STATUS_BAR_BOUNDS: GuiRect =
-    GuiRect::new(0, 0, logos_abi::DEFAULT_SCREEN_WIDTH as u32, 64);
-pub const STATUS_BAR_CLOSE_BOUNDS: GuiRect = GuiRect::new(1200, 0, 80, 64);
+    GuiRect::new(0, 0, logos_abi::DEFAULT_SCREEN_WIDTH as u32, 32);
+pub const STATUS_BAR_CLOSE_BOUNDS: GuiRect = GuiRect::new(1200, 0, 80, 32);
 pub const CALCULATOR_BUTTON_LEFT: i32 = 20;
 pub const CALCULATOR_BUTTON_TOP: i32 = 100;
 pub const CALCULATOR_BUTTON_WIDTH: i32 = 56;
@@ -82,6 +83,15 @@ pub const COMMAND_MENU_ITEM_TOP: i32 = 304;
 pub const COMMAND_MENU_ITEM_WIDTH: u32 = 512;
 pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 64;
 pub const COMMAND_MENU_ITEM_GAP: i32 = 12;
+
+pub const fn surface_close_bounds(surface: GuiRect) -> GuiRect {
+    GuiRect::new(
+        surface.width.saturating_sub(STATUS_BAR_CLOSE_BOUNDS.width) as i32,
+        0,
+        STATUS_BAR_CLOSE_BOUNDS.width,
+        STATUS_BAR_CLOSE_BOUNDS.height,
+    )
+}
 
 pub const fn command_menu_item_bounds(index: usize) -> GuiRect {
     GuiRect::new(
@@ -263,8 +273,11 @@ impl Atrium {
         }
     }
 
-    pub const fn initial_surface_bounds(_app: AppId) -> GuiRect {
-        FULLSCREEN_SURFACE_BOUNDS
+    pub const fn initial_surface_bounds(app: AppId) -> GuiRect {
+        match app {
+            AppId::Terminal => TERMINAL_SURFACE_BOUNDS,
+            _ => FULLSCREEN_SURFACE_BOUNDS,
+        }
     }
 
     pub fn set_home_surface(&mut self, surface: SurfaceHandle) -> Result<(), AtriumError> {
@@ -1064,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn app_surfaces_are_fullscreen_and_close_button_is_bounded() {
+    fn app_surfaces_use_bounded_terminal_window_and_close_button_is_bounded() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
         for (index, app) in [AppId::Calculator, AppId::Files, AppId::Terminal, AppId::System]
@@ -1072,11 +1085,16 @@ mod tests {
             .enumerate()
         {
             let request = atrium.request_surface(app, client(index as u32 + 1)).unwrap();
-            assert_eq!(request.bounds(), FULLSCREEN_SURFACE_BOUNDS);
+            let expected = if app == AppId::Terminal {
+                TERMINAL_SURFACE_BOUNDS
+            } else {
+                FULLSCREEN_SURFACE_BOUNDS
+            };
+            assert_eq!(request.bounds(), expected);
             assert_eq!(request.mode(), SurfaceMode::Tiled);
         }
         assert!(STATUS_BAR_BOUNDS.contains(320, 16));
-        assert!(STATUS_BAR_CLOSE_BOUNDS.contains(1240, 32));
+        assert!(STATUS_BAR_CLOSE_BOUNDS.contains(1240, 16));
         assert!(!STATUS_BAR_CLOSE_BOUNDS.contains(599, 16));
     }
 
