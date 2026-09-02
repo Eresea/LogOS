@@ -10,7 +10,8 @@ use logos_abi::{
     GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, IpcStatus, MessageKind,
     RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
-const FPS_SURFACE_BOUNDS: GuiRect = GuiRect::new(8, 8, 72, 24);
+const FPS_SURFACE_BOUNDS: GuiRect =
+    GuiRect::new(logos_abi::DEFAULT_SCREEN_WIDTH as i32 - 80, 8, 72, 24);
 const FPS_NODE_ID: u32 = u32::MAX - 1;
 const FPS_Z_ORDER: i16 = i16::MAX;
 const FPS_WINDOW_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
