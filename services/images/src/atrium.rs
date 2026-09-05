@@ -464,14 +464,14 @@ fn draw_app(
                     surface.bounds.height,
                 ),
             );
-            push_surface_text(&mut detail, surface.bounds, 32, 82, 0xffffff, calculator.display());
+            push_surface_text(&mut detail, surface.bounds, 32, 82, 0xffffff, b"No files found");
             push_surface_text(
                 &mut detail,
                 surface.bounds,
                 24,
                 132,
                 0xb8c7da,
-                b"0-9  +  -  *  /  Enter",
+                b"Storage browser is not available yet",
             );
             let _ = common::ipc_send_scene_batch(display, &detail, 7);
         }
