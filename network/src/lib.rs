@@ -683,6 +683,8 @@ mod tests {
         service.reset();
         assert_eq!(service.close(handle, false), Err(SocketError::Stale));
         assert_eq!(service.state(), NetworkState::Configuring);
+        let request = NetworkRequest::new(NetworkOperation::TcpConnect, 1);
+        assert_eq!(service.handle(request).result, NetworkResult::WouldBlock);
     }
 
     #[test]
