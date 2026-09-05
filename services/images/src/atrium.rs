@@ -479,7 +479,7 @@ fn draw_app(
             draw_surface_chrome(display, surface, sequence, title, false, true);
         }
         logos_atrium::AppId::System => {
-            draw_surface_chrome(display, surface, sequence, title, false, true);
+            // The System service owns this retained scene, including its chrome.
         }
     }
 }

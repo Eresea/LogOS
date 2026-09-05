@@ -140,7 +140,16 @@ fn build_status(surface: SurfaceHandle, sequence: u32) -> Option<SystemScene> {
             4,
             GuiDrawCommand::fill_rounded_rect(STATUS_BAR_CLOSE_BOUNDS, 0x9f3b3b, 6),
         ))
-        || !push_text(&mut scene, surface, sequence, 5, 616, 10, 0xffffff, b"X")
+        || !push_text(
+            &mut scene,
+            surface,
+            sequence,
+            5,
+            STATUS_BAR_CLOSE_BOUNDS.x.saturating_add(16),
+            10,
+            0xffffff,
+            b"X",
+        )
         || !push_text(&mut scene, surface, sequence, 6, 20, 48, 0x7890aa, b"Service manager status")
     {
         return None;
