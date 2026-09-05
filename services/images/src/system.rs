@@ -193,7 +193,6 @@ fn build_status(surface: SurfaceHandle, sequence: u32) -> Option<SystemScene> {
         cursor = response.cursor;
     }
     scene.finish();
-    proof_line(b"LogOS vNext: System scene built");
     Some(scene)
 }
 
@@ -246,6 +245,7 @@ pub extern "C" fn _start() -> ! {
     let mut request_pending = false;
     let mut pending_scene = SystemScene::new();
     let mut pending_scene_index = 0usize;
+    let mut scene_reported = false;
     let mut heartbeat_ticks = 0u16;
     let mut response = AtriumSurfaceResponse::new(
         AtriumSurfaceRequest::new(AtriumApp::System, common::bootstrap_page().service, 1),
@@ -264,6 +264,10 @@ pub extern "C" fn _start() -> ! {
                 common::heartbeat();
                 continue;
             }
+        }
+        if pending_scene.len() != 0 && !scene_reported {
+            proof_line(b"LogOS vNext: System scene built");
+            scene_reported = true;
         }
         if !surface.is_valid() && !request_pending {
             let request = AtriumSurfaceRequest::new(
@@ -288,6 +292,7 @@ pub extern "C" fn _start() -> ! {
                     &mut pending_scene,
                     &mut pending_scene_index,
                 );
+                scene_reported = false;
             } else if response.is_revoke() || response.status == logos_abi::GuiStatus::NotFound {
                 surface = SurfaceHandle::EMPTY;
             }

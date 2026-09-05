@@ -430,6 +430,19 @@ function Framebuffer-HasSystemRows {
     return $false
 }
 
+function Wait-QmpSystemFramebuffer {
+    param([hashtable]$Qmp, [string]$Path, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+        if ((Framebuffer-HasSystemStatusBar $Path) -and (Framebuffer-HasSystemRows $Path)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    return $false
+}
+
 function Framebuffer-HasNativeCursor {
     param([string]$Path, [int]$X, [int]$Y)
     if (-not (Test-Path $Path)) { return $false }
@@ -770,10 +783,8 @@ try {
             if (-not (Wait-ProofMarkerAfter 'LogOS vNext: System scene built' $systemSceneMarker $TimeoutSeconds)) {
                 throw 'System service did not build its scene after activation.'
             }
-            Start-Sleep -Seconds 2
             $systemFrame = Join-Path $repoRoot "target\qemu-system-$PID.ppm"
-            Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $systemFrame } } | Out-Null
-            if (-not (Framebuffer-HasSystemStatusBar $systemFrame) -or -not (Framebuffer-HasSystemRows $systemFrame)) {
+            if (-not (Wait-QmpSystemFramebuffer $qmp $systemFrame $TimeoutSeconds)) {
                 throw 'System surface did not publish its status bar and service rows.'
             }
         }
