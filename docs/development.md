@@ -1,11 +1,11 @@
 # Development checks
 
-Host scheduler checks:
+Host checks:
 
 ```text
 cargo fmt --check
-cargo test --lib
-cargo clippy --lib -- -D warnings
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The complete host gate is:
