@@ -218,6 +218,13 @@ fn send_network(operation: &mut Operation, mut request: NetworkRequest) -> bool 
 
 fn retry_network(operation: &mut Operation) -> bool {
     let mut request = match operation.phase {
+        FetchPhase::Connect => {
+            let mut request = NetworkRequest::new(NetworkOperation::TcpConnect, 1);
+            request.timeout_ticks = logos_abi::NETWORK_TCP_CONNECT_TIMEOUT_TICKS;
+            request.address = operation.url.address;
+            request.port = operation.url.port;
+            request
+        }
         FetchPhase::SendRequest => NetworkRequest::new(NetworkOperation::TcpWrite, 1),
         FetchPhase::ReadResponse => NetworkRequest::new(NetworkOperation::TcpRead, 1),
         _ => return false,
