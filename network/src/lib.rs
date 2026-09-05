@@ -525,7 +525,11 @@ impl NetworkService {
             return response;
         }
         if self.state != NetworkState::Ready && request.operation != NetworkOperation::Status {
-            response.result = NetworkResult::Unavailable;
+            response.result = if self.state == NetworkState::Configuring {
+                NetworkResult::WouldBlock
+            } else {
+                NetworkResult::Unavailable
+            };
             return response;
         }
         response.generation = self.generation;
@@ -679,6 +683,13 @@ mod tests {
         service.reset();
         assert_eq!(service.close(handle, false), Err(SocketError::Stale));
         assert_eq!(service.state(), NetworkState::Configuring);
+    }
+
+    #[test]
+    fn configuring_requests_wait_for_readiness() {
+        let mut service = NetworkService::new(config());
+        let request = NetworkRequest::new(NetworkOperation::TcpConnect, 1);
+        assert_eq!(service.handle(request).result, NetworkResult::WouldBlock);
     }
 
     #[test]
