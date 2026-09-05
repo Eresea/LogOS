@@ -14,7 +14,7 @@ if ($Stage -in @('all', 'host')) {
     cargo clippy --workspace --all-targets -- -D warnings
 
     Write-Host '== host tests =='
-    cargo test --lib
+    cargo test --workspace
 }
 
 if ($Stage -in @('all', 'uefi')) {

@@ -17,7 +17,7 @@ jobs:
       - run: rustup target add x86_64-unknown-uefi x86_64-unknown-none
       - run: cargo fmt --check
       - run: cargo test --workspace
-      - run: cargo clippy --lib -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy --target x86_64-unknown-uefi -- -D warnings
       - run: cargo build --release --target x86_64-unknown-uefi
       - run: cargo build --target x86_64-unknown-none -p logos-service-images --bins
