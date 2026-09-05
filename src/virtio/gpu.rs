@@ -35,6 +35,7 @@ const COMMON_QUEUE_DESC: usize = 0x20;
 const COMMON_QUEUE_DRIVER: usize = 0x28;
 const COMMON_QUEUE_DEVICE: usize = 0x30;
 const COMPLETION_SPIN_LIMIT: usize = 1_000_000;
+const COMPLETION_TIMEOUT_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
 const RESOURCE_ID: u32 = 1;
 const SECONDARY_RESOURCE_ID: u32 = 3;
 const FRAME_SLOT_COUNT: usize = 2;
@@ -248,6 +249,7 @@ struct PendingFrame {
     lease: FrameLease,
     phase: FramePhase,
     completion: u16,
+    deadline: u64,
     rects: [FrameRect; logos_abi::MAX_DISPLAY_PRESENT_RECTS],
     rect_count: usize,
     rect_index: usize,
@@ -325,8 +327,13 @@ pub(crate) fn present() -> bool {
             .ok_or(GpuError::InvalidFramebuffer)?;
         device.present(present_state, cursor_state, framebuffer)
     });
-    if result.is_err() {
-        crate::arch::set_hardware_cursor(false);
+    if let Err(error) = result {
+        if !matches!(error, GpuError::Busy) {
+            DEVICE_READY.store(false, Ordering::Release);
+            crate::arch::set_hardware_cursor(false);
+            #[cfg(feature = "qemu-proof")]
+            crate::arch_proof_line(b"LogOS vNext: VirtIO GPU software fallback");
+        }
     }
     result.is_ok()
 }
@@ -853,6 +860,7 @@ impl VirtioGpuDevice {
             lease,
             phase: FramePhase::Transfer,
             completion,
+            deadline: crate::arch::current_ticks().saturating_add(COMPLETION_TIMEOUT_TICKS),
             rects,
             rect_count,
             rect_index: 0,
@@ -862,6 +870,9 @@ impl VirtioGpuDevice {
 
     fn poll_pending_frame(&mut self) -> Result<(), GpuError> {
         let Some(mut pending) = self.pending_frame else { return Ok(()) };
+        if crate::arch::current_ticks() >= pending.deadline {
+            return Err(GpuError::Timeout);
+        }
         if !Self::poll_command(self.queue, pending.completion)? {
             return Ok(());
         }
@@ -872,6 +883,8 @@ impl VirtioGpuDevice {
                     resource_id: frame_resource_id(pending.lease.slot),
                     rect: pending.rects[pending.rect_index].flush,
                 })?;
+                pending.deadline =
+                    crate::arch::current_ticks().saturating_add(COMPLETION_TIMEOUT_TICKS);
                 self.pending_frame = Some(pending);
             }
             FramePhase::Flush if pending.rect_index + 1 < pending.rect_count => {
@@ -881,6 +894,8 @@ impl VirtioGpuDevice {
                     resource_id: frame_resource_id(pending.lease.slot),
                     rect: pending.rects[pending.rect_index].transfer,
                 })?;
+                pending.deadline =
+                    crate::arch::current_ticks().saturating_add(COMPLETION_TIMEOUT_TICKS);
                 self.pending_frame = Some(pending);
             }
             FramePhase::Flush => {
@@ -890,6 +905,8 @@ impl VirtioGpuDevice {
                     resource_id: frame_resource_id(pending.lease.slot),
                     rect: self.framebuffer,
                 })?;
+                pending.deadline =
+                    crate::arch::current_ticks().saturating_add(COMPLETION_TIMEOUT_TICKS);
                 self.pending_frame = Some(pending);
             }
             FramePhase::Scanout => {
