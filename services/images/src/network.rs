@@ -491,7 +491,10 @@ mod stack {
     }
 
     pub fn take_tx(page: u16, output: &mut [u8]) -> Option<usize> {
-        if !ready() || page < logos_abi::NETWORK_RX_PACKET_PAGES as u16 {
+        if !ready()
+            || page < logos_abi::NETWORK_RX_PACKET_PAGES as u16
+            || page >= logos_abi::NETWORK_PACKET_PAGE_COUNT as u16
+        {
             return None;
         }
         unsafe {
