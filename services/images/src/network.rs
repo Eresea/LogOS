@@ -165,7 +165,10 @@ mod stack {
     }
 
     pub fn enqueue_rx(page: u16, length: u16) -> bool {
-        if !ready() || page >= logos_abi::NETWORK_PACKET_PAGE_COUNT as u16 {
+        if !ready()
+            || page >= logos_abi::NETWORK_PACKET_PAGE_COUNT as u16
+            || usize::from(length) > logos_abi::NETWORK_MAX_FRAME_BYTES
+        {
             return false;
         }
         let address = logos_abi::NETWORK_PACKET_BASE + usize::from(page) * 4096;
