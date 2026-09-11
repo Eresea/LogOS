@@ -194,7 +194,6 @@ pub struct ProtocolSocketBuffers<'a> {
     pub icmp_tx_bytes: &'a mut [u8],
     pub tcp_rx_bytes: &'a mut [u8],
     pub tcp_tx_bytes: &'a mut [u8],
-    pub dhcp_rx_bytes: &'a mut [u8],
 }
 
 /// Install one fixed ICMP, UDP, and TCP socket in the caller-owned SocketSet.
@@ -228,7 +227,6 @@ pub fn add_protocol_sockets<'a>(
         smoltcp::socket::tcp::SocketBuffer::new(&mut buffers.tcp_rx_bytes[..]),
         smoltcp::socket::tcp::SocketBuffer::new(&mut buffers.tcp_tx_bytes[..]),
     );
-    let _ = buffers.dhcp_rx_bytes;
     [sockets.add(icmp), sockets.add(udp), sockets.add(tcp)]
 }
 
