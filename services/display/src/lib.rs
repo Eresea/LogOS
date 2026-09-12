@@ -647,6 +647,7 @@ impl Display {
             && self.surface_initialized
             && !self.gui_background_pending
             && !self.render_pending()
+            && !self.gui.has_staged_scene()
     }
 
     fn queue_cursor_damage(&mut self, rect: GuiRect) {
@@ -1969,7 +1970,7 @@ mod tests {
         let mut root =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
         root.bounds = GuiRect::new(0, 0, 64, 32);
-        display.gui_mut().create(11, root).unwrap();
+        let root_handle = display.gui_mut().create(11, root).unwrap().surface;
         display.gui_mut().take_damage();
         display.ensure_backbuffer(64 * 32 * 4).unwrap();
         display.surface_initialized = true;
@@ -1991,6 +1992,17 @@ mod tests {
 
         move_event.frame = 3;
         assert!(display.apply_cursor_scene_op(move_event));
+        assert!(display.gui.has_damage());
+
+        display.gui_damage_count = 0;
+        let mut staged = GuiSceneOp::clear(root_handle, 4);
+        staged.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        display.gui_mut().apply_scene_op(11, staged).unwrap();
+        assert!(display.gui.has_staged_scene());
+        move_event.frame = 4;
+        move_event.command.x = 48;
+        assert!(display.apply_cursor_scene_op(move_event));
+        assert_eq!(display.cursor_damage_count, 0);
         assert!(display.gui.has_damage());
     }
 

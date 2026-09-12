@@ -485,6 +485,10 @@ impl GuiSurfaceRegistry {
         self.damage_count != 0
     }
 
+    pub fn has_staged_scene(&self) -> bool {
+        self.slots.iter().any(|slot| slot.occupied() && slot.staged_frame != 0)
+    }
+
     pub fn contains(&self, handle: SurfaceHandle) -> bool {
         self.lookup(handle).is_ok()
     }
