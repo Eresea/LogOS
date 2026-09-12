@@ -1412,7 +1412,8 @@ mod tests {
         let mut restored = UserCatalog::new();
         restored.restore_snapshot(&snapshot[..length]).unwrap();
         assert!(restored.is_claimed());
-        assert!(restored.login(b"admin", b"password").is_ok());
+        let (_, restored_session) = restored.login(b"admin", b"password").unwrap();
+        assert_ne!(session, restored_session);
         assert_eq!(
             restored.capability(session, NamespaceCapabilityHandle::EMPTY),
             Err(UserError::Stale)
