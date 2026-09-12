@@ -700,6 +700,9 @@ impl UserCatalog {
                 offset += encoded_role_bytes();
             }
         }
+        if !restored.snapshot_is_valid() {
+            return Err(UserError::Corrupt);
+        }
         self.claimed = restored.claimed;
         self.next_user = restored.next_user;
         self.next_role = restored.next_role;
@@ -988,6 +991,65 @@ impl UserCatalog {
         self.next_lineage = self.next_lineage.wrapping_add(1).max(1);
         value
     }
+
+    fn snapshot_is_valid(&self) -> bool {
+        let mut user_count = 0;
+        for (slot, user) in self.users.iter().enumerate() {
+            let Some(user) = user else { continue };
+            user_count += 1;
+            if user.id.value >= self.next_user
+                || user.verifier.version != ARGON2_VERSION
+                || user.role_count > MAX_ROLE_GRANTS
+                || user.next_lineage == 0
+                || self.users[..slot]
+                    .iter()
+                    .flatten()
+                    .any(|other| other.id == user.id || other.name == user.name)
+            {
+                return false;
+            }
+            for (index, role) in user.roles.iter().enumerate() {
+                if index < user.role_count {
+                    if !role.is_valid()
+                        || !self.roles.iter().flatten().any(|record| record.id == *role)
+                    {
+                        return false;
+                    }
+                } else if role.is_valid() {
+                    return false;
+                }
+            }
+        }
+        if self.claimed != (user_count != 0) {
+            return false;
+        }
+
+        for (slot, role) in self.roles.iter().enumerate() {
+            let Some(role) = role else { continue };
+            if role.id.value >= self.next_role
+                || role.template_count > MAX_ROLE_TEMPLATES
+                || self.roles[..slot]
+                    .iter()
+                    .flatten()
+                    .any(|other| other.id == role.id || other.name == role.name)
+            {
+                return false;
+            }
+            for (index, template) in role.templates.iter().enumerate() {
+                if index < role.template_count {
+                    let Some(template) = template else { return false };
+                    if !template.rights.is_valid()
+                        || (template.root != NamespaceRoot::EMPTY && !template.root.is_valid())
+                    {
+                        return false;
+                    }
+                } else if template.is_some() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl Default for UserCatalog {
@@ -1060,7 +1122,11 @@ fn decode_user(input: &[u8], offset: &mut usize) -> Result<UserRecord, UserError
     for role in &mut roles {
         let value = read_u64(input, offset)?;
         let generation = read_u32(input, offset)?;
-        *role = RoleId::new(value, generation).unwrap_or(RoleId::EMPTY);
+        *role = if value == 0 && generation == 0 {
+            RoleId::EMPTY
+        } else {
+            RoleId::new(value, generation).ok_or(UserError::Corrupt)?
+        };
     }
     let next_lineage = read_u64(input, offset)?;
     if next_lineage == 0 {
@@ -1126,6 +1192,8 @@ fn decode_role(input: &[u8], offset: &mut usize) -> Result<RoleRecord, UserError
                 && (!rights.is_valid()
                     || (root_object != 0 && root_generation == 0)
                     || (root_object == 0 && root_generation != 0)))
+            || (present == 0
+                && (rights != NamespaceRights::NONE || root_object != 0 || root_generation != 0))
         {
             return Err(UserError::Corrupt);
         }
@@ -1349,6 +1417,23 @@ mod tests {
             restored.capability(session, NamespaceCapabilityHandle::EMPTY),
             Err(UserError::Stale)
         );
+    }
+
+    #[test]
+    fn snapshot_restore_rejects_broken_identity_invariants() {
+        let mut catalog = UserCatalog::new();
+        let mut entropy = Entropy(31);
+        catalog.claim(b"admin", b"password", root(8), &mut entropy).unwrap();
+        let mut snapshot = [0; USER_SNAPSHOT_BYTES];
+        let length = catalog.encode_snapshot(&mut snapshot).unwrap();
+
+        snapshot[16..24].copy_from_slice(&1u64.to_le_bytes());
+        let mut restored = UserCatalog::new();
+        assert_eq!(restored.restore_snapshot(&snapshot[..length]), Err(UserError::Corrupt));
+
+        let length = catalog.encode_snapshot(&mut snapshot).unwrap();
+        snapshot[149..157].fill(0);
+        assert_eq!(restored.restore_snapshot(&snapshot[..length]), Err(UserError::Corrupt));
     }
 
     #[test]
