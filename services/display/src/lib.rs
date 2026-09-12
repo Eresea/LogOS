@@ -647,8 +647,6 @@ impl Display {
             && self.surface_initialized
             && !self.gui_background_pending
             && !self.render_pending()
-            && !self.gui.has_damage()
-            && !self.gui.has_staged_scene()
     }
 
     fn queue_cursor_damage(&mut self, rect: GuiRect) {
@@ -1301,6 +1299,14 @@ impl Display {
             if self.gui_damage_count == 0 {
                 if background_filled {
                     self.present_all(framebuffer, width, height, stride);
+                    self.render_cursor_layers(
+                        framebuffer,
+                        width,
+                        height,
+                        stride,
+                        format,
+                        GuiRect::new(0, 0, width as u32, height as u32),
+                    );
                 }
                 return Ok(0);
             }
@@ -1357,13 +1363,10 @@ impl Display {
             self.gui_tile_index = 0;
             return Ok(rendered);
         }
-        if background_filled {
-            self.present_all(framebuffer, width, height, stride);
-        }
         let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
         let mut damage_count = 0;
-        let mut presented_tiles = [GuiRect::EMPTY; GUI_TILES_PER_STEP];
-        let mut presented_tile_count = 0;
+        let composition_damage = self.gui_damage;
+        let composition_damage_count = self.gui_damage_count;
         let tiles_per_step = if self.hardware_cursor {
             GUI_TILES_PER_STEP
         } else {
@@ -1395,8 +1398,6 @@ impl Display {
                 damage[damage_count] = tile;
                 damage_count += 1;
             }
-            presented_tiles[presented_tile_count] = tile;
-            presented_tile_count += 1;
             self.advance_gui_tile(rect, right, bottom);
         }
         if damage_count != 0 {
@@ -1435,16 +1436,6 @@ impl Display {
                     &damage,
                     damage_count,
                 );
-            self.present_damage(
-                framebuffer,
-                width,
-                height,
-                stride,
-                &presented_tiles[..presented_tile_count],
-            );
-            for tile in presented_tiles[..presented_tile_count].iter().copied() {
-                self.render_cursor_layers(framebuffer, width, height, stride, format, tile);
-            }
         }
         if self.gui_tile_index >= self.gui_damage_count {
             let (next_damage, next_count) = self.gui.take_damage();
@@ -1453,6 +1444,17 @@ impl Display {
             if self.gui_damage_count != 0 {
                 self.gui_tile_x = self.gui_damage[0].x;
                 self.gui_tile_y = self.gui_damage[0].y;
+            } else {
+                self.present_damage(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    &composition_damage[..composition_damage_count],
+                );
+                for rect in composition_damage[..composition_damage_count].iter().copied() {
+                    self.render_cursor_layers(framebuffer, width, height, stride, format, rect);
+                }
             }
         }
         Ok(rendered)
@@ -1731,6 +1733,28 @@ mod tests {
     }
 
     #[test]
+    fn tiled_gui_composition_does_not_present_partial_frame() {
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = GuiRect::new(0, 0, 256, 256);
+        display.gui_mut().create(11, root).unwrap();
+        let mut framebuffer = std::vec![0xaa; 320 * 256 * 4];
+
+        display.render_gui(&mut framebuffer, 320, 256, 320 * 4, PixelFormat::Bgr8).unwrap();
+
+        assert!(display.render_pending());
+        assert!(!display.presented());
+        assert_eq!(&framebuffer[(32 * 320 + 32) * 4..(32 * 320 + 32) * 4 + 4], &[0xaa; 4]);
+
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 320, 256, 320 * 4, PixelFormat::Bgr8).unwrap();
+        }
+        assert_eq!(&framebuffer[(32 * 320 + 32) * 4..(32 * 320 + 32) * 4 + 4], &[0, 0, 0, 0]);
+        assert_eq!(&framebuffer[(32 * 320 + 300) * 4..(32 * 320 + 300) * 4 + 4], &[0xaa; 4]);
+    }
+
+    #[test]
     fn retained_scene_text_update_repaints_the_framebuffer() {
         let mut display = Display::new(1);
         let mut root_request =
@@ -1971,7 +1995,7 @@ mod tests {
         let mut root =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
         root.bounds = GuiRect::new(0, 0, 64, 32);
-        let root_handle = display.gui_mut().create(11, root).unwrap().surface;
+        display.gui_mut().create(11, root).unwrap();
         display.gui_mut().take_damage();
         display.ensure_backbuffer(64 * 32 * 4).unwrap();
         display.surface_initialized = true;
@@ -1993,23 +2017,6 @@ mod tests {
 
         move_event.frame = 3;
         assert!(display.apply_cursor_scene_op(move_event));
-        assert!(display.gui.has_damage());
-
-        display.gui_damage_count = 0;
-        move_event.frame = 4;
-        move_event.command.x = 40;
-        assert!(display.apply_cursor_scene_op(move_event));
-        assert_eq!(display.cursor_damage_count, 0);
-        assert!(display.gui.has_damage());
-
-        let mut staged = GuiSceneOp::clear(root_handle, 4);
-        staged.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-        display.gui_mut().apply_scene_op(11, staged).unwrap();
-        assert!(display.gui.has_staged_scene());
-        move_event.frame = 5;
-        move_event.command.x = 48;
-        assert!(display.apply_cursor_scene_op(move_event));
-        assert_eq!(display.cursor_damage_count, 0);
         assert!(display.gui.has_damage());
     }
 

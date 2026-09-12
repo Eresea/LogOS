@@ -382,14 +382,14 @@ impl GuiSurfaceRegistry {
                     .iter()
                     .flatten()
                     .map(|node| node.command)
-                    .find(|command| is_surface_fill(*command))
+                    .find(|command| is_surface_background(*command, slot.bounds))
             } else {
                 slot.batches[..slot.batch_count as usize]
                     .iter()
                     .flatten()
                     .filter_map(|batch| batch.commands[..batch.command_count as usize].first())
                     .copied()
-                    .find(|command| is_surface_fill(*command))
+                    .find(|command| is_surface_background(*command, slot.bounds))
             };
             if command.is_some()
                 && (selected == usize::MAX
@@ -408,13 +408,13 @@ impl GuiSurfaceRegistry {
                     .iter()
                     .flatten()
                     .map(|node| node.command)
-                    .find(|command| is_surface_fill(*command))
+                    .find(|command| is_surface_background(*command, slot.bounds))
                     .map(|command| command.color)
             } else {
                 slot.batches.iter().flatten().find_map(|batch| {
                     batch.commands[..batch.command_count as usize]
                         .first()
-                        .filter(|command| is_surface_fill(**command))
+                        .filter(|command| is_surface_background(**command, slot.bounds))
                         .map(|command| command.color)
                 })
             }
@@ -483,10 +483,6 @@ impl GuiSurfaceRegistry {
 
     pub const fn has_damage(&self) -> bool {
         self.damage_count != 0
-    }
-
-    pub fn has_staged_scene(&self) -> bool {
-        self.slots.iter().any(|slot| slot.occupied() && slot.staged_frame != 0)
     }
 
     pub fn contains(&self, handle: SurfaceHandle) -> bool {
@@ -910,6 +906,13 @@ fn is_surface_fill(command: GuiDrawCommand) -> bool {
     command.kind == GuiDrawKind::FillRect
         && command.is_identity_transform()
         && GuiRect::new(command.x, command.y, command.width, command.height) == GuiRect::SURFACE
+}
+
+fn is_surface_background(command: GuiDrawCommand, bounds: GuiRect) -> bool {
+    is_surface_fill(command)
+        || (command.kind == GuiDrawKind::FillRect
+            && command.is_identity_transform()
+            && command_rect(command) == bounds)
 }
 
 fn is_opaque_occluder(command: GuiDrawCommand) -> bool {
@@ -2359,6 +2362,24 @@ mod tests {
         assert_eq!(replacement.slot, modal.slot);
         assert_ne!(replacement.generation, modal.generation);
         assert!(!registry.contains(modal));
+    }
+
+    #[test]
+    fn full_surface_fill_is_detected_as_background() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let bounds = GuiRect::new(0, 0, 64, 64);
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, bounds))
+            .unwrap()
+            .surface;
+        registry
+            .apply_scene_op(
+                7,
+                GuiSceneOp::upsert(root, 1, 1, GuiDrawCommand::fill_rect(bounds, 0x102030)),
+            )
+            .unwrap();
+
+        assert_eq!(registry.background_color(), Some(0x102030));
     }
 
     #[test]
