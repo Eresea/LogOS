@@ -267,6 +267,7 @@ pub struct UserCatalog {
     users: [Option<UserRecord>; MAX_USERS],
     roles: [Option<RoleRecord>; MAX_ROLES],
     sessions: [Option<SessionRecord>; MAX_SESSIONS],
+    session_generations: [u32; MAX_SESSIONS],
 }
 
 pub struct UserService<E> {
@@ -427,6 +428,7 @@ impl UserCatalog {
             users: [None; MAX_USERS],
             roles: [None; MAX_ROLES],
             sessions: [None; MAX_SESSIONS],
+            session_generations: [1; MAX_SESSIONS],
         }
     }
 
@@ -534,10 +536,15 @@ impl UserCatalog {
         let index = self.find_user(name).ok_or(UserError::NotFound)?;
         let user = self.users[index].ok_or(UserError::Corrupt)?;
         user.verifier.verify(password)?;
-        let slot = self.sessions.iter().position(Option::is_none).ok_or(UserError::Capacity)?;
+        let slot = self
+            .sessions
+            .iter()
+            .position(|session| session.is_none_or(|record| record.revoked))
+            .ok_or(UserError::Capacity)?;
         let lineage = self.next_lineage();
-        let generation = 1;
+        let generation = self.session_generations[slot];
         let handle = SessionHandle::new(slot as u32, generation).ok_or(UserError::Corrupt)?;
+        self.session_generations[slot] = generation.wrapping_add(1).max(1);
         self.sessions[slot] = Some(SessionRecord {
             handle,
             user: user.id,
@@ -552,6 +559,7 @@ impl UserCatalog {
             if let Some(role) = self.roles.iter().flatten().find(|role| role.id == role_id) {
                 for template in role.templates[..role.template_count].iter().flatten().copied() {
                     if template_count == templates.len() {
+                        self.sessions[slot] = None;
                         return Err(UserError::Capacity);
                     }
                     templates[template_count] = Some(template);
@@ -561,7 +569,10 @@ impl UserCatalog {
         }
         for template in templates[..template_count].iter().flatten().copied() {
             let root = if template.root.is_valid() { template.root } else { user.home };
-            self.attach_capability(handle, root, template.rights)?;
+            if let Err(error) = self.attach_capability(handle, root, template.rights) {
+                self.sessions[slot] = None;
+                return Err(error);
+            }
         }
         Ok((user.id, handle))
     }
@@ -679,6 +690,9 @@ impl UserCatalog {
         self.next_lineage = restored.next_lineage;
         self.users = restored.users;
         self.roles = restored.roles;
+        for generation in &mut self.session_generations {
+            *generation = generation.wrapping_add(1).max(1);
+        }
         self.sessions = [None; MAX_SESSIONS];
         Ok(())
     }
@@ -1337,5 +1351,25 @@ mod tests {
         assert!(response.user.is_valid());
         assert!(!response.session.is_valid());
         assert!(service.catalog().is_claimed());
+    }
+
+    #[test]
+    fn revoked_sessions_reuse_slots_without_revalidating_old_handles() {
+        let mut catalog = UserCatalog::new();
+        let mut entropy = Entropy(29);
+        catalog.claim(b"admin", b"password", root(7), &mut entropy).unwrap();
+        let (_, first) = catalog.login(b"admin", b"password").unwrap();
+        for _ in 1..MAX_SESSIONS {
+            catalog.login(b"admin", b"password").unwrap();
+        }
+        assert_eq!(catalog.login(b"admin", b"password"), Err(UserError::Capacity));
+        catalog.logout(first).unwrap();
+        let (_, replacement) = catalog.login(b"admin", b"password").unwrap();
+        assert_eq!(replacement.slot, first.slot);
+        assert_ne!(replacement.generation, first.generation);
+        assert_eq!(
+            catalog.capability(first, NamespaceCapabilityHandle::EMPTY),
+            Err(UserError::Stale)
+        );
     }
 }
