@@ -295,6 +295,16 @@ impl PackageRequest {
         if self.flags != 0 || self.reserved2 != 0 || self.request_id == 0 {
             return Err(PackageStatus::Invalid);
         }
+        match self.operation {
+            PackageOperation::Lookup
+                if self.package_generation == 0 && self.offset == 0 && self.length == 0 => {}
+            PackageOperation::Read
+                if self.package_generation != 0
+                    && (self.length as usize) <= PACKAGE_TRANSFER_BYTES
+                    && self.length != 0
+                    && self.offset.checked_add(self.length as u32).is_some() => {}
+            _ => return Err(PackageStatus::Invalid),
+        }
         self.target.validate()?;
         Ok(self.target)
     }
@@ -450,6 +460,11 @@ mod tests {
         let mut malformed = request;
         malformed.flags = 1;
         assert_eq!(malformed.validate(capability(), 3, 9), Err(PackageStatus::Invalid));
+        let mut malformed_read = request;
+        malformed_read.operation = PackageOperation::Read;
+        malformed_read.package_generation = 1;
+        malformed_read.length = (PACKAGE_TRANSFER_BYTES + 1) as u16;
+        assert_eq!(malformed_read.validate(capability(), 3, 9), Err(PackageStatus::Invalid));
     }
 
     #[test]
