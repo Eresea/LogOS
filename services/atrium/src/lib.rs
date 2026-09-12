@@ -763,7 +763,7 @@ impl Atrium {
             }
             AtriumAction::Split(direction) => {
                 self.next_split = direction;
-                self.split_focused(direction)
+                self.split_focused(direction, true)
             }
             AtriumAction::CloseFocused => self.close_focused().map(|_| ()),
             AtriumAction::Logout => {
@@ -833,7 +833,7 @@ impl Atrium {
         if !self.can_split_focused(split) {
             return Ok(());
         }
-        self.split_focused(split)?;
+        self.split_focused(split, false)?;
         if matches!(direction, SurfaceDirection::Right | SurfaceDirection::Down) {
             let target =
                 self.directional_leaf(surface.id, direction).ok_or(AtriumError::NotFound)?;
@@ -850,7 +850,7 @@ impl Atrium {
             current_bounds.x + current_bounds.width as i32 / 2,
             current_bounds.y + current_bounds.height as i32 / 2,
         );
-        let mut best: Option<(usize, (u32, u32))> = None;
+        let mut best: Option<(usize, (u8, u32, u32))> = None;
         for (index, node) in self.layout_nodes.iter().enumerate() {
             let Some(LayoutNode::Leaf { surface_id: candidate, .. }) = node else { continue };
             if *candidate == Some(surface_id) {
@@ -861,6 +861,16 @@ impl Atrium {
                 continue;
             };
             let center = (bounds.x + bounds.width as i32 / 2, bounds.y + bounds.height as i32 / 2);
+            let aligned = match direction {
+                SurfaceDirection::Left | SurfaceDirection::Right => {
+                    current_bounds.y < bounds.y.saturating_add(bounds.height as i32)
+                        && bounds.y < current_bounds.y.saturating_add(current_bounds.height as i32)
+                }
+                SurfaceDirection::Up | SurfaceDirection::Down => {
+                    current_bounds.x < bounds.x.saturating_add(bounds.width as i32)
+                        && bounds.x < current_bounds.x.saturating_add(current_bounds.width as i32)
+                }
+            };
             let (primary, secondary) = match direction {
                 SurfaceDirection::Left if center.0 < current_center.0 => (
                     (current_center.0 - center.0) as u32,
@@ -880,7 +890,7 @@ impl Atrium {
                 ),
                 _ => continue,
             };
-            let distance = (primary, secondary);
+            let distance = (u8::from(!aligned), primary, secondary);
             if best.is_none_or(|(_, best_distance)| distance < best_distance) {
                 best = Some((index, distance));
             }
@@ -1041,8 +1051,12 @@ impl Atrium {
         }
     }
 
-    fn split_focused(&mut self, direction: SplitDirection) -> Result<(), AtriumError> {
-        if self.find_empty_leaf(self.layout_root).is_some() {
+    fn split_focused(
+        &mut self,
+        direction: SplitDirection,
+        require_full_layout: bool,
+    ) -> Result<(), AtriumError> {
+        if require_full_layout && self.find_empty_leaf(self.layout_root).is_some() {
             return Err(AtriumError::Capacity);
         }
         let Some(surface) = self.focused_surface() else { return Err(AtriumError::NotFound) };
@@ -1762,6 +1776,16 @@ mod tests {
         let moved = atrium.surface(first.id).unwrap();
         assert!(moved.bounds.x > FULLSCREEN_SURFACE_BOUNDS.x);
         assert!(moved.bounds.width < FULLSCREEN_SURFACE_BOUNDS.width);
+
+        let action = atrium.input(&ctrl_alt(KeyCode::DOWN));
+        assert_eq!(action, AtriumAction::MoveFocusedInDirection(SurfaceDirection::Down));
+        atrium.apply_action(action).unwrap();
+        assert_eq!(atrium.focused_surface().unwrap().id, first.id);
+        let moved = atrium.surface(first.id).unwrap();
+        assert!(moved.bounds.x > FULLSCREEN_SURFACE_BOUNDS.x);
+        assert!(moved.bounds.y > FULLSCREEN_SURFACE_BOUNDS.y);
+        assert!(moved.bounds.width < FULLSCREEN_SURFACE_BOUNDS.width);
+        assert!(moved.bounds.height < FULLSCREEN_SURFACE_BOUNDS.height);
 
         let second = atrium
             .spawn_surface(atrium.request_surface(AppId::System, client(2)).unwrap(), surface(2))
