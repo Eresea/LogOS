@@ -1517,7 +1517,9 @@ impl UserClient {
             self.fail(b"user response malformed\r\n");
             return true;
         };
-        if bytes.len() != core::mem::size_of::<UserResponse>() {
+        if bytes.len() != core::mem::size_of::<UserResponse>()
+            || !UserResponse::wire_enums_valid(bytes)
+        {
             self.fail(b"user response malformed\r\n");
             return true;
         }

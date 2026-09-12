@@ -152,6 +152,9 @@ impl CatalogTransport {
                     if bytes.len() != core::mem::size_of::<UserStorageResponse>() {
                         return Err(UserError::Persistence);
                     }
+                    if !UserStorageResponse::wire_enums_valid(bytes) {
+                        return Err(UserError::Persistence);
+                    }
                     let value: UserStorageResponse =
                         unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) };
                     if !value.is_valid_for(request) {
@@ -347,7 +350,10 @@ pub extern "C" fn _start() -> ! {
         {
             let response = request
                 .as_bytes()
-                .filter(|bytes| bytes.len() == core::mem::size_of::<UserRequest>())
+                .filter(|bytes| {
+                    bytes.len() == core::mem::size_of::<UserRequest>()
+                        && UserRequest::wire_enums_valid(bytes)
+                })
                 .map(|bytes| unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) })
                 .map(|request: UserRequest| {
                     let mut response = unsafe {

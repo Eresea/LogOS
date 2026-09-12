@@ -195,9 +195,10 @@ pub extern "C" fn _start() -> ! {
             }
         }
         while common::ipc_receive_handle(user_receive, &mut response) == IpcStatus::Ok {
-            if let Some(bytes) =
-                response.as_bytes().filter(|bytes| bytes.len() == mem::size_of::<UserResponse>())
-            {
+            if let Some(bytes) = response.as_bytes().filter(|bytes| {
+                bytes.len() == mem::size_of::<UserResponse>()
+                    && UserResponse::wire_enums_valid(bytes)
+            }) {
                 let result: UserResponse = unsafe { ptr::read_unaligned(bytes.as_ptr().cast()) };
                 let probe = pending_probe.filter(|request| result.is_valid_for(*request));
                 let applied = shell.apply_user_response(result);

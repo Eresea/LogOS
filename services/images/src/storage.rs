@@ -557,6 +557,9 @@ fn handle_user_storage_request(
     if bytes.len() != core::mem::size_of::<UserStorageRequest>() {
         return None;
     }
+    if !UserStorageRequest::wire_enums_valid(bytes) {
+        return None;
+    }
     let request = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) };
     let mut response = UserStorageResponse::invalid(request);
     if !request.is_valid() {

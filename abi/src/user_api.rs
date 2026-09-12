@@ -221,11 +221,40 @@ pub enum UserStatus {
     Corrupt = 10,
 }
 
+impl UserStatus {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::Invalid),
+            2 => Some(Self::Unclaimed),
+            3 => Some(Self::AlreadyClaimed),
+            4 => Some(Self::NotFound),
+            5 => Some(Self::Unauthorized),
+            6 => Some(Self::BadCredentials),
+            7 => Some(Self::Stale),
+            8 => Some(Self::Revoked),
+            9 => Some(Self::Capacity),
+            10 => Some(Self::Corrupt),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum UserStorageOperation {
     Load = 1,
     Save = 2,
+}
+
+impl UserStorageOperation {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Load),
+            2 => Some(Self::Save),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,6 +265,19 @@ pub enum UserStorageStatus {
     Invalid = 2,
     Io = 3,
     Capacity = 4,
+}
+
+impl UserStorageStatus {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::NotFound),
+            2 => Some(Self::Invalid),
+            3 => Some(Self::Io),
+            4 => Some(Self::Capacity),
+            _ => None,
+        }
+    }
 }
 
 pub const USER_STORAGE_FLAG_BEGIN: u8 = 1 << 0;
@@ -283,6 +325,12 @@ impl UserStorageRequest {
             && self.data_len as usize <= USER_STORAGE_CHUNK_BYTES
             && self.flags & !(USER_STORAGE_FLAG_BEGIN | USER_STORAGE_FLAG_END) == 0
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| UserStorageOperation::from_raw(*raw).is_some())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -314,6 +362,15 @@ impl UserStorageResponse {
 
     pub const fn is_valid_for(self, request: UserStorageRequest) -> bool {
         self.operation as u8 == request.operation as u8 && self.request_id == request.request_id
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| UserStorageOperation::from_raw(*raw).is_some())
+            && bytes
+                .get(core::mem::offset_of!(Self, status))
+                .is_some_and(|raw| UserStorageStatus::from_raw(*raw).is_some())
     }
 }
 
@@ -378,6 +435,12 @@ impl UserRequest {
             && self.password_len as usize <= self.password.len()
             && self.rights.0 & !NamespaceRights::VALID == 0
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| UserOperation::from_raw(*raw).is_some())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -412,9 +475,64 @@ impl UserResponse {
     pub const fn is_valid_for(self, request: UserRequest) -> bool {
         self.operation as u8 == request.operation as u8 && self.request_id == request.request_id
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| UserOperation::from_raw(*raw).is_some())
+            && bytes
+                .get(core::mem::offset_of!(Self, status))
+                .is_some_and(|raw| UserStatus::from_raw(*raw).is_some())
+    }
 }
 
 const _: () = assert!(core::mem::size_of::<UserRequest>() <= MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<UserResponse>() <= MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<UserStorageRequest>() <= MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<UserStorageResponse>() <= MAX_IPC_BYTES);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn invalid_byte<T>(value: &T, offset: usize) -> [u8; MAX_IPC_BYTES] {
+        let bytes = unsafe {
+            core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
+        };
+        let mut invalid = [0; MAX_IPC_BYTES];
+        invalid[..bytes.len()].copy_from_slice(bytes);
+        invalid[offset] = u8::MAX;
+        invalid
+    }
+
+    #[test]
+    fn user_wire_enum_validation_rejects_invalid_request_and_responses() {
+        let request = UserRequest::new(UserOperation::Login, 1);
+        let response = UserResponse::new(request, UserStatus::Ok);
+        let storage_request = UserStorageRequest::new(UserStorageOperation::Load, 1, 0);
+        let storage_response = UserStorageResponse::invalid(storage_request);
+
+        assert!(UserRequest::wire_enums_valid(unsafe {
+            core::slice::from_raw_parts(
+                (&request as *const UserRequest).cast::<u8>(),
+                core::mem::size_of::<UserRequest>(),
+            )
+        }));
+        assert!(!UserRequest::wire_enums_valid(&invalid_byte(
+            &request,
+            core::mem::offset_of!(UserRequest, operation),
+        )));
+        assert!(!UserResponse::wire_enums_valid(&invalid_byte(
+            &response,
+            core::mem::offset_of!(UserResponse, status),
+        )));
+        assert!(!UserStorageRequest::wire_enums_valid(&invalid_byte(
+            &storage_request,
+            core::mem::offset_of!(UserStorageRequest, operation),
+        )));
+        assert!(!UserStorageResponse::wire_enums_valid(&invalid_byte(
+            &storage_response,
+            core::mem::offset_of!(UserStorageResponse, status),
+        )));
+    }
+}
