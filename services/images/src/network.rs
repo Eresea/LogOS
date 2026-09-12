@@ -548,6 +548,7 @@ fn response_message(response: NetworkResponse) -> IpcBytes {
 fn request_from_message(message: &IpcBytes) -> Option<NetworkRequest> {
     if message.kind != MessageKind::NetworkRequest
         || message.len as usize != mem::size_of::<NetworkRequest>()
+        || !NetworkRequest::wire_enums_valid(&message.bytes[..mem::size_of::<NetworkRequest>()])
     {
         return None;
     }
