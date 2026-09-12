@@ -21,7 +21,8 @@ sibling and collapses the empty split.
 The tree capacity is a safety bound, not a fixed application layout. Surface
 clients remain unaware of the tree and continue to receive only their own
 generation-safe surface reference. Atrium sends the existing surface `Update`
-operation to Display after layout changes; no new service or ABI is introduced.
+operation to Display after layout changes and sends the terminal client a
+bounded surface-geometry update through the Atrium response channel.
 
 The first implementation supports tiled surfaces, focus, divider dragging,
 immediate keyboard-triggered splits, and bounded minimum pane sizes. Floating
@@ -34,6 +35,8 @@ workspaces remain deferred.
   the workspace without hard-coded four-window geometry.
 - Display remains the sole framebuffer writer and still receives validated
   bounds through the existing control path.
+- The terminal service resizes its bounded emulator and render messages from
+  the admitted surface geometry at creation and after layout changes.
 - The layout tree remains allocation-free and bounded for `no_std` service
   execution.
 - Workspace state is discarded on logout, restart, and reboot with the rest of

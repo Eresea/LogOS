@@ -111,11 +111,14 @@ pub extern "C" fn _start() -> ! {
         while common::ipc_receive_handle(atrium_surface_response_capability, &mut surface_response)
             == IpcStatus::Ok
         {
-            if surface_response.is_valid_for(surface_request)
+            if surface_response.is_update() && surface_response.surface == terminal_surface {
+                terminal.resize_to_surface(surface_response.bounds);
+            } else if surface_response.is_valid_for(surface_request)
                 && surface_response.status == logos_abi::GuiStatus::Ok
                 && surface_response.surface.is_valid()
             {
                 terminal.reset();
+                terminal.resize_to_surface(surface_response.bounds);
                 terminal_surface = surface_response.surface;
             } else if surface_response.is_revoke() && surface_response.surface == terminal_surface {
                 terminal_surface = SurfaceHandle::EMPTY;

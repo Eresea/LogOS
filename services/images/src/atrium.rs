@@ -590,6 +590,8 @@ fn queue_surface_updates(
     queue: &mut SurfaceCommandQueue,
     atrium: &logos_atrium::Atrium,
     next: &mut u32,
+    pending_terminal_update: &mut Option<AtriumSurfaceResponse>,
+    last_terminal_bounds: &mut GuiRect,
 ) {
     for surface in atrium.surfaces() {
         send_surface_command(
@@ -601,6 +603,29 @@ fn queue_surface_updates(
             next,
         );
     }
+    queue_terminal_surface_update(pending_terminal_update, last_terminal_bounds, atrium, next);
+}
+
+fn queue_terminal_surface_update(
+    pending: &mut Option<AtriumSurfaceResponse>,
+    last_bounds: &mut GuiRect,
+    atrium: &logos_atrium::Atrium,
+    next: &mut u32,
+) {
+    let Some(surface) = atrium.surface_for_app(logos_atrium::AppId::Terminal) else {
+        *pending = None;
+        *last_bounds = GuiRect::EMPTY;
+        return;
+    };
+    if surface.bounds == *last_bounds {
+        return;
+    }
+    *last_bounds = surface.bounds;
+    *pending = Some(AtriumSurfaceResponse::update(
+        next_request_id(next),
+        surface.reference,
+        surface.bounds,
+    ));
 }
 
 fn is_fps_toggle(input: &InputMessage) -> bool {
@@ -890,6 +915,8 @@ pub extern "C" fn _start() -> ! {
     // when the startup directory snapshot was not ready yet.
     let mut system_client = logos_abi::ServiceHandle::EMPTY;
     let mut pending_client_response: Option<AtriumSurfaceResponse> = None;
+    let mut pending_terminal_update: Option<AtriumSurfaceResponse> = None;
+    let mut last_terminal_bounds = GuiRect::EMPTY;
     let mut deferred_terminal_revoke: Option<SurfaceHandle> = None;
     let mut deferred_system_revoke: Option<SurfaceHandle> = None;
     let mut pending_render: Option<RenderMessage> = None;
@@ -973,6 +1000,22 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
+        if pending_client_response.is_none() {
+            if let Some(update) = pending_terminal_update {
+                match common::ipc_send_handle(terminal_surface_response, &update) {
+                    IpcStatus::Ok => pending_terminal_update = None,
+                    IpcStatus::Full => {}
+                    IpcStatus::Stale
+                    | IpcStatus::Disconnected
+                    | IpcStatus::Unauthorized
+                    | IpcStatus::Malformed
+                    | IpcStatus::Empty => {
+                        pending_terminal_update = None;
+                        last_terminal_bounds = GuiRect::EMPTY;
+                    }
+                }
+            }
+        }
         if let Some(batch) = pending_draw {
             let live = atrium.surface_by_reference(batch.surface).is_some_and(|surface| {
                 (surface.app == logos_atrium::AppId::System && surface.client == system_client)
@@ -1040,6 +1083,10 @@ pub extern "C" fn _start() -> ! {
                         logos_abi::GuiStatus::Ok,
                         surface.reference,
                     );
+                    if let Some(response) = pending_client_response.as_mut() {
+                        response.bounds = surface.bounds;
+                    }
+                    last_terminal_bounds = surface.bounds;
                 } else if let Some(surface) = atrium.surface_for_app(logos_atrium::AppId::Terminal)
                 {
                     let _ = atrium.close_reference(surface.reference);
@@ -1298,6 +1345,16 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
+        if stale_count != 0 {
+            queue_surface_updates(
+                display_control,
+                &mut surface_commands,
+                atrium,
+                &mut next_request,
+                &mut pending_terminal_update,
+                &mut last_terminal_bounds,
+            );
+        }
 
         if pending_surface.is_none()
             && pending_client_request.is_some()
@@ -1369,6 +1426,12 @@ pub extern "C" fn _start() -> ! {
                                 logos_abi::GuiStatus::Ok,
                                 surface.reference,
                             );
+                            if client_request.app() == Some(AtriumApp::Terminal) {
+                                if let Some(response) = pending_client_response.as_mut() {
+                                    response.bounds = surface.bounds;
+                                }
+                                last_terminal_bounds = surface.bounds;
+                            }
                         }
                         true
                     }
@@ -1414,6 +1477,8 @@ pub extern "C" fn _start() -> ! {
                     &mut surface_commands,
                     atrium,
                     &mut next_request,
+                    &mut pending_terminal_update,
+                    &mut last_terminal_bounds,
                 );
                 if !home_surface {
                     if let Some(surface) = atrium.focused_surface() {
@@ -1583,6 +1648,8 @@ pub extern "C" fn _start() -> ! {
                     &mut surface_commands,
                     atrium,
                     &mut next_request,
+                    &mut pending_terminal_update,
+                    &mut last_terminal_bounds,
                 );
                 pending_app_render = render(display, atrium, calculator, &mut sequence);
                 continue;
@@ -1716,6 +1783,8 @@ pub extern "C" fn _start() -> ! {
                             surface,
                         );
                     }
+                    pending_terminal_update = None;
+                    last_terminal_bounds = GuiRect::EMPTY;
                     if let Some(surface) = system_surface {
                         queue_system_revoke(
                             &mut pending_client_response,
@@ -1767,6 +1836,8 @@ pub extern "C" fn _start() -> ! {
                             &mut surface_commands,
                             atrium,
                             &mut next_request,
+                            &mut pending_terminal_update,
+                            &mut last_terminal_bounds,
                         );
                         pending_app_render = render(display, atrium, calculator, &mut sequence);
                     }
@@ -1782,6 +1853,8 @@ pub extern "C" fn _start() -> ! {
                                     &mut surface_commands,
                                     atrium,
                                     &mut next_request,
+                                    &mut pending_terminal_update,
+                                    &mut last_terminal_bounds,
                                 );
                             } else {
                                 send_surface_command(
@@ -1804,6 +1877,8 @@ pub extern "C" fn _start() -> ! {
                             &mut surface_commands,
                             atrium,
                             &mut next_request,
+                            &mut pending_terminal_update,
+                            &mut last_terminal_bounds,
                         );
                         pending_app_render = render(display, atrium, calculator, &mut sequence);
                     }

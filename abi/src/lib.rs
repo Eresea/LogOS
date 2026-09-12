@@ -67,7 +67,7 @@ pub use user_api::{
     UserStorageRequest, UserStorageResponse, UserStorageStatus,
 };
 
-pub const ABI_VERSION: u16 = 6;
+pub const ABI_VERSION: u16 = 7;
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
 pub const MAX_COLUMNS: usize = 160;
@@ -76,6 +76,7 @@ pub const DEFAULT_COLUMNS: usize = 160;
 pub const DEFAULT_ROWS: usize = 48;
 pub const DISPLAY_CELL_WIDTH: usize = 8;
 pub const DISPLAY_CELL_HEIGHT: usize = 16;
+pub const TERMINAL_CHROME_HEIGHT: usize = 32;
 pub const DEFAULT_SCREEN_WIDTH: usize = 1280;
 pub const DEFAULT_SCREEN_HEIGHT: usize = 800;
 pub const MIN_FRAMEBUFFER_WIDTH: usize = DEFAULT_SCREEN_WIDTH;

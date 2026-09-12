@@ -290,6 +290,9 @@ pub extern "C" fn _start() -> ! {
         }
 
         while common::ipc_receive_handle(response_cap, &mut response) == IpcStatus::Ok {
+            if response.is_update() {
+                continue;
+            }
             request_pending = false;
             if response.status == logos_abi::GuiStatus::Ok && response.surface.is_valid() {
                 surface = response.surface;

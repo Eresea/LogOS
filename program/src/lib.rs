@@ -4,9 +4,9 @@ use core::{mem, ptr};
 
 use logos_abi::{
     AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GUI_DRAW_FLAG_MORE,
-    GuiDrawBatch, GuiSceneOp, GuiStatus, IPC_PAGE_BYTES, IPC_STAGING_BASE, IPC_SYSCALL_RECEIVE,
-    IPC_SYSCALL_SEND, IpcStatus, MAX_RENDER_CELLS, MessageKind, PROGRAM_BOOTSTRAP_BASE,
-    ProgramBootstrapPage, RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
+    GuiDrawBatch, GuiRect, GuiSceneOp, GuiStatus, IPC_PAGE_BYTES, IPC_STAGING_BASE,
+    IPC_SYSCALL_RECEIVE, IPC_SYSCALL_SEND, IpcStatus, MAX_RENDER_CELLS, MessageKind,
+    PROGRAM_BOOTSTRAP_BASE, ProgramBootstrapPage, RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +103,7 @@ impl ProgramClient {
             reserved: 0,
             request_id: 0,
             surface: SurfaceHandle::EMPTY,
+            bounds: GuiRect::EMPTY,
         };
         match receive(self.surface_response, &mut response)? {
             Receive::Empty => return Ok(None),
@@ -377,6 +378,7 @@ mod tests {
             reserved: 0,
             request_id: 1,
             surface,
+            bounds: logos_abi::GuiRect::EMPTY,
         };
         assert!(response.is_valid_for(request));
         assert_eq!(client.accept_surface_response(response), Ok(SurfaceEvent::Created(surface)));

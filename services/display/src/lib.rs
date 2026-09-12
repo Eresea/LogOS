@@ -21,7 +21,7 @@ pub use logos_abi::FramebufferFormat as PixelFormat;
 
 pub const GLYPH_WIDTH: usize = 8;
 pub const GLYPH_HEIGHT: usize = 16;
-const TERMINAL_CHROME_HEIGHT: u32 = 32;
+const TERMINAL_CHROME_HEIGHT: u32 = logos_abi::TERMINAL_CHROME_HEIGHT as u32;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_TILE_SIZE: u32 = 64;

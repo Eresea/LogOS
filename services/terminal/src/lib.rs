@@ -7,8 +7,9 @@ extern crate std;
 
 use logos_abi::{
     CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, DEFAULT_COLUMNS, DEFAULT_ROWS,
-    InputMessage, IpcBytes, KeyCode, KeyState, MAX_COLUMNS, MAX_RENDER_CELLS, MOD_ALT,
-    MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, RENDER_FLAG_MORE, RenderMessage,
+    DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GuiRect, InputMessage, IpcBytes, KeyCode, KeyState,
+    MAX_COLUMNS, MAX_RENDER_CELLS, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind,
+    RENDER_FLAG_MORE, RenderMessage, TERMINAL_CHROME_HEIGHT,
 };
 
 const MAX_PARAMS: usize = 16;
@@ -103,6 +104,8 @@ impl Parser {
 }
 
 pub struct TerminalState<const CELL_COUNT: usize> {
+    columns: usize,
+    rows: usize,
     cursor_column: usize,
     cursor_row: usize,
     saved_cursor_column: usize,
@@ -155,6 +158,13 @@ impl TerminalService {
         self.terminal.reset();
     }
 
+    pub fn resize_to_surface(&mut self, bounds: GuiRect) {
+        let columns = bounds.width as usize / DISPLAY_CELL_WIDTH;
+        let rows = bounds.height.saturating_sub(TERMINAL_CHROME_HEIGHT as u32) as usize
+            / DISPLAY_CELL_HEIGHT;
+        self.terminal.resize(columns, rows);
+    }
+
     pub fn next_render(&mut self) -> Option<RenderMessage> {
         self.terminal.next_render()
     }
@@ -170,6 +180,8 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub const fn new() -> Self {
         assert!(DEFAULT_COLUMNS * DEFAULT_ROWS <= CELL_COUNT);
         Self {
+            columns: DEFAULT_COLUMNS,
+            rows: DEFAULT_ROWS,
             cursor_column: 0,
             cursor_row: 0,
             saved_cursor_column: 0,
@@ -216,6 +228,19 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         self.scrollback_len = 0;
         self.view_offset = 0;
         self.screen.fill(blank_cell());
+        self.mark_all_dirty();
+    }
+
+    pub fn resize(&mut self, columns: usize, rows: usize) {
+        self.columns = columns.clamp(1, DEFAULT_COLUMNS);
+        self.rows = rows.clamp(1, DEFAULT_ROWS);
+        self.cursor_column = self.cursor_column.min(self.columns - 1);
+        self.cursor_row = self.cursor_row.min(self.rows - 1);
+        self.saved_cursor_column = self.saved_cursor_column.min(self.columns - 1);
+        self.saved_cursor_row = self.saved_cursor_row.min(self.rows - 1);
+        self.wrap_pending = false;
+        self.full_redraw_pending = true;
+        self.cursor_dirty = true;
         self.mark_all_dirty();
     }
 
@@ -278,7 +303,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             0x09 => {
                 self.wrap_pending = false;
                 self.cursor_column =
-                    ((self.cursor_column / 8) + 1).saturating_mul(8).min(DEFAULT_COLUMNS - 1)
+                    ((self.cursor_column / 8) + 1).saturating_mul(8).min(self.columns - 1)
             }
             0x0a..=0x0c => {
                 self.wrap_pending = false;
@@ -335,7 +360,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 self.cursor_column = self
                     .cursor_column
                     .saturating_add(self.parser.param(0, 1) as usize)
-                    .min(DEFAULT_COLUMNS - 1);
+                    .min(self.columns - 1);
             }
             b'D' => {
                 self.cursor_column =
@@ -348,27 +373,27 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 self.cursor_row = self
                     .cursor_row
                     .saturating_add(self.parser.param(0, 1) as usize)
-                    .min(DEFAULT_ROWS - 1);
+                    .min(self.rows - 1);
             }
             b'H' | b'f' => {
                 self.cursor_row = self.parser.param(0, 1).saturating_sub(1) as usize;
                 self.cursor_column = self.parser.param(1, 1).saturating_sub(1) as usize;
-                self.cursor_row = self.cursor_row.min(DEFAULT_ROWS - 1);
-                self.cursor_column = self.cursor_column.min(DEFAULT_COLUMNS - 1);
+                self.cursor_row = self.cursor_row.min(self.rows - 1);
+                self.cursor_column = self.cursor_column.min(self.columns - 1);
             }
             b'G' | b'`' => {
                 self.cursor_column = self.parser.param(0, 1).saturating_sub(1) as usize;
-                self.cursor_column = self.cursor_column.min(DEFAULT_COLUMNS - 1);
+                self.cursor_column = self.cursor_column.min(self.columns - 1);
             }
             b'd' => {
                 self.cursor_row = self.parser.param(0, 1).saturating_sub(1) as usize;
-                self.cursor_row = self.cursor_row.min(DEFAULT_ROWS - 1);
+                self.cursor_row = self.cursor_row.min(self.rows - 1);
             }
             b'E' => {
                 self.cursor_row = self
                     .cursor_row
                     .saturating_add(self.parser.param(0, 1) as usize)
-                    .min(DEFAULT_ROWS - 1);
+                    .min(self.rows - 1);
                 self.cursor_column = 0;
             }
             b'F' => {
@@ -380,8 +405,8 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
                 self.saved_cursor_row = self.cursor_row;
             }
             b'u' => {
-                self.cursor_column = self.saved_cursor_column.min(DEFAULT_COLUMNS - 1);
-                self.cursor_row = self.saved_cursor_row.min(DEFAULT_ROWS - 1);
+                self.cursor_column = self.saved_cursor_column.min(self.columns - 1);
+                self.cursor_row = self.saved_cursor_row.min(self.rows - 1);
             }
             b'J' => self.erase_display(self.parser.param(0, 0)),
             b'K' => self.erase_line(self.parser.param(0, 0)),
@@ -443,8 +468,8 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             ..blank_cell()
         };
         self.dirty[index] = true;
-        if self.cursor_column + 1 >= DEFAULT_COLUMNS {
-            self.cursor_column = DEFAULT_COLUMNS - 1;
+        if self.cursor_column + 1 >= self.columns {
+            self.cursor_column = self.columns - 1;
             self.wrap_pending = true;
         } else {
             self.cursor_column += 1;
@@ -453,7 +478,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
 
     fn line_feed(&mut self) {
         self.wrap_pending = false;
-        if self.cursor_row + 1 >= DEFAULT_ROWS {
+        if self.cursor_row + 1 >= self.rows {
             self.scroll_up();
         } else {
             self.cursor_row += 1;
@@ -463,16 +488,16 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     fn scroll_up(&mut self) {
         self.full_redraw_pending = true;
         self.store_scrollback_line(0);
-        for row in 0..DEFAULT_ROWS - 1 {
-            for column in 0..DEFAULT_COLUMNS {
+        for row in 0..self.rows - 1 {
+            for column in 0..self.columns {
                 let source = Self::index(column, row + 1);
                 let target = Self::index(column, row);
                 self.screen[target] = self.screen[source];
                 self.dirty[target] = true;
             }
         }
-        for column in 0..DEFAULT_COLUMNS {
-            let index = Self::index(column, DEFAULT_ROWS - 1);
+        for column in 0..self.columns {
+            let index = Self::index(column, self.rows - 1);
             self.screen[index] = blank_cell();
             self.dirty[index] = true;
         }
@@ -531,7 +556,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         match mode {
             0 => {
                 self.erase_line(0);
-                for row in self.cursor_row + 1..DEFAULT_ROWS {
+                for row in self.cursor_row + 1..self.rows {
                     self.erase_row(row);
                 }
             }
@@ -543,7 +568,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             }
             2 | 3 => {
                 self.full_redraw_pending = true;
-                for row in 0..DEFAULT_ROWS {
+                for row in 0..self.rows {
                     self.erase_row(row);
                 }
             }
@@ -552,7 +577,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     fn erase_row(&mut self, row: usize) {
-        for column in 0..DEFAULT_COLUMNS {
+        for column in 0..self.columns {
             let index = Self::index(column, row);
             self.screen[index] = blank_cell();
             self.dirty[index] = true;
@@ -561,12 +586,12 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
 
     fn erase_line(&mut self, mode: u16) {
         let (start, end) = match mode {
-            0 => (self.cursor_column, DEFAULT_COLUMNS),
+            0 => (self.cursor_column, self.columns),
             1 => (0, self.cursor_column + 1),
-            2 => (0, DEFAULT_COLUMNS),
+            2 => (0, self.columns),
             _ => return,
         };
-        for column in start..end.min(DEFAULT_COLUMNS) {
+        for column in start..end.min(self.columns) {
             let index = Self::index(column, self.cursor_row);
             self.screen[index] = blank_cell();
             self.dirty[index] = true;
@@ -574,8 +599,8 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     fn mark_all_dirty(&mut self) {
-        for row in 0..DEFAULT_ROWS {
-            for column in 0..DEFAULT_COLUMNS {
+        for row in 0..self.rows {
+            for column in 0..self.columns {
                 self.dirty[Self::index(column, row)] = true;
             }
         }
@@ -589,14 +614,14 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             MessageKind::RenderCells
         };
         let mut message = RenderMessage::empty(kind);
-        message.columns = DEFAULT_COLUMNS as u16;
-        message.rows = DEFAULT_ROWS as u16;
+        message.columns = self.columns as u16;
+        message.rows = self.rows as u16;
         message.cursor_column = self.cursor_column as u16;
         message.cursor_row = self.cursor_row as u16;
         let mut count = 0;
         let mut more = false;
-        for row in 0..DEFAULT_ROWS {
-            for column in 0..DEFAULT_COLUMNS {
+        for row in 0..self.rows {
+            for column in 0..self.columns {
                 let index = Self::index(column, row);
                 if !self.dirty[index] {
                     continue;
@@ -636,11 +661,11 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         {
             match KeyCode::from_raw(event.code) {
                 KeyCode::PageUp => {
-                    self.scroll_view(DEFAULT_ROWS.saturating_sub(1) as isize);
+                    self.scroll_view(self.rows.saturating_sub(1) as isize);
                     return None;
                 }
                 KeyCode::PageDown => {
-                    self.scroll_view(-(DEFAULT_ROWS.saturating_sub(1) as isize));
+                    self.scroll_view(-(self.rows.saturating_sub(1) as isize));
                     return None;
                 }
                 _ => {}
@@ -760,6 +785,16 @@ mod tests {
         assert!(drain(&mut terminal) > 0);
         terminal.feed(b"\x1b[2J");
         assert!(drain(&mut terminal) > 0);
+    }
+
+    #[test]
+    fn resize_updates_render_dimensions() {
+        let mut terminal = TerminalService::new();
+        terminal.resize_to_surface(GuiRect::new(0, 0, 640, 352));
+        let message = terminal.next_render().unwrap();
+        assert_eq!(message.columns, 80);
+        assert_eq!(message.rows, 20);
+        assert!(message.count > 0);
     }
 
     #[test]

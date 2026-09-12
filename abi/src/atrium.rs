@@ -161,6 +161,7 @@ impl AtriumControlResponse {
 pub enum AtriumSurfaceOperation {
     Request = 1,
     Revoke = 2,
+    Update = 3,
 }
 
 impl AtriumSurfaceOperation {
@@ -168,6 +169,7 @@ impl AtriumSurfaceOperation {
         match raw {
             1 => Some(Self::Request),
             2 => Some(Self::Revoke),
+            3 => Some(Self::Update),
             _ => None,
         }
     }
@@ -219,6 +221,7 @@ pub struct AtriumSurfaceResponse {
     pub reserved: u16,
     pub request_id: u32,
     pub surface: SurfaceHandle,
+    pub bounds: GuiRect,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -263,6 +266,7 @@ impl AtriumSurfaceResponse {
             reserved: 0,
             request_id: request.request_id,
             surface: SurfaceHandle::EMPTY,
+            bounds: GuiRect::EMPTY,
         }
     }
 
@@ -273,6 +277,18 @@ impl AtriumSurfaceResponse {
             reserved: 0,
             request_id,
             surface,
+            bounds: GuiRect::EMPTY,
+        }
+    }
+
+    pub const fn update(request_id: u32, surface: SurfaceHandle, bounds: GuiRect) -> Self {
+        Self {
+            operation: AtriumSurfaceOperation::Update,
+            status: GuiStatus::Ok,
+            reserved: 0,
+            request_id,
+            surface,
+            bounds,
         }
     }
 
@@ -288,6 +304,15 @@ impl AtriumSurfaceResponse {
             && self.reserved == 0
             && self.request_id != 0
             && self.surface.is_valid()
+    }
+
+    pub const fn is_update(self) -> bool {
+        self.operation as u8 == AtriumSurfaceOperation::Update as u8
+            && self.status as u8 == GuiStatus::Ok as u8
+            && self.reserved == 0
+            && self.request_id != 0
+            && self.surface.is_valid()
+            && !self.bounds.is_empty()
     }
 }
 
@@ -334,6 +359,9 @@ mod tests {
         assert!(!response.is_valid_for(AtriumSurfaceRequest::new(AtriumApp::Terminal, client, 8)));
         let surface = SurfaceHandle::new(1, 1, 13).unwrap();
         assert!(AtriumSurfaceResponse::revoke(9, surface).is_revoke());
+        let update = AtriumSurfaceResponse::update(10, surface, GuiRect::new(0, 0, 640, 400));
+        assert!(update.is_update());
+        assert!(!AtriumSurfaceResponse::update(0, surface, GuiRect::EMPTY).is_update());
     }
 
     #[test]
