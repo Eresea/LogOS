@@ -745,6 +745,18 @@ mod tests {
     }
 
     #[test]
+    fn closed_tcp_slot_is_reusable_with_a_new_generation() {
+        let mut service = NetworkService::new(config());
+        service.set_ready();
+        let first = service.allocate_socket(false).unwrap();
+        assert_eq!(service.close(first, false), Ok(()));
+        let second = service.allocate_socket(false).unwrap();
+        assert_eq!(second.slot, first.slot);
+        assert_ne!(second.generation, first.generation);
+        assert_eq!(service.close(first, false), Err(SocketError::Stale));
+    }
+
+    #[test]
     fn malformed_checksum_is_rejected() {
         let valid = [0x00, 0x01, 0xff, 0xfe];
         assert!(checksum_valid(&valid));

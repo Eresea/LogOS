@@ -542,6 +542,15 @@ fn request_from_message(message: &IpcBytes) -> Option<NetworkRequest> {
 }
 
 #[cfg(target_os = "none")]
+fn service_socket_handle(response: &NetworkResponse) -> logos_network::SocketHandle {
+    logos_network::SocketHandle {
+        slot: response.handle as u8,
+        generation: response.generation,
+        service_epoch: response.service_epoch,
+    }
+}
+
+#[cfg(target_os = "none")]
 #[derive(Clone, Copy)]
 struct PendingRequest {
     request: NetworkRequest,
@@ -694,6 +703,11 @@ pub extern "C" fn _start() -> ! {
                 pending.request.timeout_ticks
             };
             if complete || elapsed_ticks.wrapping_sub(pending.started) >= deadline {
+                if !complete && pending.request.operation == logos_abi::NetworkOperation::TcpConnect
+                {
+                    stack::close(pending.response.handle, false);
+                    let _ = service.close(service_socket_handle(&pending.response), false);
+                }
                 let mut response = pending.response;
                 response.result = if complete {
                     logos_abi::NetworkResult::Ok
@@ -732,6 +746,7 @@ pub extern "C" fn _start() -> ! {
                         pending_request = None;
                         if pending.request.operation == logos_abi::NetworkOperation::TcpConnect {
                             stack::close(pending.response.handle, false);
+                            let _ = service.close(service_socket_handle(&pending.response), false);
                         }
                         response.result = logos_abi::NetworkResult::Cancelled;
                     }
@@ -778,6 +793,8 @@ pub extern "C" fn _start() -> ! {
                         if stack::tcp_connect(response.handle, request.address, request.port) {
                             wait_for_result = true;
                         } else {
+                            stack::close(response.handle, false);
+                            let _ = service.close(service_socket_handle(&response), false);
                             response.result = logos_abi::NetworkResult::Full;
                         }
                     } else if response.result == logos_abi::NetworkResult::Ok
