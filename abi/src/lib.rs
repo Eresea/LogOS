@@ -72,8 +72,8 @@ pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
 pub const MAX_COLUMNS: usize = 160;
 pub const MAX_ROWS: usize = 100;
-pub const DEFAULT_COLUMNS: usize = 80;
-pub const DEFAULT_ROWS: usize = 25;
+pub const DEFAULT_COLUMNS: usize = 160;
+pub const DEFAULT_ROWS: usize = 48;
 pub const DISPLAY_CELL_WIDTH: usize = 8;
 pub const DISPLAY_CELL_HEIGHT: usize = 16;
 pub const DEFAULT_SCREEN_WIDTH: usize = 1280;
@@ -2636,6 +2636,12 @@ mod tests {
         assert!(
             IpcBytes::from_bytes(MessageKind::SessionOutput, &[0; MAX_IPC_BYTES + 1]).is_none()
         );
+    }
+
+    #[test]
+    fn default_terminal_profile_fills_the_display_content_area() {
+        assert_eq!(DEFAULT_COLUMNS * DISPLAY_CELL_WIDTH, DEFAULT_SCREEN_WIDTH);
+        assert_eq!(DEFAULT_ROWS * DISPLAY_CELL_HEIGHT + 32, DEFAULT_SCREEN_HEIGHT);
     }
 
     #[test]
