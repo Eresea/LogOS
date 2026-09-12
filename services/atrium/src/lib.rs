@@ -24,7 +24,14 @@ pub const FULLSCREEN_SURFACE_BOUNDS: GuiRect = GuiRect::new(
     logos_abi::DEFAULT_SCREEN_WIDTH as u32,
     logos_abi::DEFAULT_SCREEN_HEIGHT as u32,
 );
-pub const TERMINAL_SURFACE_BOUNDS: GuiRect = FULLSCREEN_SURFACE_BOUNDS;
+/// The tiled desktop excludes the shell rail on the left.
+pub const DESKTOP_SURFACE_BOUNDS: GuiRect = GuiRect::new(
+    112,
+    0,
+    logos_abi::DEFAULT_SCREEN_WIDTH as u32 - 112,
+    logos_abi::DEFAULT_SCREEN_HEIGHT as u32,
+);
+pub const TERMINAL_SURFACE_BOUNDS: GuiRect = DESKTOP_SURFACE_BOUNDS;
 pub const STATUS_BAR_BOUNDS: GuiRect =
     GuiRect::new(0, 0, logos_abi::DEFAULT_SCREEN_WIDTH as u32, 32);
 pub const STATUS_BAR_CLOSE_BOUNDS: GuiRect = GuiRect::new(1200, 0, 80, 32);
@@ -413,7 +420,7 @@ impl Atrium {
 
     pub const fn initial_surface_bounds(app: AppId) -> GuiRect {
         let _ = app;
-        FULLSCREEN_SURFACE_BOUNDS
+        DESKTOP_SURFACE_BOUNDS
     }
 
     pub fn set_home_surface(&mut self, surface: SurfaceHandle) -> Result<(), AtriumError> {
@@ -507,7 +514,7 @@ impl Atrium {
 
     pub fn splitter_at(&self, x: i32, y: i32) -> Option<usize> {
         let root = self.layout_root?;
-        self.find_splitter(root, FULLSCREEN_SURFACE_BOUNDS, x, y)
+        self.find_splitter(root, DESKTOP_SURFACE_BOUNDS, x, y)
     }
 
     pub fn handle_splitter_pointer(&mut self, input: &InputMessage) -> bool {
@@ -897,18 +904,17 @@ impl Atrium {
     fn preview_surface_bounds(&self) -> GuiRect {
         if let Some(target_leaf) = self.find_empty_leaf(self.layout_root) {
             return self
-                .node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, target_leaf)
-                .unwrap_or(FULLSCREEN_SURFACE_BOUNDS);
+                .node_bounds(self.layout_root, DESKTOP_SURFACE_BOUNDS, target_leaf)
+                .unwrap_or(DESKTOP_SURFACE_BOUNDS);
         }
         let Some(anchor) = self.focused_surface().map(|surface| surface.id) else {
-            return FULLSCREEN_SURFACE_BOUNDS;
+            return DESKTOP_SURFACE_BOUNDS;
         };
         let Some(node) = self.find_leaf(self.layout_root, anchor) else {
-            return FULLSCREEN_SURFACE_BOUNDS;
+            return DESKTOP_SURFACE_BOUNDS;
         };
-        let Some(bounds) = self.node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, node)
-        else {
-            return FULLSCREEN_SURFACE_BOUNDS;
+        let Some(bounds) = self.node_bounds(self.layout_root, DESKTOP_SURFACE_BOUNDS, node) else {
+            return DESKTOP_SURFACE_BOUNDS;
         };
         self.split_rect(bounds, self.next_split).1
     }
@@ -950,8 +956,7 @@ impl Atrium {
 
     fn directional_leaf(&self, surface_id: u16, direction: SurfaceDirection) -> Option<usize> {
         let current = self.find_leaf(self.layout_root, surface_id)?;
-        let current_bounds =
-            self.node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, current)?;
+        let current_bounds = self.node_bounds(self.layout_root, DESKTOP_SURFACE_BOUNDS, current)?;
         let current_center = (
             current_bounds.x + current_bounds.width as i32 / 2,
             current_bounds.y + current_bounds.height as i32 / 2,
@@ -962,7 +967,7 @@ impl Atrium {
             if *candidate == Some(surface_id) {
                 continue;
             }
-            let Some(bounds) = self.node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, index)
+            let Some(bounds) = self.node_bounds(self.layout_root, DESKTOP_SURFACE_BOUNDS, index)
             else {
                 continue;
             };
@@ -1144,7 +1149,7 @@ impl Atrium {
 
     fn recompute_layout(&mut self) {
         let Some(root) = self.layout_root else { return };
-        recompute_node(&self.layout_nodes, root, FULLSCREEN_SURFACE_BOUNDS, &mut self.surfaces);
+        recompute_node(&self.layout_nodes, root, DESKTOP_SURFACE_BOUNDS, &mut self.surfaces);
     }
 
     fn find_leaf(&self, node: Option<usize>, surface_id: u16) -> Option<usize> {
@@ -1255,8 +1260,7 @@ impl Atrium {
     }
 
     fn resize_split(&mut self, node: usize, delta: i32) -> Result<(), AtriumError> {
-        let Some(bounds) = self.node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, node)
-        else {
+        let Some(bounds) = self.node_bounds(self.layout_root, DESKTOP_SURFACE_BOUNDS, node) else {
             return Err(AtriumError::NotFound);
         };
         let Some(LayoutNode::Split { direction, .. }) = self.layout_nodes[node] else {
@@ -1292,8 +1296,7 @@ impl Atrium {
     fn can_split_focused(&self, direction: SplitDirection) -> bool {
         let Some(surface) = self.focused_surface() else { return false };
         let Some(node) = self.find_leaf(self.layout_root, surface.id) else { return false };
-        let Some(bounds) = self.node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, node)
-        else {
+        let Some(bounds) = self.node_bounds(self.layout_root, DESKTOP_SURFACE_BOUNDS, node) else {
             return false;
         };
         match direction {
@@ -1994,7 +1997,7 @@ mod tests {
         let admitted = atrium.spawn_surface(request, surface(1)).unwrap();
         assert_eq!(atrium.focused_surface().unwrap().id, admitted.id);
         atrium.move_focused(SURFACE_MOVE_STEP, -SURFACE_MOVE_STEP).unwrap();
-        assert_eq!(atrium.surface(admitted.id).unwrap().bounds, FULLSCREEN_SURFACE_BOUNDS);
+        assert_eq!(atrium.surface(admitted.id).unwrap().bounds, DESKTOP_SURFACE_BOUNDS);
         let closed = atrium.close_focused().unwrap();
         assert_eq!(closed.id, admitted.id);
         atrium.restart();
@@ -2092,7 +2095,7 @@ mod tests {
     }
 
     #[test]
-    fn app_surfaces_use_fullscreen_composition_and_close_button_is_bounded() {
+    fn app_surfaces_use_desktop_composition_and_close_button_is_bounded() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
         for (index, app) in [AppId::Calculator, AppId::Files, AppId::Terminal, AppId::System]
@@ -2100,7 +2103,7 @@ mod tests {
             .enumerate()
         {
             let request = atrium.request_surface(app, client(index as u32 + 1)).unwrap();
-            assert_eq!(request.bounds(), FULLSCREEN_SURFACE_BOUNDS);
+            assert_eq!(request.bounds(), DESKTOP_SURFACE_BOUNDS);
             assert_eq!(request.mode(), SurfaceMode::Tiled);
         }
         assert!(STATUS_BAR_BOUNDS.contains(320, 16));
@@ -2217,25 +2220,25 @@ mod tests {
         let calculator = atrium.spawn_surface(calculator_request, surface(3)).unwrap();
         let files_request = atrium.request_surface(AppId::Files, client(1)).unwrap();
         let files = atrium.spawn_surface(files_request, surface(4)).unwrap();
-        assert_eq!(atrium.surface(calculator.id).unwrap().bounds, GuiRect::new(0, 0, 640, 800));
-        assert_eq!(files.bounds, GuiRect::new(640, 0, 640, 800));
-        assert_eq!(atrium.surface_at(100, 100).unwrap().id, calculator.id);
-        assert_eq!(atrium.surface_at(700, 100).unwrap().id, files.id);
-        assert_eq!(atrium.splitter_at(640, 100), Some(0));
+        assert_eq!(atrium.surface(calculator.id).unwrap().bounds, GuiRect::new(112, 0, 584, 800));
+        assert_eq!(files.bounds, GuiRect::new(696, 0, 584, 800));
+        assert_eq!(atrium.surface_at(200, 100).unwrap().id, calculator.id);
+        assert_eq!(atrium.surface_at(800, 100).unwrap().id, files.id);
+        assert_eq!(atrium.splitter_at(696, 100), Some(0));
         atrium.focus(calculator.id).unwrap();
-        assert_eq!(atrium.surface_at(700, 100).unwrap().id, files.id);
-        assert_eq!(atrium.surface_at(0, 0).unwrap().id, calculator.id);
+        assert_eq!(atrium.surface_at(800, 100).unwrap().id, files.id);
+        assert_eq!(atrium.surface_at(200, 0).unwrap().id, calculator.id);
         assert!(atrium.handle_splitter_pointer(
-            &InputMessage::pointer(640, 100, 1, PointerState::Down).unwrap()
+            &InputMessage::pointer(696, 100, 1, PointerState::Down).unwrap()
         ));
         assert!(atrium.handle_splitter_pointer(
-            &InputMessage::pointer(700, 100, 1, PointerState::Move).unwrap()
+            &InputMessage::pointer(756, 100, 1, PointerState::Move).unwrap()
         ));
         assert!(atrium.handle_splitter_pointer(
-            &InputMessage::pointer(700, 100, 0, PointerState::Up).unwrap()
+            &InputMessage::pointer(756, 100, 0, PointerState::Up).unwrap()
         ));
-        assert_eq!(atrium.surface(calculator.id).unwrap().bounds.width, 700);
-        assert_eq!(atrium.surface(files.id).unwrap().bounds.x, 700);
+        assert_eq!(atrium.surface(calculator.id).unwrap().bounds.width, 643);
+        assert_eq!(atrium.surface(files.id).unwrap().bounds.x, 755);
         let stale = SurfaceHandle {
             generation: calculator.reference.generation + 1,
             ..calculator.reference
@@ -2245,7 +2248,7 @@ mod tests {
         assert_eq!(atrium.focused_surface().unwrap().reference, files.reference);
         let focused = atrium.focus_at(800, 100).unwrap();
         assert_eq!(focused.reference, files.reference);
-        assert_eq!(atrium.focus_at(0, 0).unwrap().id, calculator.id);
+        assert_eq!(atrium.focus_at(200, 0).unwrap().id, calculator.id);
     }
 
     #[test]
@@ -2264,7 +2267,7 @@ mod tests {
 
         assert_eq!(atrium.close_reference(second.reference), Ok(second));
         assert_eq!(atrium.surfaces().count(), 1);
-        assert_eq!(atrium.surface(first.id).unwrap().bounds, FULLSCREEN_SURFACE_BOUNDS);
+        assert_eq!(atrium.surface(first.id).unwrap().bounds, DESKTOP_SURFACE_BOUNDS);
     }
 
     #[test]
@@ -2294,8 +2297,9 @@ mod tests {
             atrium.pointer_target(&up).map(|surface| surface.reference),
             Some(files.reference)
         );
+        let move_inside_desktop = InputMessage::pointer(200, 0, 0, PointerState::Move).unwrap();
         assert_eq!(
-            atrium.pointer_target(&move_event).map(|surface| surface.reference),
+            atrium.pointer_target(&move_inside_desktop).map(|surface| surface.reference),
             Some(files.reference)
         );
     }
