@@ -681,7 +681,11 @@ impl Atrium {
         }
         let code = KeyCode::from_raw(input.code);
         if code == KeyCode::META {
-            return AtriumAction::OpenCommandMenu;
+            return if self.command_menu_open {
+                AtriumAction::CloseCommandMenu
+            } else {
+                AtriumAction::OpenCommandMenu
+            };
         }
         if self.command_menu_open && code == KeyCode::ESCAPE {
             return AtriumAction::CloseCommandMenu;
@@ -1830,6 +1834,16 @@ mod tests {
         let close = atrium.input(&InputMessage::key(KeyCode::ESCAPE, KeyState::Pressed, 0));
         assert_eq!(close, AtriumAction::CloseCommandMenu);
         atrium.apply_action(close).unwrap();
+        assert!(!atrium.command_menu_open());
+        assert_eq!(atrium.focused_surface().unwrap().id, surface.id);
+
+        let reopen = atrium.input(&InputMessage::key(KeyCode::META, KeyState::Pressed, MOD_META));
+        assert_eq!(reopen, AtriumAction::OpenCommandMenu);
+        atrium.apply_action(reopen).unwrap();
+        let toggle_close =
+            atrium.input(&InputMessage::key(KeyCode::META, KeyState::Pressed, MOD_META));
+        assert_eq!(toggle_close, AtriumAction::CloseCommandMenu);
+        atrium.apply_action(toggle_close).unwrap();
         assert!(!atrium.command_menu_open());
         assert_eq!(atrium.focused_surface().unwrap().id, surface.id);
     }
