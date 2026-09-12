@@ -1799,6 +1799,12 @@ pub extern "C" fn _start() -> ! {
                 }
                 logos_atrium::AtriumAction::Split(_) => {
                     if atrium.apply_action(action).is_ok() {
+                        queue_surface_updates(
+                            display_control,
+                            &mut surface_commands,
+                            atrium,
+                            &mut next_request,
+                        );
                         pending_app_render = render(display, atrium, calculator, &mut sequence);
                     }
                 }

@@ -12,10 +12,11 @@ updates, but it does not provide a useful multi-surface desktop layout.
 ## Decision
 
 Atrium owns one volatile workspace represented by a fixed-capacity binary split
-tree. A focused leaf can be split vertically or horizontally. Each split keeps
-an adjustable fixed-point ratio; dragging its divider recomputes the bounds of
-all descendant surfaces. Closing a leaf promotes its sibling and collapses the
-empty split.
+tree. A focused leaf can be split vertically or horizontally; the new pane is
+immediately visible and is filled by the next admitted application surface.
+Each split keeps an adjustable fixed-point ratio; dragging its divider
+recomputes the bounds of all descendant surfaces. Closing a leaf promotes its
+sibling and collapses the empty split.
 
 The tree capacity is a safety bound, not a fixed application layout. Surface
 clients remain unaware of the tree and continue to receive only their own
@@ -23,7 +24,7 @@ generation-safe surface reference. Atrium sends the existing surface `Update`
 operation to Display after layout changes; no new service or ABI is introduced.
 
 The first implementation supports tiled surfaces, focus, divider dragging,
-keyboard-selected split direction, and bounded minimum pane sizes. Floating
+immediate keyboard-triggered splits, and bounded minimum pane sizes. Floating
 windows, resize handles on application chrome, persistence, and multiple
 workspaces remain deferred.
 

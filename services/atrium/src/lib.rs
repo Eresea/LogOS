@@ -133,7 +133,7 @@ pub enum SplitDirection {
 enum LayoutNode {
     Leaf {
         parent: Option<usize>,
-        surface_id: u16,
+        surface_id: Option<u16>,
     },
     Split {
         parent: Option<usize>,
@@ -163,6 +163,7 @@ pub struct SurfaceRequest {
     bounds: GuiRect,
     mode: SurfaceMode,
     anchor: Option<u16>,
+    target_leaf: Option<usize>,
     direction: SplitDirection,
 }
 
@@ -497,7 +498,11 @@ impl Atrium {
         if !self.surfaces.iter().any(Option::is_none) {
             return Err(AtriumError::Capacity);
         }
-        if self.layout_root.is_some() && !self.can_split_focused(self.next_split) {
+        let target_leaf = self.find_empty_leaf(self.layout_root);
+        if target_leaf.is_none()
+            && self.layout_root.is_some()
+            && !self.can_split_focused(self.next_split)
+        {
             return Err(AtriumError::Capacity);
         }
         Ok(SurfaceRequest {
@@ -506,6 +511,7 @@ impl Atrium {
             bounds: self.preview_surface_bounds(),
             mode: SurfaceMode::Tiled,
             anchor: self.focused_surface().map(|surface| surface.id),
+            target_leaf,
             direction: self.next_split,
         })
     }
@@ -544,10 +550,17 @@ impl Atrium {
             focus_order: self.next_focus_order,
         };
         self.advance_focus_order();
-        self.clear_focus();
         self.surfaces[index] = Some(surface);
-        self.focused = Some(index);
-        self.insert_layout_leaf(surface.id, request.anchor, request.direction)?;
+        if let Err(error) = self.insert_layout_leaf(
+            surface.id,
+            request.target_leaf,
+            request.anchor,
+            request.direction,
+        ) {
+            self.surfaces[index] = None;
+            return Err(error);
+        }
+        self.clear_focus();
         self.recompute_layout();
         self.focused = Some(index);
         Ok(self.surface(surface.id).unwrap_or(surface))
@@ -726,7 +739,7 @@ impl Atrium {
             AtriumAction::MoveFocused(dx, dy) => self.move_focused(dx, dy),
             AtriumAction::Split(direction) => {
                 self.next_split = direction;
-                Ok(())
+                self.split_focused(direction)
             }
             AtriumAction::CloseFocused => self.close_focused().map(|_| ()),
             AtriumAction::Logout => {
@@ -752,6 +765,11 @@ impl Atrium {
     }
 
     fn preview_surface_bounds(&self) -> GuiRect {
+        if let Some(target_leaf) = self.find_empty_leaf(self.layout_root) {
+            return self
+                .node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, target_leaf)
+                .unwrap_or(FULLSCREEN_SURFACE_BOUNDS);
+        }
         let Some(anchor) = self.focused_surface().map(|surface| surface.id) else {
             return FULLSCREEN_SURFACE_BOUNDS;
         };
@@ -768,30 +786,47 @@ impl Atrium {
     fn insert_layout_leaf(
         &mut self,
         surface_id: u16,
+        target_leaf: Option<usize>,
         anchor: Option<u16>,
         direction: SplitDirection,
     ) -> Result<(), AtriumError> {
         let Some(root) = self.layout_root else {
-            let index = self.allocate_layout_node(LayoutNode::Leaf { parent: None, surface_id })?;
+            let index = self.allocate_layout_node(LayoutNode::Leaf {
+                parent: None,
+                surface_id: Some(surface_id),
+            })?;
             self.layout_root = Some(index);
             return Ok(());
         };
+        if let Some(target_leaf) = target_leaf {
+            let parent = match self.layout_nodes[target_leaf] {
+                Some(LayoutNode::Leaf { parent, surface_id: None }) => parent,
+                _ => return Err(AtriumError::NotFound),
+            };
+            self.layout_nodes[target_leaf] =
+                Some(LayoutNode::Leaf { parent, surface_id: Some(surface_id) });
+            return Ok(());
+        }
         let Some(anchor) = anchor else { return Err(AtriumError::NotFound) };
         let leaf = self.find_leaf(Some(root), anchor).ok_or(AtriumError::NotFound)?;
         let parent = match self.layout_nodes[leaf] {
             Some(LayoutNode::Leaf { parent, .. }) => parent,
             _ => return Err(AtriumError::NotFound),
         };
-        let first =
-            self.allocate_layout_node(LayoutNode::Leaf { parent: Some(leaf), surface_id: anchor })?;
-        let second =
-            match self.allocate_layout_node(LayoutNode::Leaf { parent: Some(leaf), surface_id }) {
-                Ok(index) => index,
-                Err(error) => {
-                    self.layout_nodes[first] = None;
-                    return Err(error);
-                }
-            };
+        let first = self.allocate_layout_node(LayoutNode::Leaf {
+            parent: Some(leaf),
+            surface_id: Some(anchor),
+        })?;
+        let second = match self.allocate_layout_node(LayoutNode::Leaf {
+            parent: Some(leaf),
+            surface_id: Some(surface_id),
+        }) {
+            Ok(index) => index,
+            Err(error) => {
+                self.layout_nodes[first] = None;
+                return Err(error);
+            }
+        };
         self.layout_nodes[leaf] = Some(LayoutNode::Split {
             parent,
             direction,
@@ -860,11 +895,58 @@ impl Atrium {
     fn find_leaf(&self, node: Option<usize>, surface_id: u16) -> Option<usize> {
         let node = node?;
         match self.layout_nodes[node]? {
-            LayoutNode::Leaf { surface_id: id, .. } => (id == surface_id).then_some(node),
+            LayoutNode::Leaf { surface_id: Some(id), .. } => (id == surface_id).then_some(node),
+            LayoutNode::Leaf { surface_id: None, .. } => None,
             LayoutNode::Split { first, second, .. } => self
                 .find_leaf(Some(first), surface_id)
                 .or_else(|| self.find_leaf(Some(second), surface_id)),
         }
+    }
+
+    fn find_empty_leaf(&self, node: Option<usize>) -> Option<usize> {
+        let node = node?;
+        match self.layout_nodes[node]? {
+            LayoutNode::Leaf { surface_id: None, .. } => Some(node),
+            LayoutNode::Leaf { surface_id: Some(_), .. } => None,
+            LayoutNode::Split { first, second, .. } => {
+                self.find_empty_leaf(Some(first)).or_else(|| self.find_empty_leaf(Some(second)))
+            }
+        }
+    }
+
+    fn split_focused(&mut self, direction: SplitDirection) -> Result<(), AtriumError> {
+        if self.find_empty_leaf(self.layout_root).is_some() {
+            return Err(AtriumError::Capacity);
+        }
+        let Some(surface) = self.focused_surface() else { return Err(AtriumError::NotFound) };
+        let Some(root) = self.layout_root else { return Err(AtriumError::NotFound) };
+        let leaf = self.find_leaf(Some(root), surface.id).ok_or(AtriumError::NotFound)?;
+        let parent = match self.layout_nodes[leaf] {
+            Some(LayoutNode::Leaf { parent, .. }) => parent,
+            _ => return Err(AtriumError::NotFound),
+        };
+        let first = self.allocate_layout_node(LayoutNode::Leaf {
+            parent: Some(leaf),
+            surface_id: Some(surface.id),
+        })?;
+        let second = match self
+            .allocate_layout_node(LayoutNode::Leaf { parent: Some(leaf), surface_id: None })
+        {
+            Ok(index) => index,
+            Err(error) => {
+                self.layout_nodes[first] = None;
+                return Err(error);
+            }
+        };
+        self.layout_nodes[leaf] = Some(LayoutNode::Split {
+            parent,
+            direction,
+            ratio: DEFAULT_SPLIT_RATIO,
+            first,
+            second,
+        });
+        self.recompute_layout();
+        Ok(())
     }
 
     fn node_bounds(&self, node: Option<usize>, bounds: GuiRect, target: usize) -> Option<GuiRect> {
@@ -1339,13 +1421,14 @@ fn recompute_node(
 ) {
     let Some(layout) = nodes[node] else { return };
     match layout {
-        LayoutNode::Leaf { surface_id, .. } => {
+        LayoutNode::Leaf { surface_id: Some(surface_id), .. } => {
             if let Some(surface) =
                 surfaces.iter_mut().flatten().find(|surface| surface.id == surface_id)
             {
                 surface.bounds = bounds;
             }
         }
+        LayoutNode::Leaf { surface_id: None, .. } => {}
         LayoutNode::Split { direction, ratio, first, second, .. } => {
             let (first_bounds, second_bounds) = split_rect_static(bounds, direction, ratio);
             recompute_node(nodes, first, first_bounds, surfaces);
@@ -1528,6 +1611,29 @@ mod tests {
         assert!(AtriumAction::None.routes_to_surface());
         assert!(!AtriumAction::FocusNext.routes_to_surface());
         assert!(!AtriumAction::Launch(AppId::Terminal).routes_to_surface());
+    }
+
+    #[test]
+    fn split_shortcut_immediately_exposes_the_next_pane() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let calculator = atrium
+            .spawn_surface(
+                atrium.request_surface(AppId::Calculator, client(1)).unwrap(),
+                surface(1),
+            )
+            .unwrap();
+
+        let split = atrium.input(&ctrl_shift(b'v'));
+        atrium.apply_action(split).unwrap();
+        let files = atrium
+            .spawn_surface(atrium.request_surface(AppId::Files, client(2)).unwrap(), surface(2))
+            .unwrap();
+
+        let calculator = atrium.surface(calculator.id).unwrap();
+        assert!(calculator.bounds.width < FULLSCREEN_SURFACE_BOUNDS.width);
+        assert!(files.bounds.x > calculator.bounds.x);
+        assert_eq!(files.bounds.width, calculator.bounds.width);
     }
 
     #[test]
