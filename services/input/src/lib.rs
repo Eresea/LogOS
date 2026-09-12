@@ -11,6 +11,7 @@ use logos_abi::{InputMessage, KeyCode, KeyState, PointerState};
 pub const MOD_SHIFT: u16 = logos_abi::MOD_SHIFT;
 pub const MOD_CTRL: u16 = logos_abi::MOD_CTRL;
 pub const MOD_ALT: u16 = logos_abi::MOD_ALT;
+pub const MOD_META: u16 = logos_abi::MOD_META;
 pub const MOD_CAPS_LOCK: u16 = logos_abi::MOD_CAPS_LOCK;
 pub const MOD_NUM_LOCK: u16 = logos_abi::MOD_NUM_LOCK;
 
@@ -114,6 +115,7 @@ impl InputDecoder {
             KeyCode::SHIFT_LEFT | KeyCode::SHIFT_RIGHT => Some(MOD_SHIFT),
             KeyCode::CTRL => Some(MOD_CTRL),
             KeyCode::ALT => Some(MOD_ALT),
+            KeyCode::META => Some(MOD_META),
             KeyCode::CAPS_LOCK => {
                 if !released {
                     self.caps_lock = !self.caps_lock;
@@ -366,6 +368,7 @@ const fn map_code(
             0x70 => KeyCode::INSERT,
             0x14 => KeyCode::CTRL,
             0x11 => KeyCode::ALT,
+            0x1f | 0x27 => KeyCode::META,
             _ => KeyCode::UNKNOWN,
         });
     }
@@ -748,6 +751,20 @@ mod tests {
         let arrow = decoder.feed(0x75).unwrap();
         assert_eq!(KeyCode::from_raw(arrow.key.code), KeyCode::UP);
         assert!(arrow.text.is_none());
+    }
+
+    #[test]
+    fn extended_gui_keys_are_semantic_meta_modifiers() {
+        let mut decoder = InputDecoder::new();
+        decoder.feed(0xe0);
+        let pressed = decoder.feed(0x1f).unwrap();
+        assert_eq!(KeyCode::from_raw(pressed.key.code), KeyCode::META);
+        assert_eq!(pressed.key.modifiers & MOD_META, MOD_META);
+
+        decoder.feed(0xe0);
+        decoder.feed(0xf0);
+        let released = decoder.feed(0x1f).unwrap();
+        assert_eq!(released.key.modifiers & MOD_META, 0);
     }
 
     #[test]

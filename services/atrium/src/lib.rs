@@ -213,6 +213,8 @@ pub enum AtriumAction {
     MoveFocusedInDirection(SurfaceDirection),
     Split(SplitDirection),
     CloseFocused,
+    OpenCommandMenu,
+    CloseCommandMenu,
     Logout,
 }
 
@@ -233,6 +235,7 @@ pub struct Atrium {
     layout_root: Option<usize>,
     next_split: SplitDirection,
     command_menu: logos_ui::UiCommandMenu,
+    command_menu_open: bool,
     command_menu_matches: [u8; COMMAND_MENU_ITEMS.len()],
     next_surface_id: u16,
     next_focus_order: u32,
@@ -253,6 +256,7 @@ impl Atrium {
             layout_root: None,
             next_split: SplitDirection::Vertical,
             command_menu: logos_ui::UiCommandMenu::new(COMMAND_MENU_ITEMS.len() as u8),
+            command_menu_open: false,
             command_menu_matches: [0, 1, 2, 3],
             next_surface_id: 1,
             next_focus_order: 1,
@@ -287,6 +291,24 @@ impl Atrium {
 
     pub fn launcher_query(&self) -> logos_ui::UiText {
         self.command_menu.query()
+    }
+
+    pub const fn command_menu_open(&self) -> bool {
+        self.command_menu_open
+    }
+
+    pub fn open_command_menu(&mut self) {
+        if !self.command_menu_open {
+            self.command_menu.clear_query();
+            self.command_menu_matches = [0, 1, 2, 3];
+            self.command_menu.set_item_count(COMMAND_MENU_ITEMS.len() as u8);
+            self.command_menu.set_selected(0);
+        }
+        self.command_menu_open = true;
+    }
+
+    pub fn close_command_menu(&mut self) {
+        self.command_menu_open = false;
     }
 
     pub const fn launcher_app(&self) -> AppId {
@@ -373,6 +395,7 @@ impl Atrium {
         }
         self.phase = AtriumPhase::Home;
         self.clear_surface_records();
+        self.command_menu_open = true;
     }
 
     pub fn logout(&mut self) {
@@ -572,6 +595,7 @@ impl Atrium {
         self.clear_focus();
         self.recompute_layout();
         self.focused = Some(index);
+        self.command_menu_open = false;
         Ok(self.surface(surface.id).unwrap_or(surface))
     }
 
@@ -643,7 +667,7 @@ impl Atrium {
         if self.phase != AtriumPhase::Home {
             return AtriumAction::None;
         }
-        if self.focused.is_none() && matches!(input.kind, MessageKind::Text | MessageKind::Paste) {
+        if matches!(input.kind, MessageKind::Text | MessageKind::Paste) && self.command_menu_open {
             if let Some(text) = input.text_bytes() {
                 if self.command_menu.append_text(text) {
                     self.refresh_command_menu_results();
@@ -656,6 +680,12 @@ impl Atrium {
             return AtriumAction::None;
         }
         let code = KeyCode::from_raw(input.code);
+        if code == KeyCode::META {
+            return AtriumAction::OpenCommandMenu;
+        }
+        if self.command_menu_open && code == KeyCode::ESCAPE {
+            return AtriumAction::CloseCommandMenu;
+        }
         if input.modifiers & (MOD_CTRL | MOD_SHIFT) == (MOD_CTRL | MOD_SHIFT) {
             match code.character_byte() {
                 Some(b'v') => return AtriumAction::Split(SplitDirection::Vertical),
@@ -684,7 +714,7 @@ impl Atrium {
         {
             return AtriumAction::None;
         }
-        if self.focused.is_none() {
+        if self.command_menu_open {
             if let Some(action) = self.command_menu_action(input.code) {
                 return action;
             }
@@ -766,6 +796,14 @@ impl Atrium {
                 self.split_focused(direction, true)
             }
             AtriumAction::CloseFocused => self.close_focused().map(|_| ()),
+            AtriumAction::OpenCommandMenu => {
+                self.open_command_menu();
+                Ok(())
+            }
+            AtriumAction::CloseCommandMenu => {
+                self.close_command_menu();
+                Ok(())
+            }
             AtriumAction::Logout => {
                 self.logout();
                 Ok(())
@@ -779,6 +817,7 @@ impl Atrium {
         self.focused = None;
         self.pointer_capture = None;
         self.splitter_capture = None;
+        self.command_menu_open = false;
         self.layout_nodes = [None; MAX_LAYOUT_NODES];
         self.layout_root = None;
         self.command_menu.clear_query();
@@ -1768,6 +1807,31 @@ mod tests {
         assert!(AtriumAction::None.routes_to_surface());
         assert!(!AtriumAction::FocusNext.routes_to_surface());
         assert!(!AtriumAction::Launch(AppId::Terminal).routes_to_surface());
+    }
+
+    #[test]
+    fn meta_opens_command_menu_and_escape_preserves_surface_focus() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let surface = atrium
+            .spawn_surface(
+                atrium.request_surface(AppId::Calculator, client(1)).unwrap(),
+                surface(1),
+            )
+            .unwrap();
+        assert!(!atrium.command_menu_open());
+
+        let open = atrium.input(&InputMessage::key(KeyCode::META, KeyState::Pressed, MOD_META));
+        assert_eq!(open, AtriumAction::OpenCommandMenu);
+        atrium.apply_action(open).unwrap();
+        assert!(atrium.command_menu_open());
+        assert_eq!(atrium.focused_surface().unwrap().id, surface.id);
+
+        let close = atrium.input(&InputMessage::key(KeyCode::ESCAPE, KeyState::Pressed, 0));
+        assert_eq!(close, AtriumAction::CloseCommandMenu);
+        atrium.apply_action(close).unwrap();
+        assert!(!atrium.command_menu_open());
+        assert_eq!(atrium.focused_surface().unwrap().id, surface.id);
     }
 
     #[test]

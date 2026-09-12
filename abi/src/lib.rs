@@ -1315,6 +1315,7 @@ impl KeyCode {
     pub const SHIFT_LEFT: Self = Self(0x303);
     pub const SHIFT_RIGHT: Self = Self(0x304);
     pub const NUM_LOCK: Self = Self(0x305);
+    pub const META: Self = Self(0x306);
 
     pub const fn function(number: u8) -> Self {
         Self(0x100 + number as u16)
