@@ -1911,6 +1911,86 @@ mod tests {
     }
 
     #[test]
+    fn terminal_chrome_survives_cursor_and_cell_composition() {
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = GuiRect::new(0, 0, 64, 64);
+        display.gui_mut().create(11, root).unwrap();
+
+        let mut terminal =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        terminal.bounds = root.bounds;
+        terminal.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
+        terminal.z_order = 2;
+        let terminal_handle = display.gui_mut().create(11, terminal).unwrap().surface;
+        let mut chrome = logos_abi::GuiDrawBatch::new(terminal_handle, 1, terminal.bounds);
+        assert!(chrome.push(logos_abi::GuiDrawCommand::fill_surface(0x101820)));
+        assert!(
+            chrome
+                .push(logos_abi::GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 64, 32), 0x182535,))
+        );
+        display.gui_mut().update(11, chrome).unwrap();
+
+        let mut cursor =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 3);
+        cursor.bounds = root.bounds;
+        cursor.z_order = 3;
+        let cursor_handle = display.gui_mut().create(13, cursor).unwrap().surface;
+        display.register_cursor_surface(13, cursor_handle);
+
+        let mut terminal_update = RenderMessage::empty(MessageKind::RenderCells);
+        terminal_update.surface = terminal_handle;
+        terminal_update.columns = 2;
+        terminal_update.rows = 1;
+        terminal_update.count = 1;
+        terminal_update.cells[0] = Cell {
+            codepoint: b'T' as u32,
+            background: 0x101820,
+            foreground: 0xffffff,
+            ..Cell::EMPTY
+        };
+        display.apply(1, &terminal_update).unwrap();
+
+        let mut framebuffer = std::vec![0; 64 * 64 * 4];
+        display.render(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
+        }
+        let samples = [(0, 0), (24, 20), (56, 20)].map(|(x, y)| {
+            let offset = (y * 64 + x) * 4;
+            [
+                framebuffer[offset],
+                framebuffer[offset + 1],
+                framebuffer[offset + 2],
+                framebuffer[offset + 3],
+            ]
+        });
+
+        let cursor = logos_abi::GuiSceneOp::upsert(
+            cursor_handle,
+            1,
+            1,
+            logos_abi::GuiDrawCommand::fill_rect(GuiRect::new(8, 8, 3, 14), 0xffffff),
+        );
+        assert!(display.apply_cursor_scene_op(cursor));
+        let mut cursor = cursor;
+        cursor.frame = 2;
+        cursor.command.x = 40;
+        assert!(display.apply_cursor_scene_op(cursor));
+        display.apply(1, &terminal_update).unwrap();
+        display.render(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
+        }
+
+        for ((x, y), before) in [(0, 0), (24, 20), (56, 20)].into_iter().zip(samples) {
+            let offset = (y * 64 + x) * 4;
+            assert_eq!(&framebuffer[offset..offset + 4], &before);
+        }
+    }
+
+    #[test]
     fn software_cursor_only_renders_the_topmost_layer() {
         let mut display = Display::new(1);
         display.cursor_layers[0] = CursorLayer {
