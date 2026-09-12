@@ -558,6 +558,9 @@ pub extern "C" fn _start() -> ! {
             == IpcStatus::Ok
             && control.len as usize == mem::size_of::<FetchControl>()
         {
+            if !FetchControl::wire_enums_valid(&control.bytes[..mem::size_of::<FetchControl>()]) {
+                continue;
+            }
             let value: FetchControl =
                 unsafe { core::ptr::read_unaligned(control.bytes.as_ptr().cast()) };
             if value.is_valid()
@@ -626,6 +629,12 @@ pub extern "C" fn _start() -> ! {
                         == IpcStatus::Ok
                         && message.len as usize == mem::size_of::<NetworkResponse>()
                     {
+                        if !NetworkResponse::wire_enums_valid(
+                            &message.bytes[..mem::size_of::<NetworkResponse>()],
+                        ) {
+                            finish(&mut operation, FetchStatus::Network);
+                            continue;
+                        }
                         let response: NetworkResponse =
                             unsafe { core::ptr::read_unaligned(message.bytes.as_ptr().cast()) };
                         if let Some(status) = handle_network(current, response) {

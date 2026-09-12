@@ -468,6 +468,11 @@ impl FetchClient {
             pending.stage(b"fetch failed\r\n");
             return true;
         }
+        if !FetchResponse::wire_enums_valid(&message.bytes[..mem::size_of::<FetchResponse>()]) {
+            self.active = false;
+            pending.stage(b"fetch failed\r\n");
+            return true;
+        }
         let response: FetchResponse = unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
         if !response.is_valid() || response.request_id != self.request_id {
             self.active = false;
@@ -531,6 +536,9 @@ fn fetch_control(message: &IpcBytes, fetch: &mut FetchClient) -> bool {
     {
         return false;
     }
+    if !FlowControl::wire_enums_valid(&message.bytes[..mem::size_of::<FlowControl>()]) {
+        return false;
+    }
     let control: FlowControl = unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
     if control.is_valid() && (control.request_id == 0 || control.request_id == fetch.request_id) {
         fetch.cancel();
@@ -581,6 +589,11 @@ impl NetworkClient {
                     == IpcStatus::Ok
                     && control.len as usize == mem::size_of::<FlowControl>()
                 {
+                    if !FlowControl::wire_enums_valid(
+                        &control.bytes[..mem::size_of::<FlowControl>()],
+                    ) {
+                        continue;
+                    }
                     let value: FlowControl =
                         unsafe { ptr::read_unaligned(control.bytes.as_ptr().cast()) };
                     cancel_requested = value.is_valid()
@@ -613,6 +626,11 @@ impl NetworkClient {
                     if response.kind != MessageKind::NetworkResponse
                         || response.len as usize != mem::size_of::<NetworkResponse>()
                     {
+                        return Err(IpcStatus::Malformed);
+                    }
+                    if !NetworkResponse::wire_enums_valid(
+                        &response.bytes[..mem::size_of::<NetworkResponse>()],
+                    ) {
                         return Err(IpcStatus::Malformed);
                     }
                     let value: NetworkResponse =

@@ -1893,6 +1893,12 @@ pub enum FetchControlOperation {
     Cancel = 1,
 }
 
+impl FetchControlOperation {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        if raw == Self::Cancel as u8 { Some(Self::Cancel) } else { None }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct FetchControl {
@@ -1913,6 +1919,12 @@ impl FetchControl {
             && self.reserved[1] == 0
             && self.reserved[2] == 0
     }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| FetchControlOperation::from_raw(*raw).is_some())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1930,6 +1942,21 @@ pub enum FetchPhase {
 }
 
 impl FetchPhase {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Idle),
+            1 => Some(Self::Connect),
+            2 => Some(Self::SendRequest),
+            3 => Some(Self::ReadResponse),
+            4 => Some(Self::StageStorage),
+            5 => Some(Self::Commit),
+            6 => Some(Self::Complete),
+            7 => Some(Self::Failed),
+            8 => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+
     pub const fn is_valid(self) -> bool {
         matches!(
             self,
@@ -1963,6 +1990,23 @@ pub enum FetchStatus {
 }
 
 impl FetchStatus {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::InProgress),
+            2 => Some(Self::Cancelled),
+            3 => Some(Self::Invalid),
+            4 => Some(Self::Network),
+            5 => Some(Self::Storage),
+            6 => Some(Self::Timeout),
+            7 => Some(Self::Malformed),
+            8 => Some(Self::Oversized),
+            9 => Some(Self::Busy),
+            10 => Some(Self::Stale),
+            _ => None,
+        }
+    }
+
     pub const fn is_valid(self) -> bool {
         matches!(
             self,
@@ -2024,6 +2068,15 @@ impl FetchResponse {
             && self.status.is_valid()
             && (self.response_status == 0
                 || (self.response_status >= 200 && self.response_status < 300))
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, phase))
+            .is_some_and(|raw| FetchPhase::from_raw(*raw).is_some())
+            && bytes
+                .get(core::mem::offset_of!(Self, status))
+                .is_some_and(|raw| FetchStatus::from_raw(*raw).is_some())
     }
 
     pub const fn total(self) -> Option<u32> {
@@ -2099,6 +2152,12 @@ impl FlowControl {
             && self.reserved[0] == 0
             && self.reserved[1] == 0
             && self.reserved[2] == 0
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| FetchControlOperation::from_raw(*raw).is_some())
     }
 }
 
