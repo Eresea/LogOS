@@ -642,10 +642,11 @@ impl Display {
     }
 
     fn can_repaint_cursor(&self) -> bool {
-        // The framebuffer is updated in this same display task, so cursor
-        // repainting remains safe while GUI tiles are being composed. Later
-        // GUI tiles restore their own pixels before drawing the current cursor.
-        self.backbuffer.is_some() && self.surface_initialized && !self.gui_background_pending
+        // The backbuffer is authoritative only between GUI composition passes.
+        self.backbuffer.is_some()
+            && self.surface_initialized
+            && !self.gui_background_pending
+            && !self.render_pending()
     }
 
     fn queue_cursor_damage(&mut self, rect: GuiRect) {
@@ -1522,6 +1523,7 @@ const _: () = assert!(core::mem::size_of::<Display>() <= logos_abi::MAX_SERVICE_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use logos_abi::GuiDrawCommand;
 
     #[test]
     fn invalid_scalars_use_the_replacement_glyph() {
@@ -1959,6 +1961,37 @@ mod tests {
         assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0x30, 0x20, 0x10]);
         let latest_pixel = (8 * 64 + 56) * 4;
         assert_eq!(&framebuffer[latest_pixel..latest_pixel + 3], &[0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn software_cursor_defers_repaint_while_gui_tiles_are_pending() {
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = GuiRect::new(0, 0, 64, 32);
+        display.gui_mut().create(11, root).unwrap();
+        display.gui_mut().take_damage();
+        display.ensure_backbuffer(64 * 32 * 4).unwrap();
+        display.surface_initialized = true;
+        display.gui_damage[0] = GuiRect::new(0, 0, 64, 32);
+        display.gui_damage_count = 1;
+        let cursor = SurfaceHandle::new(1, 1, ATRIUM_OWNER).unwrap();
+        display.cursor_layers[1] =
+            CursorLayer { surface: cursor, x: 8, y: 8, pressed: false, order: 1 };
+
+        let mut move_event = GuiSceneOp::upsert(
+            cursor,
+            2,
+            1,
+            GuiDrawCommand::fill_rect(GuiRect::new(24, 8, 3, 14), 0xffffff),
+        );
+        assert!(display.apply_cursor_scene_op(move_event));
+        assert_eq!(display.cursor_damage_count, 0);
+        assert!(display.gui.has_damage());
+
+        move_event.frame = 3;
+        assert!(display.apply_cursor_scene_op(move_event));
+        assert!(display.gui.has_damage());
     }
 
     #[test]
