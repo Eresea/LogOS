@@ -118,17 +118,19 @@ fn emit_node(
 ) -> Result<(), UiSceneError> {
     match node.kind {
         UiNodeKind::Root => {
-            push_upsert(
-                output,
-                surface,
-                frame,
-                index,
-                0,
-                with_transform(
-                    GuiDrawCommand::fill_rect(to_gui_rect(bounds), color(theme.surface, node)),
-                    node,
-                ),
-            )?;
+            if !node.styles.contains(UiStyle::Transparent) {
+                push_upsert(
+                    output,
+                    surface,
+                    frame,
+                    index,
+                    0,
+                    with_transform(
+                        GuiDrawCommand::fill_rect(to_gui_rect(bounds), color(theme.surface, node)),
+                        node,
+                    ),
+                )?;
+            }
         }
         UiNodeKind::Panel | UiNodeKind::Form => {
             push_shadow(output, surface, frame, index, node, bounds)?;
@@ -419,7 +421,7 @@ fn intersect(left: UiRect, right: UiRect) -> UiRect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos_ui::{UiBlueprint, UiNodeKind, UiText};
+    use logos_ui::{UiBlueprint, UiNodeKind, UiStyle, UiStyleList, UiText};
 
     fn sample_tree() -> UiComponentTree {
         let mut blueprint = UiBlueprint::new();
@@ -454,6 +456,22 @@ mod tests {
         assert_eq!(scene.as_slice()[0].flags, GUI_DRAW_FLAG_MORE);
         assert_eq!(scene.as_slice()[4].flags, 0);
         assert!(scene.as_slice().iter().all(|op| op.is_valid()));
+    }
+
+    #[test]
+    fn transparent_root_does_not_paint_over_composed_surfaces() {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let mut styles = UiStyleList::EMPTY;
+        assert!(styles.push(UiStyle::Transparent));
+        blueprint.set_styles(root, styles).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 100, 80));
+
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let scene = emit(surface, 4, &tree, UiSceneTheme::DEFAULT).unwrap();
+        assert_eq!(scene.len(), 2);
+        assert_eq!(scene.as_slice()[1].operation, logos_abi::GuiNodeOperation::Commit);
     }
 
     #[test]

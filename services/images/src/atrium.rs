@@ -181,6 +181,12 @@ fn draw_home(
     let mut blueprint = logos_ui::UiBlueprint::new();
     let root = blueprint.push_root(logos_ui::UiNodeKind::Root, 1).ok();
     let Some(root) = root else { return };
+    let mut root_styles = logos_ui::UiStyleList::EMPTY;
+    if !root_styles.push(logos_ui::UiStyle::Transparent)
+        || blueprint.set_styles(root, root_styles).is_err()
+    {
+        return;
+    }
     let panel = blueprint.push_child(logos_ui::UiNodeKind::Panel, root, 2).ok();
     let Some(panel) = panel else { return };
     let mut panel_styles = logos_ui::UiStyleList::EMPTY;

@@ -267,6 +267,7 @@ pub enum UiStyle {
     Delay(u16),
     Ease(UiEasing),
     Animation(UiAnimationPreset),
+    Transparent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
