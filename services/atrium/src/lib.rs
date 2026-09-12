@@ -77,6 +77,7 @@ pub enum AppId {
     Files = 2,
     Terminal = 3,
     System = 4,
+    Settings = 5,
 }
 
 pub const COMMAND_MENU_ITEMS: [AppId; 4] =
@@ -88,6 +89,20 @@ pub const COMMAND_MENU_ITEM_TOP: i32 = 304;
 pub const COMMAND_MENU_ITEM_WIDTH: u32 = 512;
 pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 64;
 pub const COMMAND_MENU_ITEM_GAP: i32 = 12;
+pub const SIDEBAR_BOUNDS: GuiRect = GuiRect::new(0, 0, 248, 800);
+pub const SIDEBAR_SETTINGS_BOUNDS: GuiRect = GuiRect::new(16, 720, 216, 48);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettingsPage {
+    Overview,
+    Keyboard,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeyboardLayout {
+    Azerty,
+    Qwerty,
+}
 
 pub const fn surface_close_bounds(surface: GuiRect) -> GuiRect {
     GuiRect::new(
@@ -241,6 +256,8 @@ pub struct Atrium {
     next_focus_order: u32,
     home_surface: SurfaceHandle,
     lock_surface: SurfaceHandle,
+    settings_page: SettingsPage,
+    keyboard_layout: KeyboardLayout,
 }
 
 impl Atrium {
@@ -262,6 +279,8 @@ impl Atrium {
             next_focus_order: 1,
             home_surface: SurfaceHandle::EMPTY,
             lock_surface: SurfaceHandle::EMPTY,
+            settings_page: SettingsPage::Overview,
+            keyboard_layout: KeyboardLayout::Azerty,
         }
     }
 
@@ -339,6 +358,50 @@ impl Atrium {
 
     pub const fn next_split_direction(&self) -> SplitDirection {
         self.next_split
+    }
+
+    pub const fn settings_page(&self) -> SettingsPage {
+        self.settings_page
+    }
+
+    pub const fn keyboard_layout(&self) -> KeyboardLayout {
+        self.keyboard_layout
+    }
+
+    pub const fn sidebar_contains(x: i32, y: i32) -> bool {
+        SIDEBAR_BOUNDS.contains(x, y)
+    }
+
+    pub const fn sidebar_settings_contains(x: i32, y: i32) -> bool {
+        SIDEBAR_SETTINGS_BOUNDS.contains(x, y)
+    }
+
+    pub fn settings_input(&mut self, input: &InputMessage) -> bool {
+        let Some(pointer) = input.pointer_event() else { return false };
+        if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
+            return false;
+        }
+        let x = i32::from(pointer.x);
+        let y = i32::from(pointer.y);
+        match self.settings_page {
+            SettingsPage::Overview if (20..=260).contains(&x) && (76..=132).contains(&y) => {
+                self.settings_page = SettingsPage::Keyboard;
+                true
+            }
+            SettingsPage::Keyboard if (20..=140).contains(&x) && (44..=84).contains(&y) => {
+                self.settings_page = SettingsPage::Overview;
+                true
+            }
+            SettingsPage::Keyboard if (280..=760).contains(&x) && (132..=192).contains(&y) => {
+                self.keyboard_layout = KeyboardLayout::Azerty;
+                true
+            }
+            SettingsPage::Keyboard if (280..=760).contains(&x) && (204..=264).contains(&y) => {
+                self.keyboard_layout = KeyboardLayout::Qwerty;
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn focused_surface(&self) -> Option<Surface> {
@@ -1993,6 +2056,23 @@ mod tests {
             atrium.input(&InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0)),
             AtriumAction::Launch(AppId::Terminal)
         );
+    }
+
+    #[test]
+    fn settings_page_selects_keyboard_layout() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        assert!(Atrium::sidebar_contains(40, 40));
+        assert!(Atrium::sidebar_settings_contains(40, 740));
+        assert_eq!(atrium.settings_page(), SettingsPage::Overview);
+
+        let open_keyboard = InputMessage::pointer(40, 100, 1, PointerState::Down).unwrap();
+        assert!(atrium.settings_input(&open_keyboard));
+        assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
+
+        let select_qwerty = InputMessage::pointer(300, 230, 1, PointerState::Down).unwrap();
+        assert!(atrium.settings_input(&select_qwerty));
+        assert_eq!(atrium.keyboard_layout(), KeyboardLayout::Qwerty);
     }
 
     #[test]

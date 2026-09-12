@@ -138,7 +138,6 @@ static mut COMMAND_MENU_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentT
 static mut PENDING_HOME_SCENE: logos_ui_graphics::UiSceneFrame =
     logos_ui_graphics::UiSceneFrame::new();
 static mut PENDING_HOME_SCENE_INDEX: usize = 0;
-static mut HOME_SCENE_HIDDEN: bool = false;
 
 fn home_scene_pending() -> bool {
     unsafe {
@@ -187,6 +186,23 @@ fn draw_home(
     {
         return;
     }
+    let sidebar = blueprint.push_child(logos_ui::UiNodeKind::Panel, root, 2).ok();
+    let Some(sidebar) = sidebar else { return };
+    let account = blueprint.push_child(logos_ui::UiNodeKind::Label, sidebar, 3).ok();
+    let status = blueprint.push_child(logos_ui::UiNodeKind::Label, sidebar, 4).ok();
+    let settings = blueprint.push_child(logos_ui::UiNodeKind::Button, sidebar, 5).ok();
+    let Some(account) = account else { return };
+    let Some(status) = status else { return };
+    let Some(settings) = settings else { return };
+    let mut sidebar_styles = logos_ui::UiStyleList::EMPTY;
+    let mut settings_styles = logos_ui::UiStyleList::EMPTY;
+    if !sidebar_styles.push(logos_ui::UiStyle::RoundedLarge)
+        || !settings_styles.push(logos_ui::UiStyle::BackgroundAccent)
+        || blueprint.set_styles(sidebar, sidebar_styles).is_err()
+        || blueprint.set_styles(settings, settings_styles).is_err()
+    {
+        return;
+    }
     let panel = blueprint.push_child(logos_ui::UiNodeKind::Panel, root, 2).ok();
     let Some(panel) = panel else { return };
     let mut panel_styles = logos_ui::UiStyleList::EMPTY;
@@ -221,7 +237,13 @@ fn draw_home(
     let Some(footer_text) = logos_ui::UiText::from_bytes(b"Up/Down select   Enter open") else {
         return;
     };
-    if blueprint.set_text(title, title_text).is_err()
+    let Some(account_text) = logos_ui::UiText::from_bytes(b"User account") else { return };
+    let Some(status_text) = logos_ui::UiText::from_bytes(b"Administrator") else { return };
+    let Some(settings_text) = logos_ui::UiText::from_bytes(b"Settings") else { return };
+    if blueprint.set_text(account, account_text).is_err()
+        || blueprint.set_text(status, status_text).is_err()
+        || blueprint.set_text(settings, settings_text).is_err()
+        || blueprint.set_text(title, title_text).is_err()
         || blueprint.set_text(placeholder, placeholder_text).is_err()
         || blueprint.set_text(footer, footer_text).is_err()
     {
@@ -260,12 +282,21 @@ fn draw_home(
             )
             .is_ok()
     };
+    let menu_visible = atrium.command_menu_open();
+    let menu_bounds = if menu_visible { logos_atrium::COMMAND_MENU_BOUNDS } else { GuiRect::EMPTY };
+    let title_bounds = if menu_visible { GuiRect::new(384, 160, 512, 40) } else { GuiRect::EMPTY };
+    let input_bounds = if menu_visible { GuiRect::new(384, 216, 512, 56) } else { GuiRect::EMPTY };
+    let footer_bounds = if menu_visible { GuiRect::new(384, 632, 512, 24) } else { GuiRect::EMPTY };
     if !set_bounds(tree, root, logos_atrium::FULLSCREEN_SURFACE_BOUNDS)
-        || !set_bounds(tree, panel, logos_atrium::COMMAND_MENU_BOUNDS)
-        || !set_bounds(tree, title, GuiRect::new(384, 160, 512, 40))
-        || !set_bounds(tree, input, GuiRect::new(384, 216, 512, 56))
-        || !set_bounds(tree, placeholder, GuiRect::new(384, 216, 512, 56))
-        || !set_bounds(tree, footer, GuiRect::new(384, 632, 512, 24))
+        || !set_bounds(tree, sidebar, logos_atrium::SIDEBAR_BOUNDS)
+        || !set_bounds(tree, account, GuiRect::new(32, 40, 184, 28))
+        || !set_bounds(tree, status, GuiRect::new(32, 76, 184, 28))
+        || !set_bounds(tree, settings, logos_atrium::SIDEBAR_SETTINGS_BOUNDS)
+        || !set_bounds(tree, panel, menu_bounds)
+        || !set_bounds(tree, title, title_bounds)
+        || !set_bounds(tree, input, input_bounds)
+        || !set_bounds(tree, placeholder, input_bounds)
+        || !set_bounds(tree, footer, footer_bounds)
     {
         return;
     }
@@ -273,10 +304,12 @@ fn draw_home(
     let query_is_empty = query.as_bytes().is_empty();
     let Some(input_handle) = tree.tree().handle_at(usize::from(input)).ok() else { return };
     let _ = tree.set_value(input_handle, query);
-    let _ = tree.focus(input_handle);
+    if atrium.command_menu_open() {
+        let _ = tree.focus(input_handle);
+    }
     let labels = logos_atrium::COMMAND_MENU_LABELS;
     for (index, button) in buttons.into_iter().enumerate() {
-        let visible = index < atrium.launcher_result_count();
+        let visible = menu_visible && index < atrium.launcher_result_count();
         let bounds =
             if visible { logos_atrium::command_menu_item_bounds(index) } else { GuiRect::EMPTY };
         if !set_bounds(tree, button, bounds) {
@@ -405,6 +438,82 @@ fn draw_calculator_ui(
     false
 }
 
+fn draw_settings_ui(
+    display: logos_abi::CapabilityHandle,
+    surface: logos_atrium::Surface,
+    atrium: &logos_atrium::Atrium,
+    sequence: u32,
+) -> bool {
+    let bounds = surface.bounds;
+    let mut panels = GuiDrawBatch::new(surface.reference, sequence, bounds);
+    panels.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    let _ = panels.push(GuiDrawCommand::fill_rounded_rect(
+        GuiRect::new(bounds.x + 20, bounds.y + 58, 220, bounds.height.saturating_sub(76)),
+        0x182535,
+        12,
+    ));
+    let _ = panels.push(GuiDrawCommand::fill_rounded_rect(
+        GuiRect::new(
+            bounds.x + 260,
+            bounds.y + 58,
+            bounds.width.saturating_sub(280),
+            bounds.height.saturating_sub(76),
+        ),
+        0x182535,
+        12,
+    ));
+    if common::ipc_send_scene_batch(display, &panels, 6) == IpcStatus::Full {
+        return true;
+    }
+
+    let mut labels = GuiDrawBatch::new(surface.reference, sequence, bounds);
+    labels.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    push_surface_text(&mut labels, bounds, 40, 86, 0xffffff, b"Settings");
+    push_surface_text(&mut labels, bounds, 40, 112, 0xb8c7da, b"Keyboard");
+    if atrium.settings_page() == logos_atrium::SettingsPage::Keyboard {
+        push_surface_text(&mut labels, bounds, 280, 84, 0xb8c7da, b"< Settings");
+        push_surface_text(&mut labels, bounds, 280, 112, 0xffffff, b"Keyboard");
+    } else {
+        push_surface_text(&mut labels, bounds, 280, 84, 0xffffff, b"Choose a setting");
+    }
+    if common::ipc_send_scene_batch(display, &labels, 7) == IpcStatus::Full {
+        return true;
+    }
+
+    let mut content = GuiDrawBatch::new(surface.reference, sequence, bounds);
+    if atrium.settings_page() == logos_atrium::SettingsPage::Keyboard {
+        push_surface_text(&mut content, bounds, 280, 150, 0xffffff, b"Keyboard layout");
+        push_surface_text(
+            &mut content,
+            bounds,
+            280,
+            180,
+            0xffffff,
+            if atrium.keyboard_layout() == logos_atrium::KeyboardLayout::Azerty {
+                b"[x] AZERTY"
+            } else {
+                b"[ ] AZERTY"
+            },
+        );
+        push_surface_text(
+            &mut content,
+            bounds,
+            280,
+            228,
+            0xffffff,
+            if atrium.keyboard_layout() == logos_atrium::KeyboardLayout::Qwerty {
+                b"[x] QWERTY"
+            } else {
+                b"[ ] QWERTY"
+            },
+        );
+    } else {
+        push_surface_text(&mut content, bounds, 40, 150, 0xffffff, b"Keyboard");
+        push_surface_text(&mut content, bounds, 40, 178, 0xb8c7da, b"Select a keyboard layout");
+    }
+    common::ipc_send_scene_batch(display, &content, 8) == IpcStatus::Full
+}
+
 fn draw_surface_chrome(
     display: logos_abi::CapabilityHandle,
     surface: logos_atrium::Surface,
@@ -446,6 +555,7 @@ fn draw_surface_chrome(
 fn draw_app(
     display: logos_abi::CapabilityHandle,
     surface: logos_atrium::Surface,
+    atrium: &logos_atrium::Atrium,
     calculator: &logos_atrium::Calculator,
     sequence: u32,
 ) -> bool {
@@ -454,6 +564,7 @@ fn draw_app(
         logos_atrium::AppId::Files => b"Files",
         logos_atrium::AppId::Terminal => b"Terminal",
         logos_atrium::AppId::System => b"System",
+        logos_atrium::AppId::Settings => b"Settings",
     };
     match surface.app {
         logos_atrium::AppId::Calculator => {
@@ -508,6 +619,13 @@ fn draw_app(
         logos_atrium::AppId::System => {
             // The System service owns this retained scene, including its chrome.
             false
+        }
+        logos_atrium::AppId::Settings => {
+            if draw_surface_chrome(display, surface, sequence, title, true, true) {
+                true
+            } else {
+                draw_settings_ui(display, surface, atrium, sequence)
+            }
         }
     }
 }
@@ -759,34 +877,17 @@ fn render(
         if home_scene_pending() {
             return status == IpcStatus::Full;
         }
-        if atrium.command_menu_open() {
-            return false;
-        }
     }
     let Some(home) = atrium.home_surface().is_valid().then_some(atrium.home_surface()) else {
         return false;
     };
-    if atrium.command_menu_open() {
-        unsafe { *core::ptr::addr_of_mut!(HOME_SCENE_HIDDEN) = false };
-        *sequence = sequence.wrapping_add(1).max(1);
-        draw_home(display, home, atrium, *sequence);
-        if home_scene_pending() {
-            return true;
-        }
-    } else {
-        let hidden = unsafe { *core::ptr::addr_of!(HOME_SCENE_HIDDEN) };
-        if !hidden {
-            *sequence = sequence.wrapping_add(1).max(1);
-            let clear = GuiSceneOp::clear(home, *sequence);
-            match common::ipc_send_handle(display, &clear) {
-                IpcStatus::Ok => unsafe { *core::ptr::addr_of_mut!(HOME_SCENE_HIDDEN) = true },
-                IpcStatus::Full => return true,
-                _ => {}
-            }
-        }
+    *sequence = sequence.wrapping_add(1).max(1);
+    draw_home(display, home, atrium, *sequence);
+    if home_scene_pending() {
+        return true;
     }
     for surface in atrium.surfaces() {
-        if draw_app(display, surface, calculator, *sequence) {
+        if draw_app(display, surface, atrium, calculator, *sequence) {
             return true;
         }
     }
@@ -1652,10 +1753,31 @@ pub extern "C" fn _start() -> ! {
                             .flatten()
                     })
                     .is_some();
+            let sidebar_pointer = !atrium.command_menu_open()
+                && event.pointer_event().is_some_and(|pointer| {
+                    logos_atrium::Atrium::sidebar_contains(
+                        i32::from(pointer.x),
+                        i32::from(pointer.y),
+                    )
+                });
+            let sidebar_action =
+                sidebar_pointer.then(|| event.pointer_event()).flatten().and_then(|pointer| {
+                    (pointer.state == PointerState::Down
+                        && pointer.buttons & 1 != 0
+                        && logos_atrium::Atrium::sidebar_settings_contains(
+                            i32::from(pointer.x),
+                            i32::from(pointer.y),
+                        ))
+                    .then_some(logos_atrium::AtriumAction::Launch(logos_atrium::AppId::Settings))
+                });
             if menu_selected {
                 event = InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0);
             } else if atrium.command_menu_open() && event.pointer_event().is_some() {
                 continue;
+            } else if sidebar_pointer {
+                if sidebar_action.is_none() {
+                    continue;
+                }
             } else if atrium.handle_splitter_pointer(&event) {
                 queue_surface_updates(
                     display_control,
@@ -1695,7 +1817,12 @@ pub extern "C" fn _start() -> ! {
                         event = InputMessage::key(KeyCode::ESCAPE, KeyState::Pressed, 0);
                     } else {
                         let routed = AtriumSurfaceInput::new(surface.reference, local);
-                        if routed.is_valid() {
+                        if surface.app == logos_atrium::AppId::Settings {
+                            if atrium.settings_input(&local) {
+                                pending_app_render =
+                                    render(display, atrium, calculator, &mut sequence);
+                            }
+                        } else if routed.is_valid() {
                             if surface.app == logos_atrium::AppId::Terminal {
                                 let _ = common::ipc_send_handle(terminal, &routed);
                             } else if surface.app == logos_atrium::AppId::System {
@@ -1721,7 +1848,7 @@ pub extern "C" fn _start() -> ! {
                     continue;
                 }
             }
-            let action = atrium.input(&event);
+            let action = sidebar_action.unwrap_or_else(|| atrium.input(&event));
             match action {
                 logos_atrium::AtriumAction::Launch(app) if pending_surface.is_none() => {
                     atrium.close_command_menu();
