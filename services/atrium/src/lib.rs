@@ -19,7 +19,7 @@ pub const FULLSCREEN_SURFACE_BOUNDS: GuiRect = GuiRect::new(
     logos_abi::DEFAULT_SCREEN_WIDTH as u32,
     logos_abi::DEFAULT_SCREEN_HEIGHT as u32,
 );
-pub const TERMINAL_SURFACE_BOUNDS: GuiRect = GuiRect::new(160, 96, 960, 608);
+pub const TERMINAL_SURFACE_BOUNDS: GuiRect = FULLSCREEN_SURFACE_BOUNDS;
 pub const STATUS_BAR_BOUNDS: GuiRect =
     GuiRect::new(0, 0, logos_abi::DEFAULT_SCREEN_WIDTH as u32, 32);
 pub const STATUS_BAR_CLOSE_BOUNDS: GuiRect = GuiRect::new(1200, 0, 80, 32);
@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     #[test]
-    fn app_surfaces_use_bounded_terminal_window_and_close_button_is_bounded() {
+    fn app_surfaces_use_fullscreen_composition_and_close_button_is_bounded() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
         for (index, app) in [AppId::Calculator, AppId::Files, AppId::Terminal, AppId::System]
@@ -1085,12 +1085,7 @@ mod tests {
             .enumerate()
         {
             let request = atrium.request_surface(app, client(index as u32 + 1)).unwrap();
-            let expected = if app == AppId::Terminal {
-                TERMINAL_SURFACE_BOUNDS
-            } else {
-                FULLSCREEN_SURFACE_BOUNDS
-            };
-            assert_eq!(request.bounds(), expected);
+            assert_eq!(request.bounds(), FULLSCREEN_SURFACE_BOUNDS);
             assert_eq!(request.mode(), SurfaceMode::Tiled);
         }
         assert!(STATUS_BAR_BOUNDS.contains(320, 16));
