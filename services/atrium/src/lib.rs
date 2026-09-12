@@ -89,8 +89,8 @@ pub const COMMAND_MENU_ITEM_TOP: i32 = 304;
 pub const COMMAND_MENU_ITEM_WIDTH: u32 = 512;
 pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 64;
 pub const COMMAND_MENU_ITEM_GAP: i32 = 12;
-pub const SIDEBAR_BOUNDS: GuiRect = GuiRect::new(0, 0, 248, 800);
-pub const SIDEBAR_SETTINGS_BOUNDS: GuiRect = GuiRect::new(16, 720, 216, 48);
+pub const SIDEBAR_BOUNDS: GuiRect = GuiRect::new(0, 0, 112, 800);
+pub const SIDEBAR_SETTINGS_BOUNDS: GuiRect = GuiRect::new(16, 720, 80, 48);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsPage {

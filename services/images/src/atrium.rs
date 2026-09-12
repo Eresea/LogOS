@@ -189,34 +189,21 @@ fn draw_home(
     let sidebar = blueprint.push_child(logos_ui::UiNodeKind::Panel, root, 2).ok();
     let Some(sidebar) = sidebar else { return };
     let account = blueprint.push_child(logos_ui::UiNodeKind::Label, sidebar, 3).ok();
-    let status = blueprint.push_child(logos_ui::UiNodeKind::Label, sidebar, 4).ok();
-    let settings = blueprint.push_child(logos_ui::UiNodeKind::Button, sidebar, 5).ok();
+    let settings = blueprint.push_child(logos_ui::UiNodeKind::Button, sidebar, 4).ok();
     let Some(account) = account else { return };
-    let Some(status) = status else { return };
     let Some(settings) = settings else { return };
-    let mut sidebar_styles = logos_ui::UiStyleList::EMPTY;
     let mut settings_styles = logos_ui::UiStyleList::EMPTY;
-    if !sidebar_styles.push(logos_ui::UiStyle::RoundedLarge)
-        || !settings_styles.push(logos_ui::UiStyle::BackgroundAccent)
-        || blueprint.set_styles(sidebar, sidebar_styles).is_err()
+    if !settings_styles.push(logos_ui::UiStyle::BackgroundAccent)
         || blueprint.set_styles(settings, settings_styles).is_err()
     {
         return;
     }
     let panel = blueprint.push_child(logos_ui::UiNodeKind::Panel, root, 2).ok();
     let Some(panel) = panel else { return };
-    let mut panel_styles = logos_ui::UiStyleList::EMPTY;
-    if !panel_styles.push(logos_ui::UiStyle::RoundedLarge)
-        || blueprint.set_styles(panel, panel_styles).is_err()
-    {
-        return;
-    }
     let title = blueprint.push_child(logos_ui::UiNodeKind::Label, panel, 3).ok();
     let input = blueprint.push_child(logos_ui::UiNodeKind::TextInput, panel, 4).ok();
-    let placeholder = blueprint.push_child(logos_ui::UiNodeKind::Label, panel, 5).ok();
     let Some(title) = title else { return };
     let Some(input) = input else { return };
-    let Some(placeholder) = placeholder else { return };
     let mut buttons = [0u16; 4];
     for (index, button_slot) in buttons.iter_mut().enumerate() {
         let Some(button) =
@@ -226,43 +213,27 @@ fn draw_home(
         };
         *button_slot = button;
     }
-    let footer = blueprint.push_child(logos_ui::UiNodeKind::Label, panel, 20).ok();
-    let Some(footer) = footer else { return };
     let Some(title_text) = logos_ui::UiText::from_bytes(b"What do you want to open?") else {
         return;
     };
     let Some(placeholder_text) = logos_ui::UiText::from_bytes(b"Search apps...") else {
         return;
     };
-    let Some(footer_text) = logos_ui::UiText::from_bytes(b"Up/Down select   Enter open") else {
-        return;
-    };
-    let Some(account_text) = logos_ui::UiText::from_bytes(b"User account") else { return };
-    let Some(status_text) = logos_ui::UiText::from_bytes(b"Administrator") else { return };
+    let Some(account_text) = logos_ui::UiText::from_bytes(b"Admin") else { return };
     let Some(settings_text) = logos_ui::UiText::from_bytes(b"Settings") else { return };
     if blueprint.set_text(account, account_text).is_err()
-        || blueprint.set_text(status, status_text).is_err()
         || blueprint.set_text(settings, settings_text).is_err()
         || blueprint.set_text(title, title_text).is_err()
-        || blueprint.set_text(placeholder, placeholder_text).is_err()
-        || blueprint.set_text(footer, footer_text).is_err()
     {
         return;
     }
     let mut title_styles = logos_ui::UiStyleList::EMPTY;
-    let mut placeholder_styles = logos_ui::UiStyleList::EMPTY;
-    let mut footer_styles = logos_ui::UiStyleList::EMPTY;
     if !title_styles.push(logos_ui::UiStyle::Text4xl)
         || !title_styles.push(logos_ui::UiStyle::FontLight)
-        || !placeholder_styles.push(logos_ui::UiStyle::TextMuted)
-        || !footer_styles.push(logos_ui::UiStyle::TextMuted)
     {
         return;
     }
-    if blueprint.set_styles(title, title_styles).is_err()
-        || blueprint.set_styles(placeholder, placeholder_styles).is_err()
-        || blueprint.set_styles(footer, footer_styles).is_err()
-    {
+    if blueprint.set_styles(title, title_styles).is_err() {
         return;
     }
     let tree = unsafe { &mut *core::ptr::addr_of_mut!(COMMAND_MENU_TREE) };
@@ -286,24 +257,20 @@ fn draw_home(
     let menu_bounds = if menu_visible { logos_atrium::COMMAND_MENU_BOUNDS } else { GuiRect::EMPTY };
     let title_bounds = if menu_visible { GuiRect::new(384, 160, 512, 40) } else { GuiRect::EMPTY };
     let input_bounds = if menu_visible { GuiRect::new(384, 216, 512, 56) } else { GuiRect::EMPTY };
-    let footer_bounds = if menu_visible { GuiRect::new(384, 632, 512, 24) } else { GuiRect::EMPTY };
     if !set_bounds(tree, root, logos_atrium::FULLSCREEN_SURFACE_BOUNDS)
         || !set_bounds(tree, sidebar, logos_atrium::SIDEBAR_BOUNDS)
-        || !set_bounds(tree, account, GuiRect::new(32, 40, 184, 28))
-        || !set_bounds(tree, status, GuiRect::new(32, 76, 184, 28))
+        || !set_bounds(tree, account, GuiRect::new(16, 40, 80, 28))
         || !set_bounds(tree, settings, logos_atrium::SIDEBAR_SETTINGS_BOUNDS)
         || !set_bounds(tree, panel, menu_bounds)
         || !set_bounds(tree, title, title_bounds)
         || !set_bounds(tree, input, input_bounds)
-        || !set_bounds(tree, placeholder, input_bounds)
-        || !set_bounds(tree, footer, footer_bounds)
     {
         return;
     }
     let query = atrium.launcher_query();
     let query_is_empty = query.as_bytes().is_empty();
     let Some(input_handle) = tree.tree().handle_at(usize::from(input)).ok() else { return };
-    let _ = tree.set_value(input_handle, query);
+    let _ = tree.set_value(input_handle, if query_is_empty { placeholder_text } else { query });
     if atrium.command_menu_open() {
         let _ = tree.focus(input_handle);
     }
@@ -337,12 +304,6 @@ fn draw_home(
         if tree.set_styles(handle, styles).is_err() {
             return;
         }
-    }
-    if let Ok(placeholder_handle) = tree.tree().handle_at(usize::from(placeholder)) {
-        let _ = tree.set_text(
-            placeholder_handle,
-            if query_is_empty { placeholder_text } else { logos_ui::UiText::EMPTY },
-        );
     }
     let _ = tree.advance(common::current_ticks());
     let scene = match logos_ui_graphics::emit(
