@@ -140,6 +140,13 @@ static mut PENDING_HOME_SCENE: logos_ui_graphics::UiSceneFrame =
 static mut PENDING_HOME_SCENE_INDEX: usize = 0;
 static mut HOME_SCENE_HIDDEN: bool = false;
 
+fn home_scene_pending() -> bool {
+    unsafe {
+        *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
+            < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
+    }
+}
+
 fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) {
     if let Some(command) = GuiDrawCommand::glyph_run(x, y, color, text) {
         let _ = batch.push(command);
@@ -698,17 +705,12 @@ fn render(
     calculator: &logos_atrium::Calculator,
     sequence: &mut u32,
 ) -> bool {
-    let home_scene_pending = unsafe {
-        *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
-            < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
-    };
-    if home_scene_pending {
-        let _ = flush_pending_home_scene(display);
-        let still_pending = unsafe {
-            *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
-                < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
-        };
-        if still_pending {
+    if home_scene_pending() {
+        let status = flush_pending_home_scene(display);
+        if home_scene_pending() {
+            return status == IpcStatus::Full;
+        }
+        if atrium.focused_surface().is_none() {
             return false;
         }
     }
@@ -730,6 +732,7 @@ fn render(
         unsafe { *core::ptr::addr_of_mut!(HOME_SCENE_HIDDEN) = false };
         *sequence = sequence.wrapping_add(1).max(1);
         draw_home(display, home, atrium, *sequence);
+        return home_scene_pending();
     }
     if let Some(surface) = atrium.focused_surface() {
         return draw_app(display, surface, calculator, *sequence);
@@ -1804,11 +1807,7 @@ pub extern "C" fn _start() -> ! {
         if menu_motion_active {
             pending_app_render = render(display, atrium, calculator, &mut sequence);
         }
-        let home_scene_pending = unsafe {
-            *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
-                < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
-        };
-        if home_scene_pending {
+        if home_scene_pending() {
             let _ = flush_pending_home_scene(display);
         }
         let mut wait_capabilities = [logos_abi::CapabilityHandle::EMPTY; 24];
