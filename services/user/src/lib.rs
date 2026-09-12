@@ -447,29 +447,38 @@ impl UserCatalog {
         home: NamespaceRoot,
         entropy: &mut E,
     ) -> Result<UserId, UserError> {
-        if self.claimed {
-            return Err(UserError::AlreadyClaimed);
+        let previous = (self.claimed, self.next_user, self.next_role, self.users, self.roles);
+        let result = (|| {
+            if self.claimed {
+                return Err(UserError::AlreadyClaimed);
+            }
+            let user = self.create_record(name, password, home, entropy)?;
+            self.user_mut(user)?.admin = true;
+            let admin = self.ensure_builtin_role(
+                b"system-admin",
+                CapabilityTemplate {
+                    root: home,
+                    rights: NamespaceRights::READ
+                        | NamespaceRights::WRITE
+                        | NamespaceRights::DERIVE,
+                },
+            )?;
+            let user_role = self.ensure_builtin_role(
+                b"user",
+                CapabilityTemplate {
+                    root: NamespaceRoot::EMPTY,
+                    rights: NamespaceRights::READ | NamespaceRights::WRITE,
+                },
+            )?;
+            self.assign_role(user, admin)?;
+            self.assign_role(user, user_role)?;
+            self.claimed = true;
+            Ok(user)
+        })();
+        if result.is_err() {
+            (self.claimed, self.next_user, self.next_role, self.users, self.roles) = previous;
         }
-        let user = self.create_record(name, password, home, entropy)?;
-        self.user_mut(user)?.admin = true;
-        let admin = self.ensure_builtin_role(
-            b"system-admin",
-            CapabilityTemplate {
-                root: home,
-                rights: NamespaceRights::READ | NamespaceRights::WRITE | NamespaceRights::DERIVE,
-            },
-        )?;
-        let user_role = self.ensure_builtin_role(
-            b"user",
-            CapabilityTemplate {
-                root: NamespaceRoot::EMPTY,
-                rights: NamespaceRights::READ | NamespaceRights::WRITE,
-            },
-        )?;
-        self.assign_role(user, admin)?;
-        self.assign_role(user, user_role)?;
-        self.claimed = true;
-        Ok(user)
+        result
     }
 
     pub fn create_user<E: EntropySource>(
@@ -479,19 +488,26 @@ impl UserCatalog {
         home: NamespaceRoot,
         entropy: &mut E,
     ) -> Result<UserId, UserError> {
-        if !self.claimed {
-            return Err(UserError::NotClaimed);
+        let previous = (self.claimed, self.next_user, self.next_role, self.users, self.roles);
+        let result = (|| {
+            if !self.claimed {
+                return Err(UserError::NotClaimed);
+            }
+            let user = self.create_record(name, password, home, entropy)?;
+            let role = self.ensure_builtin_role(
+                b"user",
+                CapabilityTemplate {
+                    root: NamespaceRoot::EMPTY,
+                    rights: NamespaceRights::READ | NamespaceRights::WRITE,
+                },
+            )?;
+            self.assign_role(user, role)?;
+            Ok(user)
+        })();
+        if result.is_err() {
+            (self.claimed, self.next_user, self.next_role, self.users, self.roles) = previous;
         }
-        let user = self.create_record(name, password, home, entropy)?;
-        let role = self.ensure_builtin_role(
-            b"user",
-            CapabilityTemplate {
-                root: NamespaceRoot::EMPTY,
-                rights: NamespaceRights::READ | NamespaceRights::WRITE,
-            },
-        )?;
-        self.assign_role(user, role)?;
-        Ok(user)
+        result
     }
 
     /// Rename is intentionally a policy operation. The caller must already
@@ -879,10 +895,11 @@ impl UserCatalog {
         }
         let slot = self.users.iter().position(Option::is_none).ok_or(UserError::Capacity)?;
         let id = UserId::new(self.next_user, 1).ok_or(UserError::Corrupt)?;
-        self.next_user = self.next_user.checked_add(1).ok_or(UserError::Capacity)?;
+        let next_user = self.next_user.checked_add(1).ok_or(UserError::Capacity)?;
         let mut salt = [0; USER_ARGON2_SALT_BYTES];
         entropy.fill(&mut salt)?;
         let verifier = PasswordVerifier::create(password, salt)?;
+        self.next_user = next_user;
         self.users[slot] = Some(UserRecord {
             id,
             name,
@@ -1234,6 +1251,44 @@ mod tests {
 
     fn root(value: u64) -> NamespaceRoot {
         NamespaceRoot::new(value, 1).unwrap()
+    }
+
+    fn full_roles() -> [Option<RoleRecord>; MAX_ROLES] {
+        let role = RoleRecord {
+            id: RoleId::new(100, 1).unwrap(),
+            name: RoleName::parse(b"placeholder").unwrap(),
+            templates: [None; MAX_ROLE_TEMPLATES],
+            template_count: 0,
+        };
+        [Some(role); MAX_ROLES]
+    }
+
+    #[test]
+    fn failed_user_mutations_leave_catalog_unchanged() {
+        let mut catalog = UserCatalog::new();
+        catalog.roles = full_roles();
+        let mut entropy = Entropy(17);
+        assert_eq!(
+            catalog.claim(b"admin", b"password", root(1), &mut entropy),
+            Err(UserError::Capacity)
+        );
+        assert!(catalog.users.iter().all(Option::is_none));
+        assert_eq!(catalog.next_user, 1);
+        assert_eq!(catalog.next_role, 1);
+
+        let mut claimed = UserCatalog::new();
+        claimed.claim(b"admin", b"password", root(2), &mut entropy).unwrap();
+        claimed.roles = full_roles();
+        let users = claimed.users;
+        let next_user = claimed.next_user;
+        let next_role = claimed.next_role;
+        assert_eq!(
+            claimed.create_user(b"alice", b"password", root(3), &mut entropy),
+            Err(UserError::Capacity)
+        );
+        assert_eq!(claimed.users, users);
+        assert_eq!(claimed.next_user, next_user);
+        assert_eq!(claimed.next_role, next_role);
     }
 
     #[test]
