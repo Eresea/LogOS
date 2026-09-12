@@ -196,7 +196,8 @@ pub extern "C" fn _start() -> ! {
         }
         while common::ipc_receive_handle(user_receive, &mut response) == IpcStatus::Ok {
             if let Some(bytes) = response.as_bytes().filter(|bytes| {
-                bytes.len() == mem::size_of::<UserResponse>()
+                response.kind == MessageKind::UserResponse
+                    && bytes.len() == mem::size_of::<UserResponse>()
                     && UserResponse::wire_enums_valid(bytes)
             }) {
                 let result: UserResponse = unsafe { ptr::read_unaligned(bytes.as_ptr().cast()) };

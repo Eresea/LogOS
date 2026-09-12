@@ -586,6 +586,7 @@ pub extern "C" fn _start() -> ! {
             let mut message = IpcBytes::empty(MessageKind::FetchRequest);
             if common::ipc_receive_handle(ipc_capabilities().flow_receive, &mut message)
                 == IpcStatus::Ok
+                && message.kind == MessageKind::FetchRequest
                 && message.len as usize == mem::size_of::<FetchRequest>()
             {
                 let request: FetchRequest =
@@ -627,6 +628,7 @@ pub extern "C" fn _start() -> ! {
                     let mut message = IpcBytes::empty(MessageKind::NetworkResponse);
                     if common::ipc_receive_handle(ipc_capabilities().network_receive, &mut message)
                         == IpcStatus::Ok
+                        && message.kind == MessageKind::NetworkResponse
                         && message.len as usize == mem::size_of::<NetworkResponse>()
                     {
                         if !NetworkResponse::wire_enums_valid(

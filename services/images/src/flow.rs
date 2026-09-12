@@ -463,7 +463,9 @@ impl FetchClient {
             self.body_len = end;
             return true;
         }
-        if message.len as usize != mem::size_of::<FetchResponse>() {
+        if message.kind != MessageKind::FetchResponse
+            || message.len as usize != mem::size_of::<FetchResponse>()
+        {
             self.active = false;
             pending.stage(b"fetch failed\r\n");
             return true;
@@ -982,6 +984,7 @@ fn completion_request(message: &IpcBytes) -> Option<CompletionRequest> {
     (message.kind == MessageKind::CompletionRequest
         && message.len as usize == core::mem::size_of::<CompletionRequest>())
     .then(|| unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) })
+    .filter(|request: &CompletionRequest| request.is_valid())
 }
 
 fn completion_message(response: CompletionResponse) -> IpcBytes {
