@@ -690,7 +690,9 @@ fn serve_storage_error(status: StorageApiStatus) -> ! {
                     data: [0; logos_abi::USER_STORAGE_CHUNK_BYTES],
                 };
                 if let Some(bytes) = user_request.as_bytes() {
-                    if bytes.len() == core::mem::size_of::<UserStorageRequest>() {
+                    if bytes.len() == core::mem::size_of::<UserStorageRequest>()
+                        && UserStorageRequest::wire_enums_valid(bytes)
+                    {
                         let request = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) };
                         response = UserStorageResponse::invalid(request);
                     }

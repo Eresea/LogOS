@@ -128,13 +128,17 @@ fn completion_request_message(request: CompletionRequest) -> IpcBytes {
 
 fn completion_response(message: &IpcBytes) -> Option<CompletionResponse> {
     (message.kind == MessageKind::CompletionResponse
-        && message.len as usize == core::mem::size_of::<CompletionResponse>())
+        && message.len as usize == core::mem::size_of::<CompletionResponse>()
+        && CompletionResponse::wire_enums_valid(
+            &message.bytes[..core::mem::size_of::<CompletionResponse>()],
+        ))
     .then(|| unsafe { core::ptr::read_unaligned(message.bytes.as_ptr().cast()) })
 }
 
 fn fetch_progress(message: &IpcBytes) -> Option<FetchResponse> {
     (message.kind == MessageKind::FlowProgress
-        && message.len as usize == core::mem::size_of::<FetchResponse>())
+        && message.len as usize == core::mem::size_of::<FetchResponse>()
+        && FetchResponse::wire_enums_valid(&message.bytes[..core::mem::size_of::<FetchResponse>()]))
     .then(|| unsafe { core::ptr::read_unaligned(message.bytes.as_ptr().cast()) })
     .filter(|response: &FetchResponse| response.is_valid())
 }

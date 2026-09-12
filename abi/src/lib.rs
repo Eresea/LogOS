@@ -2224,6 +2224,16 @@ pub enum CompletionStatus {
 }
 
 impl CompletionStatus {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::NoMatch),
+            2 => Some(Self::Unavailable),
+            3 => Some(Self::Malformed),
+            _ => None,
+        }
+    }
+
     pub const fn is_valid(self) -> bool {
         matches!(self, Self::Ok | Self::NoMatch | Self::Unavailable | Self::Malformed)
     }
@@ -2308,6 +2318,12 @@ impl CompletionResponse {
                         && usize::from(self.cursor_offsets[index]) <= usize::from(*length)
                 },
             )
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, status))
+            .is_some_and(|raw| CompletionStatus::from_raw(*raw).is_some())
     }
 }
 
