@@ -412,7 +412,7 @@ impl NetworkService {
             })
         } else {
             self.sockets.get(slot).is_some_and(|entry| {
-                entry.kind.is_some_and(|kind| kind == SocketKind::Tcp)
+                entry.kind.is_some_and(|kind| matches!(kind, SocketKind::Tcp | SocketKind::Udp))
                     && entry.generation == handle.generation
                     && entry.service_epoch == handle.service_epoch
             })
@@ -583,9 +583,7 @@ impl NetworkService {
                     }
                     NetworkOperation::TcpAccept => Some(SocketKind::Listener),
                     NetworkOperation::TcpRead | NetworkOperation::TcpWrite => Some(SocketKind::Tcp),
-                    NetworkOperation::Close => {
-                        Some(if listener { SocketKind::Listener } else { SocketKind::Tcp })
-                    }
+                    NetworkOperation::Close => listener.then_some(SocketKind::Listener),
                     _ => None,
                 };
                 let valid = self.valid_handle(handle, listener, expected_kind);
@@ -754,6 +752,21 @@ mod tests {
         assert_eq!(second.slot, first.slot);
         assert_ne!(second.generation, first.generation);
         assert_eq!(service.close(first, false), Err(SocketError::Stale));
+    }
+
+    #[test]
+    fn udp_slot_can_be_closed_and_reused() {
+        let mut service = NetworkService::new(config());
+        service.set_ready();
+        let first = service.allocate_udp().unwrap();
+        let mut close = NetworkRequest::new(NetworkOperation::Close, 1);
+        close.handle = u32::from(first.slot);
+        close.generation = first.generation;
+        close.service_epoch = first.service_epoch;
+        assert_eq!(service.handle(close).result, NetworkResult::Ok);
+        let second = service.allocate_udp().unwrap();
+        assert_eq!(second.slot, first.slot);
+        assert_ne!(second.generation, first.generation);
     }
 
     #[test]

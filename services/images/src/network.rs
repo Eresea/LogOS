@@ -334,6 +334,19 @@ mod stack {
         }
     }
 
+    pub fn udp_close(slot: u32) {
+        let slot = slot as usize;
+        if !ready() || slot >= UDP_SOCKET_COUNT {
+            return;
+        }
+        unsafe {
+            let sockets = &mut *ptr::addr_of_mut!(SOCKETS).cast::<SocketSet<'static>>();
+            sockets
+                .get_mut::<logos_network::smoltcp::socket::udp::Socket>(UDP_HANDLES[slot].unwrap())
+                .close();
+        }
+    }
+
     pub fn tcp_connect(slot: u32, address: [u8; 4], port: u16) -> bool {
         let slot = slot as usize;
         if !ready() || slot >= logos_abi::NETWORK_MAX_SOCKET_SLOTS || port == 0 {
@@ -765,6 +778,8 @@ pub extern "C" fn _start() -> ! {
                         && request.operation == logos_abi::NetworkOperation::UdpBind
                         && !stack::udp_bind(response.handle, request.port)
                     {
+                        stack::udp_close(response.handle);
+                        let _ = service.close(service_socket_handle(&response), false);
                         response.result = logos_abi::NetworkResult::Full;
                     } else if response.result == logos_abi::NetworkResult::WouldBlock
                         && request.operation == logos_abi::NetworkOperation::UdpSend
@@ -801,37 +816,34 @@ pub extern "C" fn _start() -> ! {
                         && request.operation == logos_abi::NetworkOperation::TcpListen
                         && !stack::tcp_listen(response.handle, request.port)
                     {
+                        stack::close(response.handle, true);
+                        let _ = service.close(service_socket_handle(&response), true);
                         response.result = logos_abi::NetworkResult::Full;
                     } else if request.operation == logos_abi::NetworkOperation::TcpAccept
                         && response.result == logos_abi::NetworkResult::WouldBlock
                     {
-                        response.result = match stack::tcp_accept(request.handle) {
-                            Some(listener_slot) => {
-                                let listener = logos_network::SocketHandle {
-                                    slot: request.handle as u8,
-                                    generation: request.generation,
-                                    service_epoch: request.service_epoch,
-                                };
-                                match service.accept(listener) {
-                                    Ok(accepted) => {
-                                        stack::bind_accepted(accepted.slot as u32, listener_slot);
-                                        response.handle = u32::from(accepted.slot);
-                                        response.generation = accepted.generation;
-                                        response.service_epoch = accepted.service_epoch;
-                                        logos_abi::NetworkResult::Ok
-                                    }
-                                    Err(logos_network::SocketError::Full) => {
-                                        logos_abi::NetworkResult::Full
-                                    }
-                                    Err(logos_network::SocketError::Stale) => {
-                                        logos_abi::NetworkResult::Stale
-                                    }
-                                    Err(logos_network::SocketError::Invalid) => {
-                                        logos_abi::NetworkResult::Invalid
-                                    }
+                        let listener = service_socket_handle(&response);
+                        response.result = match service.accept(listener) {
+                            Ok(accepted) => match stack::tcp_accept(request.handle) {
+                                Some(listener_slot) => {
+                                    stack::bind_accepted(accepted.slot as u32, listener_slot);
+                                    response.handle = u32::from(accepted.slot);
+                                    response.generation = accepted.generation;
+                                    response.service_epoch = accepted.service_epoch;
+                                    logos_abi::NetworkResult::Ok
                                 }
+                                None => {
+                                    let _ = service.close(accepted, false);
+                                    logos_abi::NetworkResult::WouldBlock
+                                }
+                            },
+                            Err(logos_network::SocketError::Full) => logos_abi::NetworkResult::Full,
+                            Err(logos_network::SocketError::Stale) => {
+                                logos_abi::NetworkResult::Stale
                             }
-                            None => logos_abi::NetworkResult::WouldBlock,
+                            Err(logos_network::SocketError::Invalid) => {
+                                logos_abi::NetworkResult::Invalid
+                            }
                         };
                     } else if request.operation == logos_abi::NetworkOperation::TcpRead
                         && response.result == logos_abi::NetworkResult::WouldBlock
@@ -875,6 +887,9 @@ pub extern "C" fn _start() -> ! {
                     } else if request.operation == logos_abi::NetworkOperation::Close
                         && response.result == logos_abi::NetworkResult::Ok
                     {
+                        if request.flags & logos_abi::NETWORK_REQUEST_FLAG_LISTENER == 0 {
+                            stack::udp_close(request.handle);
+                        }
                         stack::close(
                             request.handle,
                             request.flags & logos_abi::NETWORK_REQUEST_FLAG_LISTENER != 0,
