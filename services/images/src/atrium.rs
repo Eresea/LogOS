@@ -585,6 +585,24 @@ fn send_surface_command(
     }
 }
 
+fn queue_surface_updates(
+    display: logos_abi::CapabilityHandle,
+    queue: &mut SurfaceCommandQueue,
+    atrium: &logos_atrium::Atrium,
+    next: &mut u32,
+) {
+    for surface in atrium.surfaces() {
+        send_surface_command(
+            display,
+            queue,
+            GuiSurfaceOperation::Update,
+            surface.reference,
+            surface.bounds,
+            next,
+        );
+    }
+}
+
 fn is_fps_toggle(input: &InputMessage) -> bool {
     input.kind == MessageKind::Key
         && input.state == KeyState::Pressed
@@ -734,8 +752,10 @@ fn render(
         draw_home(display, home, atrium, *sequence);
         return home_scene_pending();
     }
-    if let Some(surface) = atrium.focused_surface() {
-        return draw_app(display, surface, calculator, *sequence);
+    for surface in atrium.surfaces() {
+        if draw_app(display, surface, calculator, *sequence) {
+            return true;
+        }
     }
     false
 }
@@ -1389,6 +1409,12 @@ pub extern "C" fn _start() -> ! {
                 false
             };
             if admitted {
+                queue_surface_updates(
+                    display_control,
+                    &mut surface_commands,
+                    atrium,
+                    &mut next_request,
+                );
                 if !home_surface {
                     if let Some(surface) = atrium.focused_surface() {
                         send_surface_command(
@@ -1551,6 +1577,15 @@ pub extern "C" fn _start() -> ! {
                 .is_some();
             if menu_selected {
                 event = InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0);
+            } else if atrium.handle_splitter_pointer(&event) {
+                queue_surface_updates(
+                    display_control,
+                    &mut surface_commands,
+                    atrium,
+                    &mut next_request,
+                );
+                pending_app_render = render(display, atrium, calculator, &mut sequence);
+                continue;
             } else if let Some(pointer) = event.pointer_event() {
                 if let Some(surface) = atrium.pointer_target(&event) {
                     if pointer.state == PointerState::Down {
@@ -1727,6 +1762,12 @@ pub extern "C" fn _start() -> ! {
                                 &mut next_request,
                             );
                         }
+                        queue_surface_updates(
+                            display_control,
+                            &mut surface_commands,
+                            atrium,
+                            &mut next_request,
+                        );
                         pending_app_render = render(display, atrium, calculator, &mut sequence);
                     }
                 }
@@ -1736,12 +1777,10 @@ pub extern "C" fn _start() -> ! {
                     if atrium.apply_action(action).is_ok() {
                         if let Some(surface) = atrium.focused_surface() {
                             if matches!(action, logos_atrium::AtriumAction::MoveFocused(_, _)) {
-                                send_surface_command(
+                                queue_surface_updates(
                                     display_control,
                                     &mut surface_commands,
-                                    GuiSurfaceOperation::Update,
-                                    surface.reference,
-                                    surface.bounds,
+                                    atrium,
                                     &mut next_request,
                                 );
                             } else {
@@ -1755,6 +1794,11 @@ pub extern "C" fn _start() -> ! {
                                 );
                             }
                         }
+                        pending_app_render = render(display, atrium, calculator, &mut sequence);
+                    }
+                }
+                logos_atrium::AtriumAction::Split(_) => {
+                    if atrium.apply_action(action).is_ok() {
                         pending_app_render = render(display, atrium, calculator, &mut sequence);
                     }
                 }
