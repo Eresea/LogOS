@@ -70,7 +70,7 @@ bench = false
 [[bin]]
 name = "logos-storage"
 path = "src/storage.rs"
-test = false
+test = true
 bench = false
 
 [[bin]]

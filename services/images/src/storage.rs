@@ -127,7 +127,19 @@ static mut USER_CATALOG_BUFFER: [u8; USER_SNAPSHOT_BYTES] = [0; USER_SNAPSHOT_BY
 static mut USER_CATALOG_LENGTH: usize = 0;
 static mut USER_SAVE_BUFFER: [u8; USER_SNAPSHOT_BYTES] = [0; USER_SNAPSHOT_BYTES];
 static mut USER_SAVE_LENGTH: usize = 0;
+static mut USER_SAVE_NEXT_OFFSET: usize = 0;
 static mut USER_SAVE_ACTIVE: bool = false;
+
+fn save_chunk_is_sequential(
+    offset: usize,
+    total: usize,
+    data_length: usize,
+    next_offset: usize,
+) -> bool {
+    data_length != 0
+        && offset == next_offset
+        && offset.checked_add(data_length).is_some_and(|end| end <= total)
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Client {
@@ -586,38 +598,53 @@ fn handle_user_storage_request(
             let data_length = request.data_len as usize;
             let valid = total != 0
                 && total <= USER_SNAPSHOT_BYTES
+                && data_length != 0
                 && offset.checked_add(data_length).is_some_and(|end| end <= total)
                 && ((request.flags & USER_STORAGE_FLAG_BEGIN != 0) == (offset == 0));
             if !valid {
                 unsafe {
                     USER_SAVE_ACTIVE = false;
+                    USER_SAVE_NEXT_OFFSET = 0;
                 }
             } else {
                 unsafe {
                     if request.flags & USER_STORAGE_FLAG_BEGIN != 0 {
                         USER_SAVE_ACTIVE = true;
                         USER_SAVE_LENGTH = total;
+                        USER_SAVE_NEXT_OFFSET = 0;
                     }
                     let active = USER_SAVE_ACTIVE && USER_SAVE_LENGTH == total;
-                    if active && (offset == 0 || offset < USER_SAVE_LENGTH) {
+                    if active
+                        && save_chunk_is_sequential(
+                            offset,
+                            USER_SAVE_LENGTH,
+                            data_length,
+                            USER_SAVE_NEXT_OFFSET,
+                        )
+                    {
                         USER_SAVE_BUFFER[offset..offset + data_length]
                             .copy_from_slice(&request.data[..data_length]);
+                        USER_SAVE_NEXT_OFFSET += data_length;
                     } else {
                         USER_SAVE_ACTIVE = false;
+                        USER_SAVE_NEXT_OFFSET = 0;
                     }
                     if USER_SAVE_ACTIVE && request.flags & USER_STORAGE_FLAG_END != 0 {
                         let snapshot = &USER_SAVE_BUFFER[..USER_SAVE_LENGTH];
-                        if offset + data_length != USER_SAVE_LENGTH {
+                        if USER_SAVE_NEXT_OFFSET != USER_SAVE_LENGTH {
                             USER_SAVE_ACTIVE = false;
+                            USER_SAVE_NEXT_OFFSET = 0;
                             response.status = UserStorageStatus::Invalid;
                         } else if UserCatalogStore::save(filesystem, snapshot).is_err() {
                             USER_SAVE_ACTIVE = false;
+                            USER_SAVE_NEXT_OFFSET = 0;
                             response.status = UserStorageStatus::Io;
                         } else {
                             let target = &mut *core::ptr::addr_of_mut!(USER_CATALOG_BUFFER);
                             target[..USER_SAVE_LENGTH].copy_from_slice(snapshot);
                             USER_CATALOG_LENGTH = USER_SAVE_LENGTH;
                             USER_SAVE_ACTIVE = false;
+                            USER_SAVE_NEXT_OFFSET = 0;
                             response.status = UserStorageStatus::Ok;
                         }
                     } else if USER_SAVE_ACTIVE {
@@ -1048,3 +1075,18 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(not(target_os = "none"))]
 fn main() {}
+
+#[cfg(test)]
+mod tests {
+    use super::save_chunk_is_sequential;
+
+    #[test]
+    fn save_chunks_must_be_contiguous_and_non_empty() {
+        assert!(save_chunk_is_sequential(0, 10, 4, 0));
+        assert!(save_chunk_is_sequential(4, 10, 6, 4));
+        assert!(!save_chunk_is_sequential(5, 10, 1, 4));
+        assert!(!save_chunk_is_sequential(3, 10, 1, 4));
+        assert!(!save_chunk_is_sequential(4, 10, 0, 4));
+        assert!(!save_chunk_is_sequential(8, 10, 3, 8));
+    }
+}
