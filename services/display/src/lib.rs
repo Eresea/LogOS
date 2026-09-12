@@ -30,7 +30,6 @@ const GUI_TILE_SIZE: u32 = 64;
 const GUI_TILES_PER_STEP: usize = 8;
 const GUI_SOFTWARE_CURSOR_TILES_PER_STEP: usize = 4;
 const CURSOR_LAYERS: usize = 2;
-const CURSOR_DAMAGE_RECTS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
 const ATRIUM_OWNER: u32 = 13;
 const CURSOR_PRESSED_AUXILIARY: u32 = 1;
@@ -481,8 +480,6 @@ pub struct Display {
     gui_tile_y: i32,
     cursor_layers: [CursorLayer; CURSOR_LAYERS],
     cursor_order: u32,
-    cursor_damage: [GuiRect; CURSOR_DAMAGE_RECTS],
-    cursor_damage_count: usize,
     hardware_cursor: bool,
     backbuffer: Option<Vec<u8>>,
     presented: bool,
@@ -515,8 +512,6 @@ impl Display {
             gui_tile_y: 0,
             cursor_layers: [CursorLayer::EMPTY; CURSOR_LAYERS],
             cursor_order: 0,
-            cursor_damage: [GuiRect::EMPTY; CURSOR_DAMAGE_RECTS],
-            cursor_damage_count: 0,
             hardware_cursor: false,
             backbuffer: None,
             presented: false,
@@ -625,86 +620,14 @@ impl Display {
         if !self.hardware_cursor {
             let old_bounds = Self::cursor_bounds(old.x, old.y);
             let new_bounds = Self::cursor_bounds(op.command.x, op.command.y);
-            if self.can_repaint_cursor() {
-                self.queue_cursor_damage(old_bounds);
-                self.queue_cursor_damage(new_bounds);
-            } else {
-                self.gui.invalidate_rect(old_bounds);
-                self.gui.invalidate_rect(new_bounds);
-            }
+            self.gui.invalidate_rect(old_bounds);
+            self.gui.invalidate_rect(new_bounds);
         }
         self.cursor_layers[index].x = op.command.x;
         self.cursor_layers[index].y = op.command.y;
         self.cursor_layers[index].pressed = op.command.auxiliary == CURSOR_PRESSED_AUXILIARY;
         self.cursor_order = self.cursor_order.wrapping_add(1).max(1);
         self.cursor_layers[index].order = self.cursor_order;
-        true
-    }
-
-    fn can_repaint_cursor(&self) -> bool {
-        // The backbuffer is authoritative only between GUI composition passes.
-        self.backbuffer.is_some()
-            && self.surface_initialized
-            && !self.gui_background_pending
-            && !self.render_pending()
-    }
-
-    fn queue_cursor_damage(&mut self, rect: GuiRect) {
-        if rect.is_empty() {
-            return;
-        }
-        for existing in self.cursor_damage[..self.cursor_damage_count].iter_mut() {
-            if rects_touch(*existing, rect) {
-                *existing = union_rect(*existing, rect);
-                return;
-            }
-        }
-        if self.cursor_damage_count < CURSOR_DAMAGE_RECTS {
-            self.cursor_damage[self.cursor_damage_count] = rect;
-            self.cursor_damage_count += 1;
-        } else {
-            let mut combined = rect;
-            for existing in self.cursor_damage[..self.cursor_damage_count].iter().copied() {
-                combined = union_rect(combined, existing);
-            }
-            self.cursor_damage[0] = combined;
-            self.cursor_damage_count = 1;
-        }
-    }
-
-    /// Repaints only queued software-cursor rectangles over the current
-    /// backbuffer, avoiding the tiled GUI path for pointer motion.
-    pub fn repaint_cursor(
-        &mut self,
-        framebuffer: &mut [u8],
-        width: usize,
-        height: usize,
-        stride: usize,
-        format: PixelFormat,
-    ) -> bool {
-        if self.hardware_cursor || self.cursor_damage_count == 0 {
-            return false;
-        }
-        let required = match stride.checked_mul(height) {
-            Some(required) if stride >= width * 4 && framebuffer.len() >= required => required,
-            _ => return false,
-        };
-        if self.backbuffer.as_ref().is_none_or(|backbuffer| backbuffer.len() < required) {
-            return false;
-        }
-        let screen = GuiRect::new(0, 0, width as u32, height as u32);
-        let damage = self.cursor_damage;
-        let count = self.cursor_damage_count;
-        self.cursor_damage = [GuiRect::EMPTY; CURSOR_DAMAGE_RECTS];
-        self.cursor_damage_count = 0;
-        for rect in damage[..count].iter().copied() {
-            let rect = intersect(rect, screen);
-            if rect.is_empty() {
-                continue;
-            }
-            self.present_damage(framebuffer, width, height, stride, &[rect]);
-            self.render_cursor_layers(framebuffer, width, height, stride, format, rect);
-        }
         true
     }
 
@@ -850,8 +773,6 @@ impl Display {
         self.gui_tile_y = 0;
         self.cursor_layers = [CursorLayer::EMPTY; CURSOR_LAYERS];
         self.cursor_order = 0;
-        self.cursor_damage = [GuiRect::EMPTY; CURSOR_DAMAGE_RECTS];
-        self.cursor_damage_count = 0;
         self.hardware_cursor = false;
         self.presented = false;
         self.presented_full = false;
@@ -1526,7 +1447,6 @@ const _: () = assert!(core::mem::size_of::<Display>() <= logos_abi::MAX_SERVICE_
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos_abi::GuiDrawCommand;
 
     #[test]
     fn invalid_scalars_use_the_replacement_glyph() {
@@ -1979,65 +1899,15 @@ mod tests {
         draw.frame = 3;
         draw.command.x = 56;
         assert!(display.apply_cursor_scene_op(draw));
-        assert!(!display.render_pending());
-        assert!(display.repaint_cursor(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8));
-        assert!(!display.render_pending());
+        assert!(display.render_pending());
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 64, 32, 64 * 4, PixelFormat::Bgr8).unwrap();
+        }
         let new_pixel = (8 * 64 + 32) * 4;
         assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0x30, 0x20, 0x10]);
         assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0x30, 0x20, 0x10]);
         let latest_pixel = (8 * 64 + 56) * 4;
         assert_eq!(&framebuffer[latest_pixel..latest_pixel + 3], &[0xff, 0xff, 0xff]);
-    }
-
-    #[test]
-    fn software_cursor_defers_repaint_while_gui_tiles_are_pending() {
-        let mut display = Display::new(1);
-        let mut root =
-            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
-        root.bounds = GuiRect::new(0, 0, 64, 32);
-        display.gui_mut().create(11, root).unwrap();
-        display.gui_mut().take_damage();
-        display.ensure_backbuffer(64 * 32 * 4).unwrap();
-        display.surface_initialized = true;
-        display.gui_damage[0] = GuiRect::new(0, 0, 64, 32);
-        display.gui_damage_count = 1;
-        let cursor = SurfaceHandle::new(1, 1, ATRIUM_OWNER).unwrap();
-        display.cursor_layers[1] =
-            CursorLayer { surface: cursor, x: 8, y: 8, pressed: false, order: 1 };
-
-        let mut move_event = GuiSceneOp::upsert(
-            cursor,
-            2,
-            1,
-            GuiDrawCommand::fill_rect(GuiRect::new(24, 8, 3, 14), 0xffffff),
-        );
-        assert!(display.apply_cursor_scene_op(move_event));
-        assert_eq!(display.cursor_damage_count, 0);
-        assert!(display.gui.has_damage());
-
-        move_event.frame = 3;
-        assert!(display.apply_cursor_scene_op(move_event));
-        assert!(display.gui.has_damage());
-    }
-
-    #[test]
-    fn software_cursor_defers_repaint_for_unloaded_scene_damage() {
-        let mut display = Display::new(1);
-        let mut root =
-            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
-        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
-        display.gui_mut().create(11, root).unwrap();
-        let mut terminal =
-            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
-        terminal.bounds = root.bounds;
-        terminal.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
-        display.gui_mut().create(11, terminal).unwrap();
-        display.gui_mut().take_damage();
-        display.ensure_backbuffer(64 * 32 * 4).unwrap();
-        display.surface_initialized = true;
-        display.gui_mut().invalidate_rect(terminal.bounds);
-        assert!(display.render_pending());
-        assert!(!display.can_repaint_cursor());
     }
 
     #[test]

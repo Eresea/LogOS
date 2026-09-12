@@ -475,7 +475,6 @@ pub extern "C" fn _start() -> ! {
             }
             ready_mask &= !READY_GUI;
         }
-        let mut cursor_presented = false;
         let mut cursor_activity = false;
         // Poll cursor IPC independently so a busy render producer cannot delay motion.
         {
@@ -494,15 +493,7 @@ pub extern "C" fn _start() -> ! {
             }
             if cursor_dirty {
                 cursor_activity = true;
-                let painted = display.repaint_cursor(
-                    framebuffer,
-                    config.width as usize,
-                    config.height as usize,
-                    config.stride as usize * 4,
-                    format,
-                );
-                cursor_presented = painted;
-                if !painted && !display.hardware_cursor_enabled() {
+                if !display.hardware_cursor_enabled() {
                     gui_dirty = true;
                 }
             }
@@ -524,21 +515,10 @@ pub extern "C" fn _start() -> ! {
             }
             if cursor_dirty {
                 cursor_activity = true;
-                let painted = display.repaint_cursor(
-                    framebuffer,
-                    config.width as usize,
-                    config.height as usize,
-                    config.stride as usize * 4,
-                    format,
-                );
-                cursor_presented |= painted;
-                if !painted && !display.hardware_cursor_enabled() {
+                if !display.hardware_cursor_enabled() {
                     gui_dirty = true;
                 }
             }
-        }
-        if cursor_presented {
-            publish_present(display, present_state);
         }
         if cursor_activity {
             publish_cursor(display, present_state, &mut published_cursor);
