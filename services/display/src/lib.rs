@@ -647,6 +647,7 @@ impl Display {
             && self.surface_initialized
             && !self.gui_background_pending
             && !self.render_pending()
+            && !self.gui.has_damage()
             && !self.gui.has_staged_scene()
     }
 
@@ -1995,11 +1996,17 @@ mod tests {
         assert!(display.gui.has_damage());
 
         display.gui_damage_count = 0;
+        move_event.frame = 4;
+        move_event.command.x = 40;
+        assert!(display.apply_cursor_scene_op(move_event));
+        assert_eq!(display.cursor_damage_count, 0);
+        assert!(display.gui.has_damage());
+
         let mut staged = GuiSceneOp::clear(root_handle, 4);
         staged.flags = logos_abi::GUI_DRAW_FLAG_MORE;
         display.gui_mut().apply_scene_op(11, staged).unwrap();
         assert!(display.gui.has_staged_scene());
-        move_event.frame = 4;
+        move_event.frame = 5;
         move_event.command.x = 48;
         assert!(display.apply_cursor_scene_op(move_event));
         assert_eq!(display.cursor_damage_count, 0);
