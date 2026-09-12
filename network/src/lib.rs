@@ -164,6 +164,9 @@ pub fn interface(device: &mut PacketDevice, mac: [u8; 6], now_ms: u64) -> Interf
 }
 
 pub fn configure_static_ipv4(interface: &mut Interface, config: NetworkConfig) -> bool {
+    if !config.is_valid() {
+        return false;
+    }
     let Some(prefix) = prefix_len(config.netmask) else {
         return false;
     };
@@ -288,7 +291,7 @@ impl NetworkService {
     pub const fn new(config: NetworkConfig) -> Self {
         Self {
             config,
-            state: if config.is_enabled() {
+            state: if config.is_enabled() && config.is_valid() {
                 NetworkState::Configuring
             } else {
                 NetworkState::Disabled
@@ -669,6 +672,18 @@ mod tests {
             service.handle(NetworkRequest::new(NetworkOperation::Status, 1)).result,
             NetworkResult::Disabled
         );
+    }
+
+    #[test]
+    fn invalid_static_configuration_fails_closed() {
+        let mut invalid = config();
+        invalid.gateway = [10, 0, 3, 2];
+        let service = NetworkService::new(invalid);
+        assert_eq!(service.state(), NetworkState::Disabled);
+
+        let mut device = PacketDevice::new();
+        let mut interface = interface(&mut device, [2, 0, 0, 0, 0, 1], 0);
+        assert!(!configure_static_ipv4(&mut interface, invalid));
     }
 
     #[test]

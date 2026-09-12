@@ -568,7 +568,7 @@ impl NetworkConfig {
         matches!(self.profile, NetworkProfile::StaticThenDhcp)
     }
 
-    pub fn is_valid(self) -> bool {
+    pub const fn is_valid(self) -> bool {
         self.abi_version == NETWORK_ABI_VERSION
             && self.reserved == 0
             && self.gateway_deadline_ticks != 0
@@ -577,17 +577,32 @@ impl NetworkConfig {
             && match self.profile {
                 NetworkProfile::Disabled => true,
                 NetworkProfile::StaticThenDhcp => {
-                    self.address != [0; 4]
-                        && self.gateway != [0; 4]
-                        && valid_ipv4_netmask(self.netmask)
+                    valid_static_ipv4(self.address, self.netmask, self.gateway)
                 }
             }
     }
 }
 
-fn valid_ipv4_netmask(mask: [u8; 4]) -> bool {
+const fn valid_ipv4_netmask(mask: [u8; 4]) -> bool {
     let bits = u32::from_be_bytes(mask);
     bits != 0 && (!bits & (!bits).wrapping_add(1)) == 0
+}
+
+const fn valid_static_ipv4(address: [u8; 4], netmask: [u8; 4], gateway: [u8; 4]) -> bool {
+    let address = u32::from_be_bytes(address);
+    let gateway = u32::from_be_bytes(gateway);
+    let mask = u32::from_be_bytes(netmask);
+    let address_first_octet = address >> 24;
+    let gateway_first_octet = gateway >> 24;
+    valid_ipv4_netmask(netmask)
+        && address != 0
+        && gateway != 0
+        && address_first_octet != 127
+        && gateway_first_octet != 127
+        && address_first_octet < 224
+        && gateway_first_octet < 224
+        && address != gateway
+        && address & mask == gateway & mask
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2848,6 +2863,31 @@ mod tests {
         request.timeout_ticks = NETWORK_PING_TIMEOUT_TICKS;
         assert!(request.is_valid());
         assert_eq!(request.timeout_ticks, 128);
+    }
+
+    #[test]
+    fn static_network_config_requires_unicast_endpoints_in_one_subnet() {
+        let valid = NetworkConfig {
+            profile: NetworkProfile::StaticThenDhcp,
+            address: [10, 0, 2, 15],
+            netmask: [255, 255, 255, 0],
+            gateway: [10, 0, 2, 2],
+            ..NetworkConfig::disabled()
+        };
+        assert!(valid.is_valid());
+
+        let mut invalid = valid;
+        invalid.address = [224, 0, 0, 1];
+        assert!(!invalid.is_valid());
+        invalid = valid;
+        invalid.gateway = [127, 0, 0, 1];
+        assert!(!invalid.is_valid());
+        invalid = valid;
+        invalid.gateway = [10, 0, 3, 2];
+        assert!(!invalid.is_valid());
+        invalid = valid;
+        invalid.gateway = invalid.address;
+        assert!(!invalid.is_valid());
     }
 
     #[test]
