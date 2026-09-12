@@ -1844,10 +1844,15 @@ pub extern "C" fn _start() -> ! {
                 }
                 logos_atrium::AtriumAction::FocusNext
                 | logos_atrium::AtriumAction::FocusPrevious
-                | logos_atrium::AtriumAction::MoveFocused(_, _) => {
+                | logos_atrium::AtriumAction::MoveFocused(_, _)
+                | logos_atrium::AtriumAction::MoveFocusedInDirection(_) => {
                     if atrium.apply_action(action).is_ok() {
                         if let Some(surface) = atrium.focused_surface() {
-                            if matches!(action, logos_atrium::AtriumAction::MoveFocused(_, _)) {
+                            if matches!(
+                                action,
+                                logos_atrium::AtriumAction::MoveFocused(_, _)
+                                    | logos_atrium::AtriumAction::MoveFocusedInDirection(_)
+                            ) {
                                 queue_surface_updates(
                                     display_control,
                                     &mut surface_commands,

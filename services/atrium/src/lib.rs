@@ -130,6 +130,14 @@ pub enum SplitDirection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LayoutNode {
     Leaf {
         parent: Option<usize>,
@@ -202,6 +210,7 @@ pub enum AtriumAction {
     FocusNext,
     FocusPrevious,
     MoveFocused(i32, i32),
+    MoveFocusedInDirection(SurfaceDirection),
     Split(SplitDirection),
     CloseFocused,
     Logout,
@@ -657,6 +666,18 @@ impl Atrium {
         if input.modifiers & MOD_ALT != 0 && code == KeyCode::function(4) {
             return AtriumAction::CloseFocused;
         }
+        if input.modifiers & (MOD_CTRL | MOD_ALT) == (MOD_CTRL | MOD_ALT) {
+            let direction = match code {
+                KeyCode::LEFT => Some(SurfaceDirection::Left),
+                KeyCode::RIGHT => Some(SurfaceDirection::Right),
+                KeyCode::UP => Some(SurfaceDirection::Up),
+                KeyCode::DOWN => Some(SurfaceDirection::Down),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                return AtriumAction::MoveFocusedInDirection(direction);
+            }
+        }
         if code == KeyCode::TAB
             && input.modifiers & (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_META) == 0
             && self.focused_surface().is_some_and(|surface| surface.app == AppId::Terminal)
@@ -737,6 +758,9 @@ impl Atrium {
                 Ok(())
             }
             AtriumAction::MoveFocused(dx, dy) => self.move_focused(dx, dy),
+            AtriumAction::MoveFocusedInDirection(direction) => {
+                self.move_focused_in_direction(direction)
+            }
             AtriumAction::Split(direction) => {
                 self.next_split = direction;
                 self.split_focused(direction)
@@ -781,6 +805,109 @@ impl Atrium {
             return FULLSCREEN_SURFACE_BOUNDS;
         };
         self.split_rect(bounds, self.next_split).1
+    }
+
+    fn move_focused_in_direction(
+        &mut self,
+        direction: SurfaceDirection,
+    ) -> Result<(), AtriumError> {
+        let Some(surface) = self.focused_surface() else { return Err(AtriumError::NotFound) };
+        if surface.mode != SurfaceMode::Tiled {
+            let (dx, dy) = match direction {
+                SurfaceDirection::Left => (-SURFACE_MOVE_STEP, 0),
+                SurfaceDirection::Right => (SURFACE_MOVE_STEP, 0),
+                SurfaceDirection::Up => (0, -SURFACE_MOVE_STEP),
+                SurfaceDirection::Down => (0, SURFACE_MOVE_STEP),
+            };
+            return self.move_focused(dx, dy);
+        }
+
+        if let Some(target) = self.directional_leaf(surface.id, direction) {
+            return self.move_surface_to_leaf(surface.id, target);
+        }
+
+        let split = match direction {
+            SurfaceDirection::Left | SurfaceDirection::Right => SplitDirection::Vertical,
+            SurfaceDirection::Up | SurfaceDirection::Down => SplitDirection::Horizontal,
+        };
+        if !self.can_split_focused(split) {
+            return Ok(());
+        }
+        self.split_focused(split)?;
+        if matches!(direction, SurfaceDirection::Right | SurfaceDirection::Down) {
+            let target =
+                self.directional_leaf(surface.id, direction).ok_or(AtriumError::NotFound)?;
+            self.move_surface_to_leaf(surface.id, target)?;
+        }
+        Ok(())
+    }
+
+    fn directional_leaf(&self, surface_id: u16, direction: SurfaceDirection) -> Option<usize> {
+        let current = self.find_leaf(self.layout_root, surface_id)?;
+        let current_bounds =
+            self.node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, current)?;
+        let current_center = (
+            current_bounds.x + current_bounds.width as i32 / 2,
+            current_bounds.y + current_bounds.height as i32 / 2,
+        );
+        let mut best: Option<(usize, (u32, u32))> = None;
+        for (index, node) in self.layout_nodes.iter().enumerate() {
+            let Some(LayoutNode::Leaf { surface_id: candidate, .. }) = node else { continue };
+            if *candidate == Some(surface_id) {
+                continue;
+            }
+            let Some(bounds) = self.node_bounds(self.layout_root, FULLSCREEN_SURFACE_BOUNDS, index)
+            else {
+                continue;
+            };
+            let center = (bounds.x + bounds.width as i32 / 2, bounds.y + bounds.height as i32 / 2);
+            let (primary, secondary) = match direction {
+                SurfaceDirection::Left if center.0 < current_center.0 => (
+                    (current_center.0 - center.0) as u32,
+                    (current_center.1 - center.1).unsigned_abs(),
+                ),
+                SurfaceDirection::Right if center.0 > current_center.0 => (
+                    (center.0 - current_center.0) as u32,
+                    (current_center.1 - center.1).unsigned_abs(),
+                ),
+                SurfaceDirection::Up if center.1 < current_center.1 => (
+                    (current_center.1 - center.1) as u32,
+                    (current_center.0 - center.0).unsigned_abs(),
+                ),
+                SurfaceDirection::Down if center.1 > current_center.1 => (
+                    (center.1 - current_center.1) as u32,
+                    (current_center.0 - center.0).unsigned_abs(),
+                ),
+                _ => continue,
+            };
+            let distance = (primary, secondary);
+            if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+                best = Some((index, distance));
+            }
+        }
+        best.map(|(index, _)| index)
+    }
+
+    fn move_surface_to_leaf(&mut self, surface_id: u16, target: usize) -> Result<(), AtriumError> {
+        let current = self.find_leaf(self.layout_root, surface_id).ok_or(AtriumError::NotFound)?;
+        let target_id = match self.layout_nodes[target] {
+            Some(LayoutNode::Leaf { surface_id, .. }) => surface_id,
+            _ => return Err(AtriumError::NotFound),
+        };
+        let current_parent = match self.layout_nodes[current] {
+            Some(LayoutNode::Leaf { parent, .. }) => parent,
+            _ => return Err(AtriumError::NotFound),
+        };
+        let target_parent = match self.layout_nodes[target] {
+            Some(LayoutNode::Leaf { parent, .. }) => parent,
+            _ => return Err(AtriumError::NotFound),
+        };
+        self.layout_nodes[current] =
+            Some(LayoutNode::Leaf { parent: current_parent, surface_id: target_id });
+        self.layout_nodes[target] =
+            Some(LayoutNode::Leaf { parent: target_parent, surface_id: Some(surface_id) });
+        self.recompute_layout();
+        Ok(())
     }
 
     fn insert_layout_leaf(
@@ -1501,6 +1628,10 @@ mod tests {
         InputMessage::key(KeyCode::character(byte), KeyState::Pressed, MOD_CTRL | MOD_SHIFT)
     }
 
+    fn ctrl_alt(code: KeyCode) -> InputMessage {
+        InputMessage::key(code, KeyState::Pressed, MOD_CTRL | MOD_ALT)
+    }
+
     #[test]
     fn phase_and_surface_lifecycle_is_bounded() {
         let mut atrium = Atrium::new();
@@ -1611,6 +1742,39 @@ mod tests {
         assert!(AtriumAction::None.routes_to_surface());
         assert!(!AtriumAction::FocusNext.routes_to_surface());
         assert!(!AtriumAction::Launch(AppId::Terminal).routes_to_surface());
+    }
+
+    #[test]
+    fn ctrl_alt_arrows_move_the_focused_surface_and_keep_focus() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let first = atrium
+            .spawn_surface(
+                atrium.request_surface(AppId::Calculator, client(1)).unwrap(),
+                surface(1),
+            )
+            .unwrap();
+
+        let action = atrium.input(&ctrl_alt(KeyCode::RIGHT));
+        assert_eq!(action, AtriumAction::MoveFocusedInDirection(SurfaceDirection::Right));
+        atrium.apply_action(action).unwrap();
+        assert_eq!(atrium.focused_surface().unwrap().id, first.id);
+        let moved = atrium.surface(first.id).unwrap();
+        assert!(moved.bounds.x > FULLSCREEN_SURFACE_BOUNDS.x);
+        assert!(moved.bounds.width < FULLSCREEN_SURFACE_BOUNDS.width);
+
+        let second = atrium
+            .spawn_surface(atrium.request_surface(AppId::System, client(2)).unwrap(), surface(2))
+            .unwrap();
+        atrium.focus(first.id).unwrap();
+        let action = atrium.input(&ctrl_alt(KeyCode::LEFT));
+        assert_eq!(action, AtriumAction::MoveFocusedInDirection(SurfaceDirection::Left));
+        atrium.apply_action(action).unwrap();
+        assert_eq!(atrium.focused_surface().unwrap().id, first.id);
+        assert!(
+            atrium.surface(first.id).unwrap().bounds.x
+                < atrium.surface(second.id).unwrap().bounds.x
+        );
     }
 
     #[test]
