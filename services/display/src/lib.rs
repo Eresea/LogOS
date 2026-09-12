@@ -1438,23 +1438,22 @@ impl Display {
                 );
         }
         if self.gui_tile_index >= self.gui_damage_count {
+            self.present_damage(
+                framebuffer,
+                width,
+                height,
+                stride,
+                &composition_damage[..composition_damage_count],
+            );
+            for rect in composition_damage[..composition_damage_count].iter().copied() {
+                self.render_cursor_layers(framebuffer, width, height, stride, format, rect);
+            }
             let (next_damage, next_count) = self.gui.take_damage();
             self.load_gui_damage(next_damage, next_count, width, height);
             self.gui_tile_index = 0;
             if self.gui_damage_count != 0 {
                 self.gui_tile_x = self.gui_damage[0].x;
                 self.gui_tile_y = self.gui_damage[0].y;
-            } else {
-                self.present_damage(
-                    framebuffer,
-                    width,
-                    height,
-                    stride,
-                    &composition_damage[..composition_damage_count],
-                );
-                for rect in composition_damage[..composition_damage_count].iter().copied() {
-                    self.render_cursor_layers(framebuffer, width, height, stride, format, rect);
-                }
             }
         }
         Ok(rendered)
@@ -1733,7 +1732,7 @@ mod tests {
     }
 
     #[test]
-    fn tiled_gui_composition_does_not_present_partial_frame() {
+    fn tiled_gui_composition_presents_before_next_damage() {
         let mut display = Display::new(1);
         let mut root =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
@@ -1746,6 +1745,7 @@ mod tests {
         assert!(display.render_pending());
         assert!(!display.presented());
         assert_eq!(&framebuffer[(32 * 320 + 32) * 4..(32 * 320 + 32) * 4 + 4], &[0xaa; 4]);
+        display.gui_mut().invalidate_rect(GuiRect::new(0, 0, 16, 16));
 
         while display.render_pending() {
             display.render_gui(&mut framebuffer, 320, 256, 320 * 4, PixelFormat::Bgr8).unwrap();
