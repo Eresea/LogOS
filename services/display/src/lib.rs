@@ -1498,7 +1498,7 @@ impl Display {
     }
 
     pub const fn render_pending(&self) -> bool {
-        self.gui_background_pending || self.gui_damage_count != 0
+        self.gui_background_pending || self.gui_damage_count != 0 || self.gui.has_damage()
     }
 
     pub fn take_presented(&mut self) -> bool {
@@ -2018,6 +2018,26 @@ mod tests {
         move_event.frame = 3;
         assert!(display.apply_cursor_scene_op(move_event));
         assert!(display.gui.has_damage());
+    }
+
+    #[test]
+    fn software_cursor_defers_repaint_for_unloaded_scene_damage() {
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 32);
+        display.gui_mut().create(11, root).unwrap();
+        let mut terminal =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        terminal.bounds = root.bounds;
+        terminal.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
+        display.gui_mut().create(11, terminal).unwrap();
+        display.gui_mut().take_damage();
+        display.ensure_backbuffer(64 * 32 * 4).unwrap();
+        display.surface_initialized = true;
+        display.gui_mut().invalidate_rect(terminal.bounds);
+        assert!(display.render_pending());
+        assert!(!display.can_repaint_cursor());
     }
 
     #[test]
