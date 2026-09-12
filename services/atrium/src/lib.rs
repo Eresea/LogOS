@@ -823,7 +823,7 @@ impl Atrium {
         }
 
         if let Some(target) = self.directional_leaf(surface.id, direction) {
-            return self.move_surface_to_leaf(surface.id, target);
+            return self.move_surface_to_leaf(surface.id, target, true);
         }
 
         let split = match direction {
@@ -837,7 +837,7 @@ impl Atrium {
         if matches!(direction, SurfaceDirection::Right | SurfaceDirection::Down) {
             let target =
                 self.directional_leaf(surface.id, direction).ok_or(AtriumError::NotFound)?;
-            self.move_surface_to_leaf(surface.id, target)?;
+            self.move_surface_to_leaf(surface.id, target, false)?;
         }
         Ok(())
     }
@@ -898,7 +898,12 @@ impl Atrium {
         best.map(|(index, _)| index)
     }
 
-    fn move_surface_to_leaf(&mut self, surface_id: u16, target: usize) -> Result<(), AtriumError> {
+    fn move_surface_to_leaf(
+        &mut self,
+        surface_id: u16,
+        target: usize,
+        collapse_source: bool,
+    ) -> Result<(), AtriumError> {
         let current = self.find_leaf(self.layout_root, surface_id).ok_or(AtriumError::NotFound)?;
         let target_id = match self.layout_nodes[target] {
             Some(LayoutNode::Leaf { surface_id, .. }) => surface_id,
@@ -916,6 +921,9 @@ impl Atrium {
             Some(LayoutNode::Leaf { parent: current_parent, surface_id: target_id });
         self.layout_nodes[target] =
             Some(LayoutNode::Leaf { parent: target_parent, surface_id: Some(surface_id) });
+        if collapse_source && target_id.is_none() {
+            self.remove_layout_leaf_node(current)?;
+        }
         self.recompute_layout();
         Ok(())
     }
@@ -976,6 +984,10 @@ impl Atrium {
 
     fn remove_layout_leaf(&mut self, surface_id: u16) -> Result<(), AtriumError> {
         let leaf = self.find_leaf(self.layout_root, surface_id).ok_or(AtriumError::NotFound)?;
+        self.remove_layout_leaf_node(leaf)
+    }
+
+    fn remove_layout_leaf_node(&mut self, leaf: usize) -> Result<(), AtriumError> {
         let parent = match self.layout_nodes[leaf] {
             Some(LayoutNode::Leaf { parent, .. }) => parent,
             _ => return Err(AtriumError::NotFound),
@@ -1791,6 +1803,15 @@ mod tests {
             .spawn_surface(atrium.request_surface(AppId::System, client(2)).unwrap(), surface(2))
             .unwrap();
         atrium.focus(first.id).unwrap();
+
+        let action = atrium.input(&ctrl_alt(KeyCode::UP));
+        assert_eq!(action, AtriumAction::MoveFocusedInDirection(SurfaceDirection::Up));
+        atrium.apply_action(action).unwrap();
+        assert_eq!(atrium.focused_surface().unwrap().id, first.id);
+        let moved = atrium.surface(first.id).unwrap();
+        assert_eq!(moved.bounds.y, FULLSCREEN_SURFACE_BOUNDS.y);
+        assert_eq!(moved.bounds.height, FULLSCREEN_SURFACE_BOUNDS.height);
+
         let action = atrium.input(&ctrl_alt(KeyCode::LEFT));
         assert_eq!(action, AtriumAction::MoveFocusedInDirection(SurfaceDirection::Left));
         atrium.apply_action(action).unwrap();
