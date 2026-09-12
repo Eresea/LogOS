@@ -663,7 +663,7 @@ impl Atrium {
         {
             return AtriumAction::None;
         }
-        if self.focused.is_none() || input.code != KeyCode::ENTER.raw() {
+        if self.focused.is_none() {
             if let Some(action) = self.command_menu_action(input.code) {
                 return action;
             }
@@ -1603,9 +1603,9 @@ mod tests {
         assert_eq!(atrium.input(&ctrl(b'l')), AtriumAction::Logout);
         assert_eq!(
             atrium.input(&InputMessage::key(KeyCode::RIGHT, KeyState::Pressed, 0)),
-            AtriumAction::LauncherChanged
+            AtriumAction::None
         );
-        assert!(!AtriumAction::LauncherChanged.routes_to_surface());
+        assert!(AtriumAction::None.routes_to_surface());
         atrium.apply_action(AtriumAction::Logout).unwrap();
         assert_eq!(atrium.phase(), AtriumPhase::Locked);
         assert!(AtriumAction::None.routes_to_surface());
@@ -1668,6 +1668,23 @@ mod tests {
             AtriumAction::None
         );
         assert!(AtriumAction::None.routes_to_surface());
+    }
+
+    #[test]
+    fn focused_terminal_navigation_routes_to_the_surface() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(1)).unwrap();
+
+        for code in
+            [KeyCode::UP, KeyCode::DOWN, KeyCode::LEFT, KeyCode::RIGHT, KeyCode::HOME, KeyCode::END]
+        {
+            assert_eq!(
+                atrium.input(&InputMessage::key(code, KeyState::Pressed, 0)),
+                AtriumAction::None
+            );
+        }
     }
 
     #[test]
