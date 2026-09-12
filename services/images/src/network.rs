@@ -680,13 +680,9 @@ pub extern "C" fn _start() -> ! {
                 }
             } else if packet.operation == logos_abi::NetworkPacketOperation::RecycleRx {
                 let page = packet.page;
-                let address = logos_abi::NETWORK_PACKET_BASE + usize::from(page) * 4096;
                 if stack::ready() {
-                    let length = packet.length as usize;
-                    let _ = stack::enqueue_rx(
-                        page,
-                        packet.length.min(logos_abi::NETWORK_MAX_FRAME_BYTES as u16),
-                    );
+                    let length = packet.length.min(logos_abi::NETWORK_MAX_FRAME_BYTES as u16);
+                    let _ = stack::enqueue_rx(page, length);
                     let _ = stack::poll_network(u64::from(elapsed_ticks), service.dhcp_active());
                     if stack::gateway_reachable() {
                         icmp_reply_received = true;
@@ -694,9 +690,8 @@ pub extern "C" fn _start() -> ! {
                     }
                     let mut recycle = packet;
                     recycle.operation = logos_abi::NetworkPacketOperation::RecycleRx;
-                    recycle.length = length as u16;
+                    recycle.length = length;
                     recycle.sequence = sequence;
-                    let _ = address;
                     sequence = sequence.wrapping_add(1).max(1);
                     let _ = common::ipc_send_handle(core_send_capability, &recycle);
                 }

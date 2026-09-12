@@ -830,7 +830,7 @@ impl NetworkPacketDescriptor {
         self.abi_version == NETWORK_ABI_VERSION
             && NetworkPacketOperation::from_raw(self.operation as u8).is_some()
             && self.page < NETWORK_PACKET_PAGE_COUNT as u16
-            && self.length as usize <= NETWORK_PACKET_PAGE_BYTES
+            && self.length as usize <= NETWORK_MAX_FRAME_BYTES
             && self.reserved == 0
             && self.reserved_tail.iter().all(|byte| *byte == 0)
     }
@@ -2792,6 +2792,19 @@ mod tests {
         assert!(request.is_valid());
         request.payload_len += 1;
         assert!(!request.is_valid());
+    }
+
+    #[test]
+    fn network_packet_lengths_are_bounded_by_the_ethernet_mtu() {
+        let mut packet = NetworkPacketDescriptor::new(
+            NetworkPacketOperation::SubmitTx,
+            NETWORK_RX_PACKET_PAGES as u16,
+            1,
+        );
+        packet.length = NETWORK_MAX_FRAME_BYTES as u16;
+        assert!(packet.is_valid());
+        packet.length += 1;
+        assert!(!packet.is_valid());
     }
 
     #[test]
