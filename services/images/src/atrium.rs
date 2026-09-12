@@ -347,7 +347,7 @@ fn draw_calculator_ui(
     surface: logos_atrium::Surface,
     calculator: &logos_atrium::Calculator,
     sequence: u32,
-) {
+) -> bool {
     let bounds = surface.bounds;
     let panel_bounds = GuiRect::new(
         bounds.x.saturating_add(12),
@@ -362,7 +362,9 @@ fn draw_calculator_ui(
         GuiRect::new(bounds.x.saturating_add(20), bounds.y.saturating_add(52), 260, 40);
     let _ = base.push(GuiDrawCommand::fill_rounded_rect(display_bounds, 0x263548, 8));
     push_surface_text(&mut base, bounds, 32, 64, 0xffffff, calculator.display());
-    let _ = common::ipc_send_scene_batch(display, &base, 6);
+    if common::ipc_send_scene_batch(display, &base, 6) == IpcStatus::Full {
+        return true;
+    }
 
     let rows: [&[u8]; 4] = [
         b"[ 7 ]   [ 8 ]   [ 9 ]   [ / ]",
@@ -383,8 +385,11 @@ fn draw_calculator_ui(
             0xffffff,
             labels,
         );
-        let _ = common::ipc_send_scene_batch(display, &keypad, 9 + row as u32);
+        if common::ipc_send_scene_batch(display, &keypad, 9 + row as u32) == IpcStatus::Full {
+            return true;
+        }
     }
+    false
 }
 
 fn draw_surface_chrome(
@@ -394,7 +399,7 @@ fn draw_surface_chrome(
     title: &[u8],
     more: bool,
     opaque: bool,
-) {
+) -> bool {
     let bounds = surface.bounds;
     let mut base = GuiDrawBatch::new(surface.reference, sequence, bounds);
     base.flags = logos_abi::GUI_DRAW_FLAG_MORE;
@@ -405,7 +410,9 @@ fn draw_surface_chrome(
     }
     let _ = base.push(GuiDrawCommand::fill_rect(status_bar, 0x182535));
     push_surface_text(&mut base, bounds, 16, 10, 0xffffff, title);
-    let _ = common::ipc_send_scene_batch(display, &base, 1);
+    if common::ipc_send_scene_batch(display, &base, 1) == IpcStatus::Full {
+        return true;
+    }
 
     let mut close = GuiDrawBatch::new(surface.reference, sequence, bounds);
     if more {
@@ -420,7 +427,7 @@ fn draw_surface_chrome(
     );
     let _ = close.push(GuiDrawCommand::fill_rounded_rect(close_bounds, 0x9f3b3b, 6));
     push_surface_text(&mut close, bounds, close_local.x.saturating_add(16), 10, 0xffffff, b"X");
-    let _ = common::ipc_send_scene_batch(display, &close, 4);
+    common::ipc_send_scene_batch(display, &close, 4) == IpcStatus::Full
 }
 
 fn draw_app(
@@ -428,7 +435,7 @@ fn draw_app(
     surface: logos_atrium::Surface,
     calculator: &logos_atrium::Calculator,
     sequence: u32,
-) {
+) -> bool {
     let title: &[u8] = match surface.app {
         logos_atrium::AppId::Calculator => b"Calculator",
         logos_atrium::AppId::Files => b"Files",
@@ -437,11 +444,16 @@ fn draw_app(
     };
     match surface.app {
         logos_atrium::AppId::Calculator => {
-            draw_surface_chrome(display, surface, sequence, title, true, true);
-            draw_calculator_ui(display, surface, calculator, sequence)
+            if draw_surface_chrome(display, surface, sequence, title, true, true) {
+                true
+            } else {
+                draw_calculator_ui(display, surface, calculator, sequence)
+            }
         }
         logos_atrium::AppId::Files => {
-            draw_surface_chrome(display, surface, sequence, title, true, true);
+            if draw_surface_chrome(display, surface, sequence, title, true, true) {
+                return true;
+            }
             let mut panel = GuiDrawBatch::new(surface.reference, sequence, surface.bounds);
             panel.flags = logos_abi::GUI_DRAW_FLAG_MORE;
             let _ = panel.push(GuiDrawCommand::fill_rect(
@@ -453,7 +465,9 @@ fn draw_app(
                 ),
                 0x263548,
             ));
-            let _ = common::ipc_send_scene_batch(display, &panel, 6);
+            if common::ipc_send_scene_batch(display, &panel, 6) == IpcStatus::Full {
+                return true;
+            }
             let mut detail = GuiDrawBatch::new(
                 surface.reference,
                 sequence,
@@ -473,13 +487,14 @@ fn draw_app(
                 0xb8c7da,
                 b"Storage browser is not available yet",
             );
-            let _ = common::ipc_send_scene_batch(display, &detail, 7);
+            common::ipc_send_scene_batch(display, &detail, 7) == IpcStatus::Full
         }
         logos_atrium::AppId::Terminal => {
-            draw_surface_chrome(display, surface, sequence, title, false, true);
+            draw_surface_chrome(display, surface, sequence, title, false, true)
         }
         logos_atrium::AppId::System => {
             // The System service owns this retained scene, including its chrome.
+            false
         }
     }
 }
@@ -682,7 +697,7 @@ fn render(
     atrium: &logos_atrium::Atrium,
     calculator: &logos_atrium::Calculator,
     sequence: &mut u32,
-) {
+) -> bool {
     let home_scene_pending = unsafe {
         *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
             < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
@@ -694,19 +709,21 @@ fn render(
                 < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
         };
         if still_pending {
-            return;
+            return false;
         }
     }
     let Some(home) = atrium.home_surface().is_valid().then_some(atrium.home_surface()) else {
-        return;
+        return false;
     };
     if atrium.focused_surface().is_some() {
         let hidden = unsafe { *core::ptr::addr_of!(HOME_SCENE_HIDDEN) };
         if !hidden {
             *sequence = sequence.wrapping_add(1).max(1);
             let clear = GuiSceneOp::clear(home, *sequence);
-            if common::ipc_send_handle(display, &clear) == IpcStatus::Ok {
-                unsafe { *core::ptr::addr_of_mut!(HOME_SCENE_HIDDEN) = true };
+            match common::ipc_send_handle(display, &clear) {
+                IpcStatus::Ok => unsafe { *core::ptr::addr_of_mut!(HOME_SCENE_HIDDEN) = true },
+                IpcStatus::Full => return true,
+                _ => {}
             }
         }
     } else {
@@ -715,8 +732,9 @@ fn render(
         draw_home(display, home, atrium, *sequence);
     }
     if let Some(surface) = atrium.focused_surface() {
-        draw_app(display, surface, calculator, *sequence);
+        return draw_app(display, surface, calculator, *sequence);
     }
+    false
 }
 
 fn queue_home_surface(
@@ -853,6 +871,7 @@ pub extern "C" fn _start() -> ! {
     let mut deferred_system_revoke: Option<SurfaceHandle> = None;
     let mut pending_render: Option<RenderMessage> = None;
     let mut pending_draw: Option<GuiSceneOp> = None;
+    let mut pending_app_render = false;
     let mut cursor_surface = SurfaceHandle::EMPTY;
     let mut pending_cursor_surface = queue_cursor_surface(display_control, &mut next_request);
     let mut cursor_x = (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16;
@@ -874,6 +893,13 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        if pending_app_render {
+            pending_app_render = render(display, atrium, calculator, &mut sequence);
+            if pending_app_render {
+                common::heartbeat();
+                continue;
+            }
+        }
         surface_commands.flush(display_control);
         if !cursor_surface.is_valid() && pending_cursor_surface.is_none() {
             pending_cursor_surface = queue_cursor_surface(display_control, &mut next_request);
@@ -1375,7 +1401,7 @@ pub extern "C" fn _start() -> ! {
                 if home_surface {
                     proof_line(b"LogOS vNext: Atrium home surface ready");
                 }
-                render(display, atrium, calculator, &mut sequence);
+                pending_app_render = render(display, atrium, calculator, &mut sequence);
             }
             if authenticated
                 && atrium.phase() == logos_atrium::AtriumPhase::Home
@@ -1558,7 +1584,8 @@ pub extern "C" fn _start() -> ! {
                             } else if surface.app == logos_atrium::AppId::Calculator
                                 && calculator.input(&local)
                             {
-                                render(display, atrium, calculator, &mut sequence);
+                                pending_app_render =
+                                    render(display, atrium, calculator, &mut sequence);
                             } else if let Some(caps) = program_surface_capabilities
                                 .iter()
                                 .flatten()
@@ -1588,7 +1615,7 @@ pub extern "C" fn _start() -> ! {
                                 GuiRect::EMPTY,
                                 &mut next_request,
                             );
-                            render(display, atrium, calculator, &mut sequence);
+                            pending_app_render = render(display, atrium, calculator, &mut sequence);
                         }
                         continue;
                     }
@@ -1665,7 +1692,7 @@ pub extern "C" fn _start() -> ! {
                     let _ = common::ipc_send_handle(shell, &command);
                 }
                 logos_atrium::AtriumAction::LauncherChanged => {
-                    render(display, atrium, calculator, &mut sequence);
+                    pending_app_render = render(display, atrium, calculator, &mut sequence);
                 }
                 logos_atrium::AtriumAction::CloseFocused => {
                     let old = atrium.focused_surface();
@@ -1697,7 +1724,7 @@ pub extern "C" fn _start() -> ! {
                                 &mut next_request,
                             );
                         }
-                        render(display, atrium, calculator, &mut sequence);
+                        pending_app_render = render(display, atrium, calculator, &mut sequence);
                     }
                 }
                 logos_atrium::AtriumAction::FocusNext
@@ -1725,7 +1752,7 @@ pub extern "C" fn _start() -> ! {
                                 );
                             }
                         }
-                        render(display, atrium, calculator, &mut sequence);
+                        pending_app_render = render(display, atrium, calculator, &mut sequence);
                     }
                 }
                 _ => {}
@@ -1745,7 +1772,7 @@ pub extern "C" fn _start() -> ! {
                     } else if surface.app == logos_atrium::AppId::Calculator
                         && calculator.input(&event)
                     {
-                        render(display, atrium, calculator, &mut sequence);
+                        pending_app_render = render(display, atrium, calculator, &mut sequence);
                     } else if let Some(caps) = program_surface_capabilities
                         .iter()
                         .flatten()
@@ -1775,7 +1802,7 @@ pub extern "C" fn _start() -> ! {
             (&*core::ptr::addr_of!(COMMAND_MENU_TREE)).next_deadline(now_ticks).is_some()
         };
         if menu_motion_active {
-            render(display, atrium, calculator, &mut sequence);
+            pending_app_render = render(display, atrium, calculator, &mut sequence);
         }
         let home_scene_pending = unsafe {
             *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
