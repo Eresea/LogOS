@@ -29,11 +29,12 @@ pub use device_api::{
     DeviceState, DeviceStatus, MAX_DEVICES,
 };
 pub use graphics::{
-    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT,
-    GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiNodeOperation, GuiRect,
-    GuiSceneOp, GuiSessionContext, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest,
-    GuiSurfaceResponse, GuiTransform, MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS,
-    MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
+    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE,
+    GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind,
+    GuiMaterialSymbol, GuiNodeOperation, GuiRect, GuiSceneOp, GuiSessionContext, GuiStatus,
+    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTransform,
+    MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
+    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
 };
 
 pub use package_ipc::{

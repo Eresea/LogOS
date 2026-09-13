@@ -11,6 +11,7 @@ mod layout;
 mod motion;
 mod reactive;
 mod runtime;
+mod select;
 mod template;
 
 pub use component::{
@@ -47,8 +48,12 @@ pub use reactive::{
     UiWritable,
 };
 pub use runtime::{
-    MAX_UI_NODES, TAB_INDEX_NONE, UiBlueprint, UiError, UiInteraction, UiInteractive, UiNode,
-    UiNodeHandle, UiNodeKind, UiNodeSpec, UiRect, UiTree,
+    MAX_UI_NODES, TAB_INDEX_NONE, UiBlueprint, UiError, UiIcon, UiInteraction, UiInteractive,
+    UiNode, UiNodeHandle, UiNodeKind, UiNodeSpec, UiRect, UiTree,
+};
+pub use select::{
+    MAX_UI_SELECT_OPTIONS, UI_KEY_ESCAPE, UI_SELECT_GAP, UI_SELECT_NO_SELECTION, UiPopover,
+    UiPopoverLayout, UiPopoverPlacement, UiSelect, UiSelectEvent,
 };
 pub use template::{
     MAX_UI_BINDINGS, MAX_UI_CONDITIONAL_STYLES, MAX_UI_EXPRESSION_BYTES, MAX_UI_NAME_BYTES,

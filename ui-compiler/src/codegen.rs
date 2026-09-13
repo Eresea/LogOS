@@ -105,6 +105,8 @@ fn write_node<W: fmt::Write>(
     write_name(output, node.key)?;
     write!(output, ", text: ").map_err(|_| UiCodegenError::Output)?;
     write_text(output, node.text.as_bytes())?;
+    write!(output, ", icon: ").map_err(|_| UiCodegenError::Output)?;
+    write_icon(output, node.icon)?;
     write!(output, ", text_binding: ").map_err(|_| UiCodegenError::Output)?;
     write_expression(output, node.text_binding)?;
     write!(
@@ -120,6 +122,14 @@ fn write_node<W: fmt::Write>(
     )
     .map_err(|_| UiCodegenError::Output)?;
     Ok(())
+}
+
+fn write_icon<W: fmt::Write>(output: &mut W, icon: logos_ui::UiIcon) -> Result<(), UiCodegenError> {
+    let name = match icon {
+        logos_ui::UiIcon::None => "None",
+        logos_ui::UiIcon::Settings => "Settings",
+    };
+    write!(output, "logos_ui::UiIcon::{name}").map_err(|_| UiCodegenError::Output)
 }
 
 fn write_animation<W: fmt::Write>(

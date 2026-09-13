@@ -84,3 +84,4 @@
 | [0081](0081-bounded-1280x800-ui-profile.md) | Accepted | Bounded 1280×800 UI profile, typed framework command menu, scaled glyph styling, and surface-local occlusion clipping |
 | [0082](0082-bounded-ui-motion.md) | Accepted | Fixed-point CSS-like transitions and bounded keyframe animation owned by UI hosts, with transform-aware Display ABI rasterization |
 | [0083](0083-bounded-dynamic-tiling-workspace.md) | Accepted | Atrium-owned fixed-capacity binary split tree for dynamic vertical and horizontal tiled workspace layout |
+| [0084](0084-bounded-material-symbols.md) | Accepted | Bounded native Material Symbols through one retained UI button paint fragment |

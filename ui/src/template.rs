@@ -1,5 +1,5 @@
 use crate::runtime::{
-    MAX_UI_NODES, TAB_INDEX_NONE, UiBlueprint, UiError, UiInteraction, UiNodeKind,
+    MAX_UI_NODES, TAB_INDEX_NONE, UiBlueprint, UiError, UiIcon, UiInteraction, UiNodeKind,
 };
 use crate::{UiAnimationPreset, UiEasing, UiTransitionProperty, UiTransitionSpec};
 use crate::{UiLayoutAlignment, UiLayoutDirection, UiLayoutStyle};
@@ -432,6 +432,7 @@ pub struct UiNodeTemplate {
     pub parent: u16,
     pub key: UiName,
     pub text: UiText,
+    pub icon: UiIcon,
     pub text_binding: UiExpression,
     pub bindings: UiBindingList,
     pub event: UiEvent,
@@ -448,6 +449,7 @@ impl UiNodeTemplate {
         parent: u16::MAX,
         key: UiName::EMPTY,
         text: UiText::EMPTY,
+        icon: UiIcon::None,
         text_binding: UiExpression::EMPTY,
         bindings: UiBindingList::EMPTY,
         event: UiEvent::EMPTY,
@@ -612,6 +614,7 @@ impl UiDocument {
                 )?
             };
             blueprint.set_text(blueprint_index, node.text)?;
+            blueprint.set_icon(blueprint_index, node.icon)?;
             blueprint.set_styles(blueprint_index, node.styles)?;
         }
         Ok(blueprint)

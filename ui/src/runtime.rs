@@ -50,6 +50,22 @@ pub enum UiNodeKind {
     Form = 6,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UiIcon {
+    None,
+    Settings,
+}
+
+impl UiIcon {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        match bytes {
+            b"none" => Some(Self::None),
+            b"settings" => Some(Self::Settings),
+            _ => None,
+        }
+    }
+}
+
 impl UiNodeKind {
     pub const fn is_interactive(self) -> bool {
         matches!(self, Self::Button | Self::TextInput)
@@ -187,6 +203,7 @@ pub struct UiNodeSpec {
     pub parent: u16,
     pub key: u16,
     pub text: UiText,
+    pub icon: UiIcon,
     pub styles: UiStyleList,
     pub interaction: UiInteraction,
     pub layout: UiLayoutStyle,
@@ -200,6 +217,7 @@ impl UiNodeSpec {
             parent: NO_PARENT,
             key,
             text: UiText::EMPTY,
+            icon: UiIcon::None,
             styles: UiStyleList::EMPTY,
             interaction: UiInteraction::for_kind(kind),
             layout: UiLayoutStyle::EMPTY,
@@ -213,6 +231,7 @@ impl UiNodeSpec {
             parent,
             key,
             text: UiText::EMPTY,
+            icon: UiIcon::None,
             styles: UiStyleList::EMPTY,
             interaction: UiInteraction::for_kind(kind),
             layout: UiLayoutStyle::EMPTY,
@@ -230,6 +249,7 @@ impl UiNodeSpec {
             parent: NO_PARENT,
             key,
             text: UiText::EMPTY,
+            icon: UiIcon::None,
             styles: UiStyleList::EMPTY,
             interaction,
             layout: UiLayoutStyle::EMPTY,
@@ -248,6 +268,7 @@ impl UiNodeSpec {
             parent,
             key,
             text: UiText::EMPTY,
+            icon: UiIcon::None,
             styles: UiStyleList::EMPTY,
             interaction,
             layout: UiLayoutStyle::EMPTY,
@@ -349,6 +370,15 @@ impl UiBlueprint {
         Ok(())
     }
 
+    pub fn set_icon(&mut self, index: u16, icon: UiIcon) -> Result<(), UiError> {
+        let index = usize::from(index);
+        if index >= self.count {
+            return Err(UiError::NotFound);
+        }
+        self.specs[index].icon = icon;
+        Ok(())
+    }
+
     pub fn set_styles(&mut self, index: u16, styles: UiStyleList) -> Result<(), UiError> {
         let index = usize::from(index);
         if index >= self.count {
@@ -396,6 +426,7 @@ pub struct UiNode {
     pub key: u16,
     pub order: u32,
     pub text: UiText,
+    pub icon: UiIcon,
     pub styles: UiStyleList,
     pub bounds: UiRect,
     pub clip: UiRect,
@@ -415,6 +446,7 @@ impl UiNode {
         key: 0,
         order: 0,
         text: UiText::EMPTY,
+        icon: UiIcon::None,
         styles: UiStyleList::EMPTY,
         bounds: UiRect::EMPTY,
         clip: UiRect::EMPTY,
@@ -453,7 +485,7 @@ impl UiTree {
             } else {
                 tree.nodes[usize::from(spec.parent)].handle
             };
-            tree.insert_with_text_and_interaction_and_layout(
+            let handle = tree.insert_with_text_and_interaction_and_layout(
                 spec.kind,
                 parent,
                 spec.key,
@@ -463,6 +495,7 @@ impl UiTree {
                 spec.layout,
                 spec.intrinsic_size,
             )?;
+            tree.set_icon(handle, spec.icon)?;
         }
         Ok(tree)
     }
@@ -547,6 +580,7 @@ impl UiTree {
             key,
             order: self.next_order,
             text,
+            icon: UiIcon::None,
             styles,
             bounds: UiRect::EMPTY,
             clip: UiRect::EMPTY,
@@ -680,6 +714,16 @@ impl UiTree {
             return Ok(false);
         }
         node.text = text;
+        node.dirty = true;
+        Ok(true)
+    }
+
+    pub fn set_icon(&mut self, handle: UiNodeHandle, icon: UiIcon) -> Result<bool, UiError> {
+        let node = self.node_mut(handle)?;
+        if node.icon == icon {
+            return Ok(false);
+        }
+        node.icon = icon;
         node.dirty = true;
         Ok(true)
     }

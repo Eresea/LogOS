@@ -2,7 +2,7 @@ use crate::events::{
     MAX_UI_OUTPUT_EVENTS, UiEventError, UiEventRouter, UiInputEvent, UiOutput, UiOutputError,
     UiRoutedEvent,
 };
-use crate::runtime::{UiError, UiNodeHandle, UiNodeKind, UiTree};
+use crate::runtime::{UiError, UiIcon, UiNodeHandle, UiNodeKind, UiTree};
 use crate::{
     UiAnimationSpec, UiAnimator, UiBinding, UiBindingProperty, UiButton, UiButtonEvent,
     UiComponent, UiComputedStyle, UiEventDisposition, UiExpression, UiInput, UiInputEventOutput,
@@ -601,6 +601,14 @@ impl UiComponentTree {
         text: UiText,
     ) -> Result<bool, UiComponentTreeError> {
         self.tree.set_text(handle, text).map_err(map_tree_error)
+    }
+
+    pub fn set_icon(
+        &mut self,
+        handle: UiNodeHandle,
+        icon: UiIcon,
+    ) -> Result<bool, UiComponentTreeError> {
+        self.tree.set_icon(handle, icon).map_err(map_tree_error)
     }
 
     pub fn set_styles(

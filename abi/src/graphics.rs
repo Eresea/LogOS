@@ -8,6 +8,7 @@ pub const MAX_GUI_NODES: usize = MAX_GUI_COMMANDS * MAX_GUI_BATCH_FRAGMENTS;
 pub const MAX_GUI_TEXT_BYTES: usize = 32;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
+pub const GUI_SURFACE_FLAG_CURSOR: u8 = 1 << 1;
 pub const GUI_TEXT_FLAG_LIGHT: u32 = 1 << 0;
 pub const GUI_TEXT_FLAG_DOUBLE: u32 = 1 << 1;
 pub const MAX_GUI_CORNER_RADIUS: u8 = 32;
@@ -136,7 +137,7 @@ impl GuiSurfaceRequest {
 
     pub const fn is_valid(self) -> bool {
         self.request_id != 0
-            && self.flags & !GUI_SURFACE_FLAG_TERMINAL == 0
+            && self.flags & !(GUI_SURFACE_FLAG_TERMINAL | GUI_SURFACE_FLAG_CURSOR) == 0
             && self.reserved == 0
             && self.reserved_tail == 0
             && match self.operation {
@@ -196,6 +197,13 @@ pub enum GuiDrawKind {
     StrokeRoundedRect = 7,
     Shadow = 8,
     LogosMark = 9,
+    MaterialSymbol = 10,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum GuiMaterialSymbol {
+    Settings = 1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -276,6 +284,13 @@ impl GuiDrawCommand {
     pub const fn logos_mark(bounds: GuiRect, color: u32) -> Self {
         let mut command = Self::fill_rect(bounds, color);
         command.kind = GuiDrawKind::LogosMark;
+        command
+    }
+
+    pub const fn material_symbol(bounds: GuiRect, color: u32, symbol: GuiMaterialSymbol) -> Self {
+        let mut command = Self::fill_rect(bounds, color);
+        command.kind = GuiDrawKind::MaterialSymbol;
+        command.auxiliary = symbol as u32;
         command
     }
 
@@ -461,6 +476,12 @@ impl GuiDrawCommand {
                         && self.width <= 512
                         && self.height <= 512
                         && self.auxiliary == 0
+                }
+                GuiDrawKind::MaterialSymbol => {
+                    self.text_len == 0
+                        && self.width != 0
+                        && self.height != 0
+                        && self.auxiliary == GuiMaterialSymbol::Settings as u32
                 }
             }
     }
@@ -845,6 +866,8 @@ mod tests {
     fn terminal_surface_flag_is_explicitly_bounded() {
         let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, 1);
         request.flags = GUI_SURFACE_FLAG_TERMINAL;
+        assert!(request.is_valid());
+        request.flags = GUI_SURFACE_FLAG_CURSOR;
         assert!(request.is_valid());
         request.flags = u8::MAX;
         assert!(!request.is_valid());

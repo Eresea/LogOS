@@ -1,9 +1,10 @@
 #![no_std]
 
 use logos_abi::{
-    GUI_DRAW_FLAG_MORE, GuiDrawCommand, GuiSceneOp, GuiTransform, MAX_GUI_NODES, SurfaceHandle,
+    GUI_DRAW_FLAG_MORE, GuiDrawCommand, GuiRect, GuiSceneOp, GuiTransform, MAX_GUI_NODES,
+    SurfaceHandle,
 };
-use logos_ui::{UiComponentTree, UiNode, UiNodeKind, UiRect, UiStyle};
+use logos_ui::{UiComponentTree, UiIcon, UiNode, UiNodeKind, UiRect, UiStyle};
 
 pub const MAX_UI_SCENE_OPS: usize = MAX_GUI_NODES + 2;
 const GUI_GLYPH_WIDTH: usize = 8;
@@ -165,16 +166,30 @@ fn emit_node(
                 1,
                 fill_command(bounds, control_color(node, theme), node),
             )?;
-            push_text(
-                output,
-                surface,
-                frame,
-                index,
-                node,
-                node.text.as_bytes(),
-                text_color(node, theme),
-                2,
-            )?;
+            if let Some(symbol) = material_symbol(node.icon) {
+                push_upsert(
+                    output,
+                    surface,
+                    frame,
+                    index,
+                    2,
+                    with_transform(
+                        material_symbol_command(bounds, text_color(node, theme), symbol),
+                        node,
+                    ),
+                )?;
+            } else {
+                push_text(
+                    output,
+                    surface,
+                    frame,
+                    index,
+                    node,
+                    node.text.as_bytes(),
+                    text_color(node, theme),
+                    2,
+                )?;
+            }
         }
         UiNodeKind::TextInput => {
             push_shadow(output, surface, frame, index, node, bounds)?;
@@ -200,6 +215,31 @@ fn emit_node(
         }
     }
     Ok(())
+}
+
+fn material_symbol(icon: UiIcon) -> Option<logos_abi::GuiMaterialSymbol> {
+    match icon {
+        UiIcon::None => None,
+        UiIcon::Settings => Some(logos_abi::GuiMaterialSymbol::Settings),
+    }
+}
+
+fn material_symbol_command(
+    bounds: UiRect,
+    color: u32,
+    symbol: logos_abi::GuiMaterialSymbol,
+) -> GuiDrawCommand {
+    let size = bounds.width.min(bounds.height).min(24);
+    GuiDrawCommand::material_symbol(
+        GuiRect::new(
+            bounds.x.saturating_add(bounds.width.saturating_sub(size) as i32 / 2),
+            bounds.y.saturating_add(bounds.height.saturating_sub(size) as i32 / 2),
+            size,
+            size,
+        ),
+        color,
+        symbol,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -358,7 +398,7 @@ fn panel_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
 }
 
 fn control_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
-    if node.interaction.is_focused() {
+    if node.interaction.is_focused() || node.interaction.is_hovered() {
         theme.focus
     } else if node.styles.contains(UiStyle::BackgroundAccent) {
         theme.accent
@@ -421,7 +461,7 @@ fn intersect(left: UiRect, right: UiRect) -> UiRect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos_ui::{UiBlueprint, UiNodeKind, UiStyle, UiStyleList, UiText};
+    use logos_ui::{UiBlueprint, UiIcon, UiNodeKind, UiStyle, UiStyleList, UiText};
 
     fn sample_tree() -> UiComponentTree {
         let mut blueprint = UiBlueprint::new();
@@ -584,5 +624,28 @@ mod tests {
         assert_eq!(text.command.auxiliary, logos_abi::GUI_TEXT_FLAG_DOUBLE);
         assert_eq!(text.command.x, 20);
         assert_eq!(text.command.y, 16);
+    }
+
+    #[test]
+    fn buttons_emit_material_symbols_without_dropping_semantic_text() {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let button = blueprint.push_child(UiNodeKind::Button, root, 2).unwrap();
+        blueprint.set_text(button, UiText::from_bytes(b"Settings").unwrap()).unwrap();
+        blueprint.set_icon(button, UiIcon::Settings).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 100, 80));
+        set_bounds(&mut tree, 1, UiRect::new(8, 8, 40, 40));
+
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        let icon = scene
+            .as_slice()
+            .iter()
+            .find(|operation| operation.command.kind == logos_abi::GuiDrawKind::MaterialSymbol)
+            .unwrap();
+        assert_eq!(icon.command.auxiliary, logos_abi::GuiMaterialSymbol::Settings as u32);
+        assert_eq!(icon.command.width, 24);
+        assert_eq!(icon.command.height, 24);
     }
 }

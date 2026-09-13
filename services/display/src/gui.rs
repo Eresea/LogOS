@@ -1,7 +1,7 @@
 use logos_abi::{
     GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch,
-    GuiDrawCommand, GuiDrawKind, GuiNodeOperation, GuiRect, GuiSceneOp, GuiStatus,
-    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS,
+    GuiDrawCommand, GuiDrawKind, GuiMaterialSymbol, GuiNodeOperation, GuiRect, GuiSceneOp,
+    GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS,
     MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, SurfaceHandle,
 };
 
@@ -374,6 +374,11 @@ impl GuiSurfaceRegistry {
     }
 
     pub fn background_color(&self) -> Option<u32> {
+        let root_bounds = self
+            .slots
+            .iter()
+            .find(|slot| slot.occupied() && slot.z_order == 0)
+            .map(|slot| slot.bounds);
         let mut selected = usize::MAX;
         for index in 0..MAX_GUI_SURFACES {
             let slot = self.slots[index];
@@ -382,14 +387,14 @@ impl GuiSurfaceRegistry {
                     .iter()
                     .flatten()
                     .map(|node| node.command)
-                    .find(|command| is_surface_background(*command, slot.bounds))
+                    .find(|command| is_surface_background(*command, slot.bounds, root_bounds))
             } else {
                 slot.batches[..slot.batch_count as usize]
                     .iter()
                     .flatten()
                     .filter_map(|batch| batch.commands[..batch.command_count as usize].first())
                     .copied()
-                    .find(|command| is_surface_background(*command, slot.bounds))
+                    .find(|command| is_surface_background(*command, slot.bounds, root_bounds))
             };
             if command.is_some()
                 && (selected == usize::MAX
@@ -408,13 +413,15 @@ impl GuiSurfaceRegistry {
                     .iter()
                     .flatten()
                     .map(|node| node.command)
-                    .find(|command| is_surface_background(*command, slot.bounds))
+                    .find(|command| is_surface_background(*command, slot.bounds, root_bounds))
                     .map(|command| command.color)
             } else {
                 slot.batches.iter().flatten().find_map(|batch| {
                     batch.commands[..batch.command_count as usize]
                         .first()
-                        .filter(|command| is_surface_background(**command, slot.bounds))
+                        .filter(|command| {
+                            is_surface_background(**command, slot.bounds, root_bounds)
+                        })
                         .map(|command| command.color)
                 })
             }
@@ -908,11 +915,16 @@ fn is_surface_fill(command: GuiDrawCommand) -> bool {
         && GuiRect::new(command.x, command.y, command.width, command.height) == GuiRect::SURFACE
 }
 
-fn is_surface_background(command: GuiDrawCommand, bounds: GuiRect) -> bool {
-    is_surface_fill(command)
-        || (command.kind == GuiDrawKind::FillRect
-            && command.is_identity_transform()
-            && command_rect(command) == bounds)
+fn is_surface_background(
+    command: GuiDrawCommand,
+    bounds: GuiRect,
+    root_bounds: Option<GuiRect>,
+) -> bool {
+    root_bounds == Some(bounds)
+        && (is_surface_fill(command)
+            || (command.kind == GuiDrawKind::FillRect
+                && command.is_identity_transform()
+                && command_rect(command) == bounds))
 }
 
 fn is_opaque_occluder(command: GuiDrawCommand) -> bool {
@@ -1072,7 +1084,8 @@ fn render_command(
         | GuiDrawKind::FillRoundedRect
         | GuiDrawKind::StrokeRoundedRect
         | GuiDrawKind::Shadow
-        | GuiDrawKind::LogosMark => {
+        | GuiDrawKind::LogosMark
+        | GuiDrawKind::MaterialSymbol => {
             render_modern(framebuffer, width, height, stride, format, command, clip)
         }
         GuiDrawKind::ClipRect => 0,
@@ -1218,6 +1231,7 @@ fn transformed_coverage(
             rounded_source_coverage(command, x, y)
         }
         GuiDrawKind::LogosMark => logos_mark_source_coverage(command, x, y),
+        GuiDrawKind::MaterialSymbol => material_symbol_source_coverage(command, x, y),
         GuiDrawKind::GlyphRun => glyph_source_coverage(command, x, y, glyph_cache),
         GuiDrawKind::ClipRect => None,
     }
@@ -1340,6 +1354,9 @@ fn render_modern(
         GuiDrawKind::LogosMark => {
             render_logos_mark(framebuffer, width, height, stride, format, command, clip)
         }
+        GuiDrawKind::MaterialSymbol => {
+            render_material_symbol(framebuffer, width, height, stride, format, command, clip)
+        }
         _ => 0,
     }
 }
@@ -1365,6 +1382,63 @@ fn render_logos_mark(
         }
     }
     rendered
+}
+
+fn render_material_symbol(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    command: GuiDrawCommand,
+    clip: GuiRect,
+) -> usize {
+    let clip = intersect(clip, GuiRect::new(0, 0, width as u32, height as u32));
+    let mut rendered = 0;
+    for y in clip.y..clip.y.saturating_add(clip.height as i32) {
+        for x in clip.x..clip.x.saturating_add(clip.width as i32) {
+            if let Some(coverage) = material_symbol_source_coverage(command, x, y) {
+                rendered +=
+                    plot(framebuffer, width, height, stride, format, x, y, command.color, coverage)
+                        as usize;
+            }
+        }
+    }
+    rendered
+}
+
+pub(crate) fn material_symbol_source_coverage(
+    command: GuiDrawCommand,
+    x: i32,
+    y: i32,
+) -> Option<u8> {
+    if command.auxiliary != GuiMaterialSymbol::Settings as u32
+        || command.width == 0
+        || command.height == 0
+    {
+        return None;
+    }
+    let local_x = x.saturating_sub(command.x);
+    let local_y = y.saturating_sub(command.y);
+    if local_x < 0
+        || local_y < 0
+        || local_x >= command.width as i32
+        || local_y >= command.height as i32
+    {
+        return None;
+    }
+    let normalized_x = local_x * 256 / command.width as i32;
+    let normalized_y = local_y * 256 / command.height as i32;
+    let dx = normalized_x - 128;
+    let dy = normalized_y - 128;
+    let distance_squared = dx * dx + dy * dy;
+    let ring = (34 * 34..=78 * 78).contains(&distance_squared);
+    let axial_tooth = (dx.abs() <= 15 && (70..=112).contains(&dy.abs()))
+        || (dy.abs() <= 15 && (70..=112).contains(&dx.abs()));
+    let diagonal_tooth = (dx.abs() - dy.abs()).abs() <= 15
+        && (50..=90).contains(&dx.abs())
+        && (50..=90).contains(&dy.abs());
+    (ring || axial_tooth || diagonal_tooth).then_some(u8::MAX)
 }
 
 fn logos_mark_source_coverage(command: GuiDrawCommand, x: i32, y: i32) -> Option<u8> {
@@ -2455,6 +2529,29 @@ mod tests {
         let mut backend = RecordingBackend { commands: std::vec::Vec::new() };
         registry.compose(&mut backend, &damage, count);
         assert!(backend.commands.iter().any(|command| command.text_len == 4));
+    }
+
+    #[test]
+    fn modal_surface_fill_does_not_replace_the_screen_background() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root_bounds = GuiRect::new(0, 0, 64, 32);
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, root_bounds))
+            .unwrap()
+            .surface;
+        let modal = registry
+            .create(8, request(GuiSurfaceOperation::CreateModal, 2, GuiRect::new(16, 8, 16, 16)))
+            .unwrap()
+            .surface;
+
+        let mut root_batch = GuiDrawBatch::new(root, 1, root_bounds);
+        assert!(root_batch.push(GuiDrawCommand::fill_rect(root_bounds, 0x101820)));
+        registry.update(7, root_batch).unwrap();
+        let mut modal_batch = GuiDrawBatch::new(modal, 1, GuiRect::SURFACE);
+        assert!(modal_batch.push(GuiDrawCommand::fill_surface(0x203040)));
+        registry.update(8, modal_batch).unwrap();
+
+        assert_eq!(registry.background_color(), Some(0x101820));
     }
 
     #[test]

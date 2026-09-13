@@ -16,7 +16,7 @@ pub use logos_ui::{
     MAX_UI_BINDINGS, MAX_UI_CONDITIONAL_STYLES, MAX_UI_EXPRESSION_BYTES, MAX_UI_NAME_BYTES,
     MAX_UI_STATE_STYLES, MAX_UI_STYLE_CONDITIONS, MAX_UI_STYLE_TOKENS, MAX_UI_TEXT_BYTES,
     UiBinding, UiBindingList, UiBindingProperty, UiConditionalStyle, UiConditionalStyleList,
-    UiDocument, UiEvent, UiEventKind, UiExpression, UiName, UiNodeTemplate, UiStateStyle,
+    UiDocument, UiEvent, UiEventKind, UiExpression, UiIcon, UiName, UiNodeTemplate, UiStateStyle,
     UiStateStyleList, UiStyle, UiStyleConditions, UiStyleList, UiStyleResolveError, UiStyleState,
     UiText,
 };
@@ -806,6 +806,22 @@ impl Parser<'_> {
                 return;
             }
             node.tab_index = tab_index;
+            return;
+        }
+        if name.as_bytes() == b"icon" {
+            let Some(index) = node_index else { return };
+            let Some(icon) = UiIcon::from_bytes(value) else {
+                self.diagnostics.push(UiDiagnosticKind::InvalidValue, offset);
+                return;
+            };
+            let Some(node) = self.document.node(usize::from(index)) else { return };
+            if node.kind != UiNodeKind::Button {
+                self.diagnostics.push(UiDiagnosticKind::UnknownAttribute, offset);
+                return;
+            }
+            if let Some(node) = self.document.node_mut(index) {
+                node.icon = icon;
+            }
             return;
         }
         if name.as_bytes() != b"id" {
@@ -2096,6 +2112,23 @@ mod tests {
         assert!(build.document.node(1).unwrap().kind.is_interactive());
         assert_eq!(build.document.node(2).unwrap().tab_index, -1);
         assert!(build.document.node(2).unwrap().kind.is_interactive());
+    }
+
+    #[test]
+    fn buttons_accept_bounded_material_symbol_names() {
+        let build = compile(r#"<ui.button icon="settings">Settings</ui.button>"#);
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert_eq!(build.document.node(0).unwrap().icon, UiIcon::Settings);
+
+        let invalid = compile(r#"<ui.button icon="unknown" />"#);
+        assert!(!invalid.is_valid());
+        assert!(
+            invalid
+                .diagnostics
+                .entries
+                .iter()
+                .any(|item| item.kind == UiDiagnosticKind::InvalidValue)
+        );
     }
 
     #[test]
