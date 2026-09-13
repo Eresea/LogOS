@@ -48,12 +48,15 @@ pub enum UiNodeKind {
     Button = 4,
     TextInput = 5,
     Form = 6,
+    Avatar = 7,
+    RouteFrame = 8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiIcon {
     None,
     Settings,
+    LogosMark,
 }
 
 impl UiIcon {
@@ -69,6 +72,19 @@ impl UiIcon {
 impl UiNodeKind {
     pub const fn is_interactive(self) -> bool {
         matches!(self, Self::Button | Self::TextInput)
+    }
+}
+
+fn avatar_parts(avatar: crate::UiAvatarContent) -> (UiText, UiIcon) {
+    match avatar {
+        crate::UiAvatarContent::None => (UiText::EMPTY, UiIcon::None),
+        crate::UiAvatarContent::Icon(icon) => (UiText::EMPTY, icon),
+        crate::UiAvatarContent::Image(crate::UiAvatarImage::LogosMark) => {
+            (UiText::EMPTY, UiIcon::LogosMark)
+        }
+        crate::UiAvatarContent::Text(text) => {
+            (UiText::from_bytes(text.as_bytes()).unwrap_or(UiText::EMPTY), UiIcon::None)
+        }
     }
 }
 
@@ -379,6 +395,21 @@ impl UiBlueprint {
         Ok(())
     }
 
+    pub fn set_avatar(
+        &mut self,
+        index: u16,
+        avatar: crate::UiAvatarContent,
+    ) -> Result<(), UiError> {
+        let index = usize::from(index);
+        if index >= self.count {
+            return Err(UiError::NotFound);
+        }
+        let (text, icon) = avatar_parts(avatar);
+        self.specs[index].text = text;
+        self.specs[index].icon = icon;
+        Ok(())
+    }
+
     pub fn set_styles(&mut self, index: u16, styles: UiStyleList) -> Result<(), UiError> {
         let index = usize::from(index);
         if index >= self.count {
@@ -498,6 +529,44 @@ impl UiTree {
             tree.set_icon(handle, spec.icon)?;
         }
         Ok(tree)
+    }
+
+    pub fn append_blueprint(
+        &mut self,
+        blueprint: &UiBlueprint,
+        parent: UiNodeHandle,
+        handles: &mut [UiNodeHandle; MAX_UI_NODES],
+    ) -> Result<usize, UiError> {
+        let _ = self.lookup(parent)?;
+        if blueprint.count == 0 || blueprint.specs[0].parent != NO_PARENT {
+            return Err(UiError::InvalidParent);
+        }
+        if self.count > MAX_UI_NODES.saturating_sub(blueprint.count) {
+            return Err(UiError::Capacity);
+        }
+        for index in 1..blueprint.count {
+            let child_parent = usize::from(blueprint.specs[index].parent);
+            if child_parent >= index {
+                return Err(UiError::InvalidParent);
+            }
+        }
+        for index in 0..blueprint.count {
+            let spec = blueprint.specs[index];
+            let node_parent = if index == 0 { parent } else { handles[usize::from(spec.parent)] };
+            let handle = self.insert_with_text_and_interaction_and_layout(
+                spec.kind,
+                node_parent,
+                spec.key,
+                spec.text,
+                spec.styles,
+                spec.interaction,
+                spec.layout,
+                spec.intrinsic_size,
+            )?;
+            self.set_icon(handle, spec.icon)?;
+            handles[index] = handle;
+        }
+        Ok(blueprint.count)
     }
 
     pub fn insert(
@@ -728,6 +797,22 @@ impl UiTree {
         Ok(true)
     }
 
+    pub fn set_avatar(
+        &mut self,
+        handle: UiNodeHandle,
+        avatar: crate::UiAvatarContent,
+    ) -> Result<bool, UiError> {
+        let (text, icon) = avatar_parts(avatar);
+        let node = self.node_mut(handle)?;
+        if node.text == text && node.icon == icon {
+            return Ok(false);
+        }
+        node.text = text;
+        node.icon = icon;
+        node.dirty = true;
+        Ok(true)
+    }
+
     pub fn set_styles(
         &mut self,
         handle: UiNodeHandle,
@@ -826,6 +911,22 @@ impl UiTree {
         Ok(count)
     }
 
+    pub fn subtree_handles(
+        &self,
+        root: UiNodeHandle,
+        output: &mut [UiNodeHandle; MAX_UI_NODES],
+    ) -> Result<usize, UiError> {
+        let _ = self.lookup(root)?;
+        let mut count = 0;
+        for node in self.nodes.iter().filter(|node| node.handle.is_valid()) {
+            if node.handle == root || self.is_descendant(node.handle, root) {
+                output[count] = node.handle;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     pub fn clear_dirty(&mut self, handle: UiNodeHandle) -> Result<(), UiError> {
         self.node_mut(handle)?.dirty = false;
         Ok(())
@@ -839,6 +940,17 @@ impl UiTree {
             return Err(UiError::Stale);
         }
         Ok(node)
+    }
+
+    fn is_descendant(&self, handle: UiNodeHandle, ancestor: UiNodeHandle) -> bool {
+        let mut parent = self.lookup(handle).ok().map(|node| node.parent);
+        while let Some(candidate) = parent.filter(|candidate| candidate.is_valid()) {
+            if candidate == ancestor {
+                return true;
+            }
+            parent = self.lookup(candidate).ok().map(|node| node.parent);
+        }
+        false
     }
 }
 

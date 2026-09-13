@@ -14,6 +14,47 @@ pub const MAX_UI_COMPONENTS: usize = crate::MAX_UI_NODES;
 pub const MAX_UI_BINDING_VALUES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiRouteMount {
+    route: u8,
+    root: UiNodeHandle,
+    handles: [UiNodeHandle; MAX_UI_COMPONENTS],
+    count: u8,
+    hooks: u8,
+}
+
+#[derive(Clone, Copy)]
+struct UiRouteState {
+    root: UiNodeHandle,
+    hooks: u8,
+}
+
+impl UiRouteState {
+    const EMPTY: Self = Self { root: UiNodeHandle::EMPTY, hooks: 0 };
+}
+
+impl UiRouteMount {
+    pub const EMPTY: Self = Self {
+        route: 0,
+        root: UiNodeHandle::EMPTY,
+        handles: [UiNodeHandle::EMPTY; MAX_UI_COMPONENTS],
+        count: 0,
+        hooks: 0,
+    };
+
+    pub const fn route(self) -> u8 {
+        self.route
+    }
+
+    pub const fn root(self) -> UiNodeHandle {
+        self.root
+    }
+
+    pub fn handle_at(self, index: usize) -> Option<UiNodeHandle> {
+        (index < usize::from(self.count)).then_some(self.handles[index])
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiBindingValue {
     Text(UiText),
     Bool(bool),
@@ -111,6 +152,8 @@ pub enum UiComponentTreeError {
     OutputFull,
     TypeMismatch,
     UnsupportedBinding,
+    NotRouteFrame,
+    InvalidRoute,
 }
 
 #[derive(Clone, Copy)]
@@ -134,7 +177,11 @@ impl UiComponentSlot {
             UiNodeKind::Panel => Self::Panel(UiPanel::new()),
             UiNodeKind::Button => Self::Button(UiButton::new()),
             UiNodeKind::TextInput => Self::Input(UiInput::new()),
-            UiNodeKind::Root | UiNodeKind::Label | UiNodeKind::Form => Self::Empty,
+            UiNodeKind::Root
+            | UiNodeKind::Label
+            | UiNodeKind::Form
+            | UiNodeKind::Avatar
+            | UiNodeKind::RouteFrame => Self::Empty,
         }
     }
 
@@ -209,6 +256,7 @@ pub struct UiComponentTree {
     focused: UiNodeHandle,
     hovered: UiNodeHandle,
     pressed: UiNodeHandle,
+    route_states: [UiRouteState; MAX_UI_COMPONENTS],
     animator: UiAnimator,
     clock_ticks: u64,
 }
@@ -237,6 +285,7 @@ impl UiComponentTree {
             focused: UiNodeHandle::EMPTY,
             hovered: UiNodeHandle::EMPTY,
             pressed: UiNodeHandle::EMPTY,
+            route_states: [UiRouteState::EMPTY; MAX_UI_COMPONENTS],
             animator: UiAnimator::new(),
             clock_ticks: 0,
         })
@@ -249,6 +298,7 @@ impl UiComponentTree {
             focused: UiNodeHandle::EMPTY,
             hovered: UiNodeHandle::EMPTY,
             pressed: UiNodeHandle::EMPTY,
+            route_states: [UiRouteState::EMPTY; MAX_UI_COMPONENTS],
             animator: UiAnimator::new(),
             clock_ticks: 0,
         }
@@ -270,6 +320,7 @@ impl UiComponentTree {
         self.focused = UiNodeHandle::EMPTY;
         self.hovered = UiNodeHandle::EMPTY;
         self.pressed = UiNodeHandle::EMPTY;
+        self.route_states = [UiRouteState::EMPTY; MAX_UI_COMPONENTS];
         self.animator = UiAnimator::new();
         self.clock_ticks = 0;
         Ok(())
@@ -286,7 +337,55 @@ impl UiComponentTree {
         Ok(handle)
     }
 
+    pub fn switch_route_frame(
+        &mut self,
+        frame: UiNodeHandle,
+        route: u8,
+        document: &crate::UiDocument,
+        router: &mut UiEventRouter,
+    ) -> Result<UiRouteMount, UiComponentTreeError> {
+        let node = self.tree.node(frame).map_err(map_tree_error)?;
+        if node.kind != UiNodeKind::RouteFrame {
+            return Err(UiComponentTreeError::NotRouteFrame);
+        }
+        let blueprint = document.to_blueprint().map_err(map_tree_error)?;
+        if blueprint.is_empty() {
+            return Err(UiComponentTreeError::InvalidRoute);
+        }
+        let slot = usize::from(frame.slot);
+        let old = self.route_states[slot];
+        let hooks = document.event_hook_count();
+        if router.len().saturating_sub(usize::from(old.hooks)) + hooks > crate::MAX_UI_EVENT_ROUTES
+        {
+            return Err(UiComponentTreeError::Capacity);
+        }
+        self.unmount_route(old, router)?;
+        self.route_states[slot] = UiRouteState::EMPTY;
+
+        let mut handles = [UiNodeHandle::EMPTY; MAX_UI_COMPONENTS];
+        let count =
+            self.tree.append_blueprint(&blueprint, frame, &mut handles).map_err(map_tree_error)?;
+        for handle in handles.iter().take(count).copied() {
+            let kind = self.tree.node(handle).map_err(map_tree_error)?.kind;
+            self.components[usize::from(handle.slot)] = UiComponentSlot::from_kind(kind);
+        }
+        let hooks = self.install_document_hooks_with_handles(document, &handles, router)?;
+        let mount = UiRouteMount {
+            route,
+            root: handles[0],
+            handles,
+            count: count as u8,
+            hooks: hooks as u8,
+        };
+        self.route_states[slot] = UiRouteState { root: mount.root, hooks: mount.hooks };
+        Ok(mount)
+    }
+
     pub fn destroy(&mut self, handle: UiNodeHandle) -> Result<(), UiComponentTreeError> {
+        let slot = usize::from(handle.slot);
+        if slot < self.route_states.len() && self.route_states[slot].root == handle {
+            self.route_states[slot] = UiRouteState::EMPTY;
+        }
         self.tree.destroy(handle).map_err(map_tree_error)?;
         self.animator.clear(usize::from(handle.slot));
         if self.tree.node(self.focused).is_err() {
@@ -306,6 +405,15 @@ impl UiComponentTree {
         handle: UiNodeHandle,
         router: &mut UiEventRouter,
     ) -> Result<usize, UiComponentTreeError> {
+        let mounted = self
+            .route_states
+            .get(usize::from(handle.slot))
+            .copied()
+            .filter(|state| state.root.is_valid());
+        if let Some(mounted) = mounted {
+            self.unmount_route(mounted, router)?;
+            self.route_states[usize::from(handle.slot)] = UiRouteState::EMPTY;
+        }
         self.destroy(handle)?;
         Ok(router.unsubscribe_target(handle))
     }
@@ -841,15 +949,27 @@ impl UiComponentTree {
         document: &crate::UiDocument,
         router: &mut UiEventRouter,
     ) -> Result<usize, UiComponentTreeError> {
+        let mut handles = [UiNodeHandle::EMPTY; crate::MAX_UI_NODES];
+        for (index, handle) in handles.iter_mut().enumerate().take(document.node_count()) {
+            *handle = self.tree.handle_at(index).map_err(map_tree_error)?;
+        }
+        self.install_document_hooks_with_handles(document, &handles, router)
+    }
+
+    fn install_document_hooks_with_handles(
+        &self,
+        document: &crate::UiDocument,
+        handles: &[UiNodeHandle; crate::MAX_UI_NODES],
+        router: &mut UiEventRouter,
+    ) -> Result<usize, UiComponentTreeError> {
         let mut hooks = [None; crate::MAX_UI_NODES];
         let mut count = 0;
-        for index in 0..document.node_count() {
+        for (index, target) in handles.iter().enumerate().take(document.node_count()) {
             let node = document.node(index).ok_or(UiComponentTreeError::Stale)?;
             if !node.event.is_present() {
                 continue;
             }
-            let target = self.tree.handle_at(index).map_err(map_tree_error)?;
-            hooks[count] = Some((target, node.event.kind.event_type(), index as u16));
+            hooks[count] = Some((*target, node.event.kind.event_type(), index as u16));
             count += 1;
         }
 
@@ -871,6 +991,23 @@ impl UiComponentTree {
                 .map_err(map_event_error)?;
         }
         Ok(count)
+    }
+
+    fn unmount_route(
+        &mut self,
+        state: UiRouteState,
+        router: &mut UiEventRouter,
+    ) -> Result<(), UiComponentTreeError> {
+        if !state.root.is_valid() {
+            return Ok(());
+        }
+        let mut handles = [UiNodeHandle::EMPTY; MAX_UI_COMPONENTS];
+        let count = self.tree.subtree_handles(state.root, &mut handles).map_err(map_tree_error)?;
+        for handle in handles.iter().take(count).copied() {
+            router.unsubscribe_target(handle);
+            self.animator.clear(usize::from(handle.slot));
+        }
+        self.tree.destroy(state.root).map_err(map_tree_error)
     }
 }
 
@@ -943,6 +1080,7 @@ fn map_event_error(error: UiEventError) -> UiComponentTreeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::UiEventType;
 
     #[test]
     fn host_retains_typed_input_and_button_instances() {
@@ -1400,5 +1538,78 @@ mod tests {
             Err(UiComponentTreeError::OutputFull)
         );
         assert!(component_output.is_empty());
+    }
+
+    #[test]
+    fn route_frame_switches_child_documents_and_keeps_parent_handles() {
+        let mut parent = crate::UiDocument::EMPTY;
+        let root = parent
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::Root,
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        let frame = parent
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::RouteFrame,
+                parent: root,
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+
+        let mut child = crate::UiDocument::EMPTY;
+        let child_root = child
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::Panel,
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        child
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::Button,
+                parent: child_root,
+                event: crate::UiEvent {
+                    kind: crate::UiEventKind::Click,
+                    handler: crate::UiExpression::from_bytes(b"tabChild").unwrap(),
+                },
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+
+        let mut router = UiEventRouter::new();
+        let mut host = UiComponentTree::from_document(&parent, &mut router).unwrap();
+        let root_handle = host.tree().handle_at(0).unwrap();
+        let frame_handle = host.tree().handle_at(usize::from(frame)).unwrap();
+        let first = host.switch_route_frame(frame_handle, 1, &child, &mut router).unwrap();
+        let child_button = first.handle_at(1).unwrap();
+        assert_eq!(host.tree().node(root_handle).unwrap().kind, UiNodeKind::Root);
+        assert_eq!(host.tree().node(frame_handle).unwrap().kind, UiNodeKind::RouteFrame);
+
+        let mut component_output = UiOutput::new();
+        let mut routed_output = UiOutput::new();
+        host.dispatch_with_hooks(
+            child_button,
+            UiInputEvent::Click,
+            &router,
+            &mut component_output,
+            &mut routed_output,
+        )
+        .unwrap();
+        assert_eq!(routed_output.pop().unwrap().target, child_button);
+
+        let mut replacement = crate::UiDocument::EMPTY;
+        replacement
+            .push_node(crate::UiNodeTemplate {
+                kind: UiNodeKind::Label,
+                ..crate::UiNodeTemplate::EMPTY
+            })
+            .unwrap();
+        let second = host.switch_route_frame(frame_handle, 2, &replacement, &mut router).unwrap();
+        assert_eq!(first.route(), 1);
+        assert_eq!(second.route(), 2);
+        assert!(host.tree().node(child_button).is_err());
+        assert_eq!(host.tree().node(root_handle).unwrap().kind, UiNodeKind::Root);
+        assert_eq!(host.tree().node(frame_handle).unwrap().kind, UiNodeKind::RouteFrame);
+        assert!(!router.is_subscribed(child_button, UiEventType::Click));
     }
 }

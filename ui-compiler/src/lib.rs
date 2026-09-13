@@ -28,8 +28,8 @@ pub const MAX_UI_HANDLERS: usize = 32;
 pub const MAX_UI_COMPONENT_CONTRACTS: usize = 16;
 pub const MAX_UI_VALUES: usize = 64;
 
-pub const UI_COMPONENT_NAMES: [&str; 5] =
-    ["ui.button", "ui.column", "ui.form", "ui.input", "ui.text"];
+pub const UI_COMPONENT_NAMES: [&str; 6] =
+    ["ui.button", "ui.column", "ui.form", "ui.input", "ui.route-frame", "ui.text"];
 pub const UI_STYLE_NAMES: [&str; 39] = [
     "h-full",
     "w-full",
@@ -285,7 +285,8 @@ impl UiComponentRegistry {
         registry.entries[4] = UiComponentContract::for_kind(UiNodeKind::Panel);
         registry.entries[5] = UiComponentContract::for_kind(UiNodeKind::Label);
         registry.entries[6] = UiComponentContract::new("ui.column", UiNodeKind::Panel, false);
-        registry.count = 7;
+        registry.entries[7] = UiComponentContract::for_kind(UiNodeKind::RouteFrame);
+        registry.count = 8;
         registry
     }
 
@@ -1859,6 +1860,13 @@ mod tests {
     }
 
     #[test]
+    fn route_frame_is_a_builtin_container() {
+        let build = compile(r#"<ui.route-frame #content />"#);
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert_eq!(build.document.node(0).unwrap().kind, UiNodeKind::RouteFrame);
+    }
+
+    #[test]
     fn event_handlers_use_a_bounded_typed_shape() {
         let valid = compile(r#"<ui.input (changed)="passwordChanged($event)"/>"#);
         assert!(valid.is_valid(), "diagnostics: {:?}", valid.diagnostics);
@@ -1936,7 +1944,7 @@ mod tests {
         );
         assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
         assert_eq!(build.document.node(0).unwrap().kind, UiNodeKind::TextInput);
-        assert_eq!(components.len(), 8);
+        assert_eq!(components.len(), 9);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub struct UiSceneTheme {
     pub surface: u32,
     pub panel: u32,
     pub input: u32,
+    pub border: u32,
     pub accent: u32,
     pub focus: u32,
     pub text: u32,
@@ -25,6 +26,7 @@ impl UiSceneTheme {
         surface: 0x101820,
         panel: 0x182535,
         input: 0x263548,
+        border: 0x334155,
         accent: 0x356bd8,
         focus: 0x4b82f2,
         text: 0xffffff,
@@ -133,7 +135,7 @@ fn emit_node(
                 )?;
             }
         }
-        UiNodeKind::Panel | UiNodeKind::Form => {
+        UiNodeKind::Panel | UiNodeKind::Form | UiNodeKind::RouteFrame => {
             push_shadow(output, surface, frame, index, node, bounds)?;
             push_upsert(
                 output,
@@ -155,6 +157,69 @@ fn emit_node(
                 text_color(node, theme),
                 0,
             )?;
+        }
+        UiNodeKind::Avatar => {
+            let size = bounds.width.min(bounds.height).min(64);
+            let circle = UiRect::new(
+                bounds.x.saturating_add(bounds.width.saturating_sub(size) as i32 / 2),
+                bounds.y.saturating_add(bounds.height.saturating_sub(size) as i32 / 2),
+                size,
+                size,
+            );
+            push_upsert(
+                output,
+                surface,
+                frame,
+                index,
+                1,
+                with_transform(
+                    GuiDrawCommand::fill_rounded_rect(
+                        to_gui_rect(circle),
+                        color(control_color(node, theme), node),
+                        (size / 2) as u8,
+                    ),
+                    node,
+                ),
+            )?;
+            if node.icon == UiIcon::LogosMark {
+                push_upsert(
+                    output,
+                    surface,
+                    frame,
+                    index,
+                    2,
+                    with_transform(
+                        GuiDrawCommand::logos_mark(
+                            to_gui_rect(circle),
+                            color(text_color(node, theme), node),
+                        ),
+                        node,
+                    ),
+                )?;
+            } else if let Some(symbol) = material_symbol(node.icon) {
+                push_upsert(
+                    output,
+                    surface,
+                    frame,
+                    index,
+                    2,
+                    with_transform(
+                        material_symbol_command(circle, text_color(node, theme), symbol),
+                        node,
+                    ),
+                )?;
+            } else {
+                push_avatar_text(
+                    output,
+                    surface,
+                    frame,
+                    index,
+                    node,
+                    circle,
+                    node.text.as_bytes(),
+                    text_color(node, theme),
+                )?;
+            }
         }
         UiNodeKind::Button => {
             push_shadow(output, surface, frame, index, node, bounds)?;
@@ -202,6 +267,7 @@ fn emit_node(
                 fill_command(bounds, control_color(node, theme), node),
             )?;
             let value = tree.value(node.handle).unwrap_or(node.text);
+            let value = if value.as_bytes().is_empty() { node.text } else { value };
             push_text(
                 output,
                 surface,
@@ -221,6 +287,7 @@ fn material_symbol(icon: UiIcon) -> Option<logos_abi::GuiMaterialSymbol> {
     match icon {
         UiIcon::None => None,
         UiIcon::Settings => Some(logos_abi::GuiMaterialSymbol::Settings),
+        UiIcon::LogosMark => None,
     }
 }
 
@@ -240,6 +307,34 @@ fn material_symbol_command(
         color,
         symbol,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_avatar_text(
+    output: &mut UiSceneFrame,
+    surface: SurfaceHandle,
+    frame: u32,
+    index: usize,
+    node: &UiNode,
+    bounds: UiRect,
+    text: &[u8],
+    text_color: u32,
+) -> Result<(), UiSceneError> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    let scale = text_scale(node) as u32;
+    let text_width =
+        (text.len() as u32).saturating_mul(GUI_GLYPH_WIDTH as u32).saturating_mul(scale);
+    let x = bounds.x.saturating_add(bounds.width.saturating_sub(text_width) as i32 / 2);
+    let text_height = logos_display_text_height(scale as usize);
+    let y = bounds.y.saturating_add(bounds.height.saturating_sub(text_height) as i32 / 2);
+    let Some(command) =
+        GuiDrawCommand::glyph_run_styled(x, y, color(text_color, node), text_flags(node), text)
+    else {
+        return Err(UiSceneError::InvalidCommand);
+    };
+    push_upsert(output, surface, frame, index, 2, with_transform(command, node))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -390,7 +485,7 @@ fn corner_radius(bounds: UiRect, node: &UiNode) -> u8 {
 }
 
 fn has_rounded_style(node: &UiNode) -> bool {
-    node.styles.contains(UiStyle::RoundedLarge) || node.styles.contains(UiStyle::RoundedFull)
+    node.styles.contains(UiStyle::RoundedLarge)
 }
 
 fn panel_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
@@ -398,9 +493,9 @@ fn panel_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
 }
 
 fn control_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
-    if node.interaction.is_focused() || node.interaction.is_hovered() {
+    if node.interaction.is_focused() || node.interaction.is_pressed() {
         theme.focus
-    } else if node.styles.contains(UiStyle::BackgroundAccent) {
+    } else if node.interaction.is_hovered() || node.styles.contains(UiStyle::BackgroundAccent) {
         theme.accent
     } else {
         theme.input
@@ -519,8 +614,9 @@ mod tests {
         let mut blueprint = UiBlueprint::new();
         let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
         let text = UiText::from_bytes(b"x").unwrap();
-        for index in 0..8 {
-            let button = blueprint.push_child(UiNodeKind::Button, root, index + 2).unwrap();
+        let button_count = logos_abi::MAX_GUI_NODES / 2 + 1;
+        for index in 0..button_count {
+            let button = blueprint.push_child(UiNodeKind::Button, root, index as u16 + 2).unwrap();
             blueprint.set_text(button, text).unwrap();
         }
         let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
@@ -564,6 +660,21 @@ mod tests {
         assert_eq!(scene.as_slice()[3].command.corner_radius(), 12);
         assert_eq!(scene.as_slice()[2].command.shadow_blur(), 3);
         assert!(scene.as_slice().iter().all(|op| op.is_valid()));
+    }
+
+    #[test]
+    fn hovered_button_uses_accent_without_focus_flash() {
+        let mut tree = sample_tree();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 100, 60));
+        set_bounds(&mut tree, 1, UiRect::new(8, 8, 40, 16));
+        set_bounds(&mut tree, 2, UiRect::new(8, 32, 60, 24));
+        let button = tree.tree().handle_at(2).unwrap();
+        tree.tree_mut().set_hovered(button, true).unwrap();
+
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        let fill = scene.as_slice().iter().find(|operation| operation.node_id == 8).unwrap();
+        assert_eq!(fill.command.color_rgb(), UiSceneTheme::DEFAULT.accent);
     }
 
     #[test]

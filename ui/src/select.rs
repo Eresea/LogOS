@@ -4,7 +4,7 @@ use crate::template::UiText;
 use crate::{UiComponent, UiComponentContract, UiEventDisposition, UiRect};
 
 pub const UI_KEY_ESCAPE: u16 = 1;
-pub const MAX_UI_SELECT_OPTIONS: usize = 8;
+pub const MAX_UI_SELECT_OPTIONS: usize = 4;
 pub const UI_SELECT_NO_SELECTION: u8 = u8::MAX;
 pub const UI_SELECT_GAP: i32 = 8;
 
@@ -70,11 +70,12 @@ impl UiPopoverLayout {
 pub struct UiPopover {
     open: bool,
     scroll_offset: u8,
+    hovered_option: u8,
 }
 
 impl UiPopover {
     pub const fn new() -> Self {
-        Self { open: false, scroll_offset: 0 }
+        Self { open: false, scroll_offset: 0, hovered_option: UI_SELECT_NO_SELECTION }
     }
 
     pub const fn is_open(self) -> bool {
@@ -83,6 +84,10 @@ impl UiPopover {
 
     pub const fn scroll_offset(self) -> u8 {
         self.scroll_offset
+    }
+
+    pub const fn hovered_option(self) -> Option<u8> {
+        if self.hovered_option == UI_SELECT_NO_SELECTION { None } else { Some(self.hovered_option) }
     }
 
     pub fn open(&mut self) -> bool {
@@ -99,6 +104,7 @@ impl UiPopover {
         }
         self.open = false;
         self.scroll_offset = 0;
+        self.hovered_option = UI_SELECT_NO_SELECTION;
         true
     }
 
@@ -112,6 +118,16 @@ impl UiPopover {
             return false;
         }
         self.scroll_offset = offset;
+        true
+    }
+
+    pub fn set_hovered_option(&mut self, option: Option<u8>, option_count: u8) -> bool {
+        let hovered_option =
+            option.filter(|index| *index < option_count).unwrap_or(UI_SELECT_NO_SELECTION);
+        if self.hovered_option == hovered_option {
+            return false;
+        }
+        self.hovered_option = hovered_option;
         true
     }
 
@@ -278,12 +294,20 @@ impl UiSelect {
         self.popover.scroll_offset()
     }
 
+    pub const fn hovered_option(self) -> Option<u8> {
+        self.popover.hovered_option()
+    }
+
     pub fn set_hovered(&mut self, hovered: bool) -> bool {
         if self.interaction.is_hovered() == hovered {
             return false;
         }
         self.interaction.set_hovered(hovered);
         true
+    }
+
+    pub fn set_option_hovered(&mut self, option: Option<u8>) -> bool {
+        self.popover.set_hovered_option(option, self.option_count)
     }
 
     pub fn set_options(&mut self, options: &[UiText]) -> bool {
@@ -470,5 +494,17 @@ mod tests {
         assert!(!layout.scrollbar_track.is_empty());
         assert!(!layout.scrollbar.is_empty());
         assert_eq!(layout.option_at(30, layout.bounds.y + 1), Some(0));
+    }
+
+    #[test]
+    fn popover_option_hover_is_bounded_and_clears_on_close() {
+        let mut popover = UiPopover::new();
+        popover.open();
+        assert!(popover.set_hovered_option(Some(1), 2));
+        assert_eq!(popover.hovered_option(), Some(1));
+        assert!(popover.set_hovered_option(Some(3), 2));
+        assert_eq!(popover.hovered_option(), None);
+        popover.close();
+        assert_eq!(popover.hovered_option(), None);
     }
 }

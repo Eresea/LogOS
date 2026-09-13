@@ -3,6 +3,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod avatar;
 mod component;
 mod component_tree;
 mod components;
@@ -14,13 +15,14 @@ mod runtime;
 mod select;
 mod template;
 
+pub use avatar::{MAX_UI_AVATAR_TEXT_BYTES, UiAvatarContent, UiAvatarImage, UiAvatarText};
 pub use component::{
     MAX_UI_COMPONENT_MEMBERS, UiComponent, UiComponentContract, UiComponentInput,
     UiComponentMethod, UiComponentOutput, UiEventDisposition, UiValueType,
 };
 pub use component_tree::{
     MAX_UI_BINDING_VALUES, MAX_UI_COMPONENTS, UiBindingStoreError, UiBindingValue,
-    UiBindingValueStore, UiComponentEvent, UiComponentTree, UiComponentTreeError,
+    UiBindingValueStore, UiComponentEvent, UiComponentTree, UiComponentTreeError, UiRouteMount,
 };
 pub use components::{
     UI_KEY_BACKSPACE, UI_KEY_DOWN, UI_KEY_ENTER, UI_KEY_LEFT, UI_KEY_RIGHT, UI_KEY_UP, UiButton,

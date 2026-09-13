@@ -267,7 +267,11 @@ pub fn login_page_text(
                 append_text(output, &mut length, node.text.as_bytes());
                 append_text(output, &mut length, b"]");
             }
-            UiNodeKind::Root | UiNodeKind::Panel | UiNodeKind::Form => {}
+            UiNodeKind::Root
+            | UiNodeKind::Panel
+            | UiNodeKind::Form
+            | UiNodeKind::Avatar
+            | UiNodeKind::RouteFrame => {}
         }
     }
     length
@@ -334,7 +338,11 @@ impl LoginLayout {
         for index in 0..build.document.node_count() {
             let node = build.document.node(index)?;
             let (bounds, target) = match node.kind {
-                UiNodeKind::Root | UiNodeKind::Panel | UiNodeKind::Form => (panel, None),
+                UiNodeKind::Root
+                | UiNodeKind::Panel
+                | UiNodeKind::Form
+                | UiNodeKind::Avatar
+                | UiNodeKind::RouteFrame => (panel, None),
                 UiNodeKind::Label | UiNodeKind::TextInput | UiNodeKind::Button => {
                     let parent_index = usize::from(node.parent);
                     let parent = build.document.node(parent_index)?;
@@ -527,7 +535,11 @@ pub fn login_page_node_text(
             b"confirmPassword" => b"confirm password",
             key => key,
         },
-        UiNodeKind::Root | UiNodeKind::Panel | UiNodeKind::Form => &[],
+        UiNodeKind::Root
+        | UiNodeKind::Panel
+        | UiNodeKind::Form
+        | UiNodeKind::Avatar
+        | UiNodeKind::RouteFrame => &[],
     };
     let mut length = 0;
     append_text(output, &mut length, text);

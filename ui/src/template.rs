@@ -537,6 +537,10 @@ impl UiDocument {
         self.count
     }
 
+    pub fn event_hook_count(&self) -> usize {
+        (0..self.count).filter(|index| self.nodes[*index].event.is_present()).count()
+    }
+
     pub fn node(&self, index: usize) -> Option<&UiNodeTemplate> {
         (index < self.count).then(|| &self.nodes[index])
     }

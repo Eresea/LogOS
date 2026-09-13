@@ -128,6 +128,7 @@ fn write_icon<W: fmt::Write>(output: &mut W, icon: logos_ui::UiIcon) -> Result<(
     let name = match icon {
         logos_ui::UiIcon::None => "None",
         logos_ui::UiIcon::Settings => "Settings",
+        logos_ui::UiIcon::LogosMark => "LogosMark",
     };
     write!(output, "logos_ui::UiIcon::{name}").map_err(|_| UiCodegenError::Output)
 }
@@ -324,6 +325,8 @@ fn write_node_kind<W: fmt::Write>(output: &mut W, kind: UiNodeKind) -> Result<()
         UiNodeKind::Button => "Button",
         UiNodeKind::TextInput => "TextInput",
         UiNodeKind::Form => "Form",
+        UiNodeKind::Avatar => "Avatar",
+        UiNodeKind::RouteFrame => "RouteFrame",
     };
     write!(output, "logos_ui::UiNodeKind::{name}").map_err(|_| UiCodegenError::Output)
 }
