@@ -201,7 +201,9 @@ fn draw_home(
     let panel = blueprint.push_child(logos_ui::UiNodeKind::Panel, root, 2).ok();
     let Some(panel) = panel else { return };
     let title = blueprint.push_child(logos_ui::UiNodeKind::Label, panel, 3).ok();
-    let input = blueprint.push_child(logos_ui::UiNodeKind::TextInput, panel, 4).ok();
+    // ponytail: the display retains 15 nodes per surface; a query label keeps the shell scene
+    // within that bound. Atrium still owns query editing and launcher focus.
+    let input = blueprint.push_child(logos_ui::UiNodeKind::Label, panel, 4).ok();
     let Some(title) = title else { return };
     let Some(input) = input else { return };
     let mut buttons = [0u16; 4];
@@ -270,10 +272,10 @@ fn draw_home(
     let query = atrium.launcher_query();
     let query_is_empty = query.as_bytes().is_empty();
     let Some(input_handle) = tree.tree().handle_at(usize::from(input)).ok() else { return };
-    let _ = tree.set_value(input_handle, if query_is_empty { placeholder_text } else { query });
-    if atrium.command_menu_open() {
-        let _ = tree.focus(input_handle);
-    }
+    let _ = tree.set_text(input_handle, if query_is_empty { placeholder_text } else { query });
+    let mut input_styles = logos_ui::UiStyleList::EMPTY;
+    let _ = input_styles.push(logos_ui::UiStyle::TextMuted);
+    let _ = tree.set_styles(input_handle, input_styles);
     let labels = logos_atrium::COMMAND_MENU_LABELS;
     for (index, button) in buttons.into_iter().enumerate() {
         let visible = menu_visible && index < atrium.launcher_result_count();
