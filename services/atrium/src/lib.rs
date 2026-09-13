@@ -98,25 +98,56 @@ pub const COMMAND_MENU_ITEM_WIDTH: u32 = 512;
 pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 64;
 pub const COMMAND_MENU_ITEM_GAP: i32 = 12;
 pub const SIDEBAR_BOUNDS: GuiRect = GuiRect::new(0, 0, SHELL_RAIL_WIDTH, 800);
-pub const SIDEBAR_SETTINGS_BOUNDS: GuiRect = GuiRect::new(10, 720, 40, 48);
-pub const SIDEBAR_MENU_ANCHOR_BOUNDS: GuiRect = GuiRect::new(10, 720, 220, 48);
+pub const SIDEBAR_ACCOUNT_BOUNDS: GuiRect = GuiRect::new(10, 12, 40, 40);
+pub const SIDEBAR_SETTINGS_BOUNDS: GuiRect = GuiRect::new(10, 748, 40, 40);
+pub const SIDEBAR_ACCOUNT_MENU_ANCHOR_BOUNDS: GuiRect = GuiRect::new(10, 12, 220, 40);
+pub const SIDEBAR_MENU_ANCHOR_BOUNDS: GuiRect = GuiRect::new(10, 748, 220, 40);
 pub const SIDEBAR_MENU_OPTION_HEIGHT: u32 = 40;
 pub const SIDEBAR_MENU_MAX_HEIGHT: u32 = 120;
+pub const SIDEBAR_ACCOUNT_MENU_LABELS: [&[u8]; 1] = [b"Disconnect"];
 pub const SIDEBAR_MENU_LABELS: [&[u8]; 3] = [b"Shutdown", b"Restart", b"Settings"];
 pub const SETTINGS_SELECT_BOUNDS: GuiRect = GuiRect::new(280, 180, 360, 48);
 pub const SETTINGS_SELECT_OPTION_HEIGHT: u32 = 48;
 pub const SETTINGS_SELECT_MAX_HEIGHT: u32 = 192;
+pub const SETTINGS_SEARCH_BOUNDS: GuiRect = GuiRect::new(32, 112, 196, 44);
+pub const SETTINGS_CARD_BOUNDS: GuiRect = GuiRect::new(32, 168, 196, 88);
+pub const SETTINGS_CARD_GAP: i32 = 12;
+pub const SETTINGS_BACK_BOUNDS: GuiRect = GuiRect::new(280, 76, 160, 56);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsPage {
     Overview,
     Keyboard,
+    Mouse,
+}
+
+pub const SETTINGS_CARD_PAGES: [SettingsPage; 2] = [SettingsPage::Keyboard, SettingsPage::Mouse];
+pub const SETTINGS_CARD_LABELS: [&[u8]; 2] = [b"Keyboard", b"Mouse"];
+pub const SETTINGS_CARD_DESCRIPTIONS: [&[u8]; 2] = [b"Keyboard layout", b"Pointer behavior"];
+
+pub const fn settings_card_bounds(index: usize) -> GuiRect {
+    GuiRect::new(
+        SETTINGS_CARD_BOUNDS.x,
+        SETTINGS_CARD_BOUNDS.y.saturating_add(
+            (SETTINGS_CARD_BOUNDS.height as i32 + SETTINGS_CARD_GAP) * index as i32,
+        ),
+        SETTINGS_CARD_BOUNDS.width,
+        SETTINGS_CARD_BOUNDS.height,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyboardLayout {
     Azerty,
     Qwerty,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseAcceleration {
+    Off,
+    Low,
+    Medium,
+    High,
 }
 
 pub const fn surface_close_bounds(surface: GuiRect) -> GuiRect {
@@ -275,8 +306,15 @@ pub struct Atrium {
     home_surface: SurfaceHandle,
     lock_surface: SurfaceHandle,
     settings_page: SettingsPage,
+    settings_search: logos_ui::UiInput,
+    settings_search_active: bool,
+    settings_card_hover: u8,
     keyboard_layout: KeyboardLayout,
     keyboard_select: logos_ui::UiSelect,
+    mouse_acceleration: MouseAcceleration,
+    mouse_select: logos_ui::UiSelect,
+    sidebar_hover: u8,
+    account_menu: logos_ui::UiPopover,
     settings_menu: logos_ui::UiPopover,
 }
 
@@ -300,8 +338,15 @@ impl Atrium {
             home_surface: SurfaceHandle::EMPTY,
             lock_surface: SurfaceHandle::EMPTY,
             settings_page: SettingsPage::Overview,
+            settings_search: logos_ui::UiInput::new(),
+            settings_search_active: false,
+            settings_card_hover: 0,
             keyboard_layout: KeyboardLayout::Azerty,
             keyboard_select: logos_ui::UiSelect::with_selection(2, Some(0)),
+            mouse_acceleration: MouseAcceleration::Medium,
+            mouse_select: logos_ui::UiSelect::with_selection(4, Some(2)),
+            sidebar_hover: 0,
+            account_menu: logos_ui::UiPopover::new(),
             settings_menu: logos_ui::UiPopover::new(),
         }
     }
@@ -339,6 +384,7 @@ impl Atrium {
     }
 
     pub fn open_command_menu(&mut self) {
+        self.account_menu.close();
         self.settings_menu.close();
         if !self.command_menu_open {
             self.command_menu.clear_query();
@@ -387,8 +433,96 @@ impl Atrium {
         self.settings_page
     }
 
+    pub fn settings_search_query(&self) -> logos_ui::UiText {
+        self.settings_search.value()
+    }
+
+    pub const fn settings_search_active(&self) -> bool {
+        self.settings_search_active
+    }
+
+    pub const fn settings_card_hover(&self) -> u8 {
+        self.settings_card_hover
+    }
+
+    pub fn settings_card_visible(&self, page: SettingsPage) -> bool {
+        let Some(index) = SETTINGS_CARD_PAGES.iter().position(|candidate| *candidate == page)
+        else {
+            return false;
+        };
+        query_matches(SETTINGS_CARD_LABELS[index], self.settings_search.value().as_bytes())
+    }
+
     pub const fn keyboard_layout(&self) -> KeyboardLayout {
         self.keyboard_layout
+    }
+
+    pub const fn mouse_acceleration(&self) -> MouseAcceleration {
+        self.mouse_acceleration
+    }
+
+    pub const fn input_settings(&self) -> logos_abi::InputSettings {
+        let keyboard_layout = match self.keyboard_layout {
+            KeyboardLayout::Azerty => logos_abi::InputSettings::KEYBOARD_AZERTY,
+            KeyboardLayout::Qwerty => logos_abi::InputSettings::KEYBOARD_QWERTY,
+        };
+        let mouse_acceleration = match self.mouse_acceleration {
+            MouseAcceleration::Off => logos_abi::InputSettings::MOUSE_ACCELERATION_OFF,
+            MouseAcceleration::Low => logos_abi::InputSettings::MOUSE_ACCELERATION_LOW,
+            MouseAcceleration::Medium => logos_abi::InputSettings::MOUSE_ACCELERATION_MEDIUM,
+            MouseAcceleration::High => logos_abi::InputSettings::MOUSE_ACCELERATION_HIGH,
+        };
+        logos_abi::InputSettings::new(keyboard_layout, mouse_acceleration)
+    }
+
+    fn settings_search_event(&mut self, event: logos_ui::UiInputEvent) -> bool {
+        let mut output = logos_ui::UiOutput::new();
+        logos_ui::UiComponent::handle_event(&mut self.settings_search, event, &mut output).is_ok()
+            && output.pop().is_some()
+    }
+
+    fn settings_card_page_at(&self, x: i32, y: i32) -> Option<SettingsPage> {
+        let mut visible_index = 0;
+        for page in SETTINGS_CARD_PAGES {
+            if !self.settings_card_visible(page) {
+                continue;
+            }
+            if settings_card_bounds(visible_index).contains(x, y) {
+                return Some(page);
+            }
+            visible_index += 1;
+        }
+        None
+    }
+
+    fn settings_search_input(&mut self, input: &InputMessage) -> bool {
+        if !self.settings_search_active {
+            return false;
+        }
+        if let Some(text) = input.text_bytes() {
+            let mut changed = false;
+            for scalar in text.iter().copied() {
+                changed |= self.settings_search_event(logos_ui::UiInputEvent::TextInput {
+                    scalar: u32::from(scalar),
+                });
+            }
+            return changed;
+        }
+        if input.kind != MessageKind::Key || input.state != KeyState::Pressed {
+            return false;
+        }
+        let code = KeyCode::from_raw(input.code);
+        if code == KeyCode::BACKSPACE {
+            return self.settings_search_event(logos_ui::UiInputEvent::KeyDown {
+                code: logos_ui::UI_KEY_BACKSPACE,
+                modifiers: 0,
+            });
+        }
+        if code == KeyCode::ESCAPE {
+            self.settings_search_active = false;
+            return true;
+        }
+        false
     }
 
     pub const fn keyboard_select_open(&self) -> bool {
@@ -399,8 +533,55 @@ impl Atrium {
         self.keyboard_select.is_hovered()
     }
 
+    pub const fn keyboard_select_hovered_option(&self) -> Option<u8> {
+        self.keyboard_select.hovered_option()
+    }
+
+    pub const fn mouse_select_open(&self) -> bool {
+        self.mouse_select.is_open()
+    }
+
+    pub const fn mouse_select_hovered(&self) -> bool {
+        self.mouse_select.is_hovered()
+    }
+
+    pub const fn mouse_select_hovered_option(&self) -> Option<u8> {
+        self.mouse_select.hovered_option()
+    }
+
     pub const fn settings_menu_open(&self) -> bool {
         self.settings_menu.is_open()
+    }
+
+    pub const fn account_menu_open(&self) -> bool {
+        self.account_menu.is_open()
+    }
+
+    pub const fn settings_menu_hovered_option(&self) -> Option<u8> {
+        self.settings_menu.hovered_option()
+    }
+
+    pub const fn account_menu_hovered_option(&self) -> Option<u8> {
+        self.account_menu.hovered_option()
+    }
+
+    pub const fn sidebar_hover(&self) -> u8 {
+        self.sidebar_hover
+    }
+
+    pub fn account_menu_popover(&self, viewport: GuiRect) -> logos_ui::UiPopoverLayout {
+        self.account_menu.layout(
+            logos_ui::UiRect::new(
+                SIDEBAR_ACCOUNT_MENU_ANCHOR_BOUNDS.x,
+                SIDEBAR_ACCOUNT_MENU_ANCHOR_BOUNDS.y,
+                SIDEBAR_ACCOUNT_MENU_ANCHOR_BOUNDS.width,
+                SIDEBAR_ACCOUNT_MENU_ANCHOR_BOUNDS.height,
+            ),
+            logos_ui::UiRect::new(viewport.x, viewport.y, viewport.width, viewport.height),
+            SIDEBAR_ACCOUNT_MENU_LABELS.len() as u8,
+            SIDEBAR_MENU_OPTION_HEIGHT,
+            SIDEBAR_MENU_MAX_HEIGHT,
+        )
     }
 
     pub fn settings_menu_popover(&self, viewport: GuiRect) -> logos_ui::UiPopoverLayout {
@@ -423,9 +604,43 @@ impl Atrium {
         let x = i32::from(pointer.x);
         let y = i32::from(pointer.y);
         if pointer.state == PointerState::Move {
+            self.sidebar_hover = if SIDEBAR_ACCOUNT_BOUNDS.contains(x, y) {
+                1
+            } else if SIDEBAR_SETTINGS_BOUNDS.contains(x, y) {
+                2
+            } else {
+                0
+            };
+            if self.account_menu_open() {
+                let layout = self.account_menu_popover(FULLSCREEN_SURFACE_BOUNDS);
+                self.account_menu.set_hovered_option(
+                    layout.option_at(x, y),
+                    SIDEBAR_ACCOUNT_MENU_LABELS.len() as u8,
+                );
+            } else if self.settings_menu_open() {
+                let layout = self.settings_menu_popover(FULLSCREEN_SURFACE_BOUNDS);
+                self.settings_menu
+                    .set_hovered_option(layout.option_at(x, y), SIDEBAR_MENU_LABELS.len() as u8);
+            }
             return None;
         }
         if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
+            return None;
+        }
+        self.sidebar_hover = if SIDEBAR_ACCOUNT_BOUNDS.contains(x, y) {
+            1
+        } else if SIDEBAR_SETTINGS_BOUNDS.contains(x, y) {
+            2
+        } else {
+            0
+        };
+        if self.account_menu_open() {
+            let layout = self.account_menu_popover(FULLSCREEN_SURFACE_BOUNDS);
+            if let Some(index) = layout.option_at(x, y) {
+                self.account_menu.close();
+                return (index == 0).then_some(AtriumAction::Logout);
+            }
+            self.account_menu.close();
             return None;
         }
         if self.settings_menu_open() {
@@ -442,7 +657,11 @@ impl Atrium {
             self.settings_menu.close();
             return None;
         }
-        if SIDEBAR_SETTINGS_BOUNDS.contains(x, y) {
+        if SIDEBAR_ACCOUNT_BOUNDS.contains(x, y) {
+            self.settings_menu.close();
+            self.account_menu.open();
+        } else if SIDEBAR_SETTINGS_BOUNDS.contains(x, y) {
+            self.account_menu.close();
             self.settings_menu.open();
         }
         None
@@ -450,6 +669,20 @@ impl Atrium {
 
     pub fn keyboard_select_popover(&self, viewport: GuiRect) -> logos_ui::UiPopoverLayout {
         self.keyboard_select.popover_layout(
+            logos_ui::UiRect::new(
+                SETTINGS_SELECT_BOUNDS.x,
+                SETTINGS_SELECT_BOUNDS.y,
+                SETTINGS_SELECT_BOUNDS.width,
+                SETTINGS_SELECT_BOUNDS.height,
+            ),
+            logos_ui::UiRect::new(viewport.x, viewport.y, viewport.width, viewport.height),
+            SETTINGS_SELECT_OPTION_HEIGHT,
+            SETTINGS_SELECT_MAX_HEIGHT,
+        )
+    }
+
+    pub fn mouse_select_popover(&self, viewport: GuiRect) -> logos_ui::UiPopoverLayout {
+        self.mouse_select.popover_layout(
             logos_ui::UiRect::new(
                 SETTINGS_SELECT_BOUNDS.x,
                 SETTINGS_SELECT_BOUNDS.y,
@@ -470,24 +703,74 @@ impl Atrium {
         SIDEBAR_SETTINGS_BOUNDS.contains(x, y)
     }
 
+    pub const fn sidebar_account_contains(x: i32, y: i32) -> bool {
+        SIDEBAR_ACCOUNT_BOUNDS.contains(x, y)
+    }
+
     pub fn settings_input(&mut self, input: &InputMessage) -> bool {
+        if self.settings_search_input(input) {
+            return true;
+        }
         let Some(pointer) = input.pointer_event() else { return false };
         let x = i32::from(pointer.x);
         let y = i32::from(pointer.y);
-        if self.settings_page == SettingsPage::Keyboard && pointer.state == PointerState::Move {
-            return self.keyboard_select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y));
+        if pointer.state == PointerState::Move {
+            let hover = self
+                .settings_card_page_at(x, y)
+                .map_or(0, |page| if page == SettingsPage::Keyboard { 1 } else { 2 });
+            let card_changed = self.settings_card_hover != hover;
+            self.settings_card_hover = hover;
+            return match self.settings_page {
+                SettingsPage::Overview => card_changed,
+                SettingsPage::Keyboard => {
+                    if self.keyboard_select_open() {
+                        let layout = self.keyboard_select_popover(FULLSCREEN_SURFACE_BOUNDS);
+                        card_changed
+                            || self.keyboard_select.set_option_hovered(layout.option_at(x, y))
+                    } else {
+                        card_changed
+                            || self
+                                .keyboard_select
+                                .set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
+                    }
+                }
+                SettingsPage::Mouse => {
+                    if self.mouse_select_open() {
+                        let layout = self.mouse_select_popover(FULLSCREEN_SURFACE_BOUNDS);
+                        card_changed || self.mouse_select.set_option_hovered(layout.option_at(x, y))
+                    } else {
+                        card_changed
+                            || self.mouse_select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
+                    }
+                }
+            };
         }
         if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
             return false;
         }
+        if SETTINGS_SEARCH_BOUNDS.contains(x, y) {
+            self.settings_search_active = true;
+            let _ = self.settings_search_event(logos_ui::UiInputEvent::Focus);
+            return true;
+        }
+        if let Some(page) = self.settings_card_page_at(x, y) {
+            self.settings_page = page;
+            self.settings_search_active = false;
+            self.settings_card_hover = if page == SettingsPage::Keyboard { 1 } else { 2 };
+            self.keyboard_select.close();
+            self.mouse_select.close();
+            return true;
+        }
         match self.settings_page {
-            SettingsPage::Overview if (20..=260).contains(&x) && (76..=132).contains(&y) => {
-                self.settings_page = SettingsPage::Keyboard;
-                true
-            }
-            SettingsPage::Keyboard if (20..=140).contains(&x) && (44..=84).contains(&y) => {
+            SettingsPage::Overview => false,
+            SettingsPage::Keyboard if SETTINGS_BACK_BOUNDS.contains(x, y) => {
                 self.settings_page = SettingsPage::Overview;
                 self.keyboard_select.close();
+                true
+            }
+            SettingsPage::Mouse if SETTINGS_BACK_BOUNDS.contains(x, y) => {
+                self.settings_page = SettingsPage::Overview;
+                self.mouse_select.close();
                 true
             }
             SettingsPage::Keyboard => {
@@ -514,7 +797,31 @@ impl Atrium {
                 }
                 false
             }
-            _ => false,
+            SettingsPage::Mouse => {
+                if self.mouse_select.is_open() {
+                    let layout = self.mouse_select_popover(FULLSCREEN_SURFACE_BOUNDS);
+                    if let Some(index) = layout.option_at(x, y) {
+                        if self.mouse_select.select(index) {
+                            self.mouse_acceleration = match index {
+                                0 => MouseAcceleration::Off,
+                                1 => MouseAcceleration::Low,
+                                2 => MouseAcceleration::Medium,
+                                _ => MouseAcceleration::High,
+                            };
+                        }
+                        return true;
+                    }
+                    if SETTINGS_SELECT_BOUNDS.contains(x, y) {
+                        self.mouse_select.close();
+                        return true;
+                    }
+                    return self.mouse_select.close();
+                }
+                if SETTINGS_SELECT_BOUNDS.contains(x, y) {
+                    return self.mouse_select.open();
+                }
+                false
+            }
         }
     }
 
@@ -864,7 +1171,7 @@ impl Atrium {
                 AtriumAction::OpenCommandMenu
             };
         }
-        if self.settings_menu_open() && code == KeyCode::ESCAPE {
+        if (self.settings_menu_open() || self.account_menu_open()) && code == KeyCode::ESCAPE {
             return AtriumAction::CloseSettingsMenu;
         }
         if self.command_menu_open && code == KeyCode::ESCAPE {
@@ -989,6 +1296,7 @@ impl Atrium {
                 Ok(())
             }
             AtriumAction::CloseSettingsMenu => {
+                self.account_menu.close();
                 self.settings_menu.close();
                 Ok(())
             }
@@ -1017,7 +1325,10 @@ impl Atrium {
         self.command_menu_matches = [0, 1, 2, 3];
         self.command_menu.set_selected(0);
         self.keyboard_select.close();
+        self.mouse_select.close();
+        self.account_menu.close();
         self.settings_menu.close();
+        self.sidebar_hover = 0;
         self.next_focus_order = 1;
     }
 
@@ -2186,10 +2497,24 @@ mod tests {
         let mut atrium = Atrium::new();
         atrium.authenticate();
         atrium.close_command_menu();
-        let open = InputMessage::pointer(20, 740, 1, PointerState::Down).unwrap();
+        let open = InputMessage::pointer(20, 760, 1, PointerState::Down).unwrap();
         assert_eq!(atrium.settings_menu_input(&open), None);
         assert!(atrium.settings_menu_open());
         let layout = atrium.settings_menu_popover(FULLSCREEN_SURFACE_BOUNDS);
+        let option = layout.option_bounds(0);
+        atrium.settings_menu_input(
+            &InputMessage::pointer(
+                (option.x + 1) as i16,
+                (option.y + 1) as i16,
+                0,
+                PointerState::Move,
+            )
+            .unwrap(),
+        );
+        assert_eq!(atrium.settings_menu_hovered_option(), Some(0));
+        atrium
+            .settings_menu_input(&InputMessage::pointer(300, 300, 0, PointerState::Move).unwrap());
+        assert_eq!(atrium.settings_menu_hovered_option(), None);
         for (index, expected) in
             [AtriumAction::Shutdown, AtriumAction::Restart, AtriumAction::Launch(AppId::Settings)]
                 .into_iter()
@@ -2216,10 +2541,17 @@ mod tests {
         let mut atrium = Atrium::new();
         atrium.authenticate();
         assert!(Atrium::sidebar_contains(40, 40));
-        assert!(Atrium::sidebar_settings_contains(40, 740));
+        assert!(Atrium::sidebar_settings_contains(40, 760));
         assert_eq!(atrium.settings_page(), SettingsPage::Overview);
 
-        let open_keyboard = InputMessage::pointer(40, 100, 1, PointerState::Down).unwrap();
+        let keyboard_card = settings_card_bounds(0);
+        let open_keyboard = InputMessage::pointer(
+            (keyboard_card.x + 10) as i16,
+            (keyboard_card.y + 10) as i16,
+            1,
+            PointerState::Down,
+        )
+        .unwrap();
         assert!(atrium.settings_input(&open_keyboard));
         assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
 
@@ -2231,6 +2563,153 @@ mod tests {
         assert!(atrium.settings_input(&select_qwerty));
         assert_eq!(atrium.keyboard_layout(), KeyboardLayout::Qwerty);
         assert!(!atrium.keyboard_select_open());
+    }
+
+    #[test]
+    fn settings_page_selects_mouse_acceleration() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        assert_eq!(atrium.mouse_acceleration(), MouseAcceleration::Medium);
+
+        let mouse_card = settings_card_bounds(1);
+        assert!(
+            atrium.settings_input(
+                &InputMessage::pointer(
+                    (mouse_card.x + 10) as i16,
+                    (mouse_card.y + 10) as i16,
+                    1,
+                    PointerState::Down,
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+        assert!(
+            atrium.settings_input(&InputMessage::pointer(300, 200, 1, PointerState::Down).unwrap())
+        );
+        assert!(atrium.mouse_select_open());
+        assert!(
+            atrium.settings_input(&InputMessage::pointer(300, 400, 1, PointerState::Down).unwrap())
+        );
+        assert_eq!(atrium.mouse_acceleration(), MouseAcceleration::High);
+        assert_eq!(
+            atrium.input_settings().mouse_acceleration,
+            logos_abi::InputSettings::MOUSE_ACCELERATION_HIGH
+        );
+        assert!(!atrium.mouse_select_open());
+    }
+
+    #[test]
+    fn settings_tabs_remain_available_on_child_pages() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let keyboard = settings_card_bounds(0);
+        let mouse = settings_card_bounds(1);
+        assert!(
+            atrium.settings_input(
+                &InputMessage::pointer(
+                    (keyboard.x + 10) as i16,
+                    (keyboard.y + 10) as i16,
+                    1,
+                    PointerState::Down,
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
+        assert!(
+            atrium.settings_input(
+                &InputMessage::pointer(
+                    (mouse.x + 10) as i16,
+                    (mouse.y + 10) as i16,
+                    1,
+                    PointerState::Down,
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+    }
+
+    #[test]
+    fn settings_search_filters_selectable_cards() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let search = SETTINGS_SEARCH_BOUNDS;
+        assert!(
+            atrium.settings_input(
+                &InputMessage::pointer(
+                    (search.x + 10) as i16,
+                    (search.y + 10) as i16,
+                    1,
+                    PointerState::Down,
+                )
+                .unwrap()
+            )
+        );
+        assert!(atrium.settings_input(&InputMessage::text(b"mouse").unwrap()));
+        assert!(!atrium.settings_card_visible(SettingsPage::Keyboard));
+        assert!(atrium.settings_card_visible(SettingsPage::Mouse));
+        let filtered_mouse_card = settings_card_bounds(0);
+        assert!(
+            atrium.settings_input(
+                &InputMessage::pointer(
+                    (filtered_mouse_card.x + 10) as i16,
+                    (filtered_mouse_card.y + 10) as i16,
+                    1,
+                    PointerState::Down,
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+    }
+
+    #[test]
+    fn avatar_menu_disconnects_and_rail_controls_track_hover() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        atrium.close_command_menu();
+
+        assert_eq!(
+            atrium.settings_menu_input(
+                &InputMessage::pointer(20, 20, 0, PointerState::Move).unwrap()
+            ),
+            None
+        );
+        assert_eq!(atrium.sidebar_hover(), 1);
+        assert_eq!(
+            atrium.settings_menu_input(
+                &InputMessage::pointer(20, 20, 1, PointerState::Down).unwrap()
+            ),
+            None
+        );
+        assert!(atrium.account_menu_open());
+        let option = atrium.account_menu_popover(FULLSCREEN_SURFACE_BOUNDS).option_bounds(0);
+        let click = InputMessage::pointer(
+            (option.x + 1) as i16,
+            (option.y + 1) as i16,
+            1,
+            PointerState::Down,
+        )
+        .unwrap();
+        assert_eq!(atrium.settings_menu_input(&click), Some(AtriumAction::Logout));
+        assert!(!atrium.account_menu_open());
+
+        assert_eq!(
+            atrium.settings_menu_input(
+                &InputMessage::pointer(20, 760, 0, PointerState::Move).unwrap()
+            ),
+            None
+        );
+        assert_eq!(atrium.sidebar_hover(), 2);
+        assert_eq!(
+            atrium.settings_menu_input(
+                &InputMessage::pointer(300, 300, 0, PointerState::Move).unwrap()
+            ),
+            None
+        );
+        assert_eq!(atrium.sidebar_hover(), 0);
     }
 
     #[test]

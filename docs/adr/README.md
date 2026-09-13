@@ -85,3 +85,4 @@
 | [0082](0082-bounded-ui-motion.md) | Accepted | Fixed-point CSS-like transitions and bounded keyframe animation owned by UI hosts, with transform-aware Display ABI rasterization |
 | [0083](0083-bounded-dynamic-tiling-workspace.md) | Accepted | Atrium-owned fixed-capacity binary split tree for dynamic vertical and horizontal tiled workspace layout |
 | [0084](0084-bounded-material-symbols.md) | Accepted | Bounded native Material Symbols through one retained UI button paint fragment |
+| [0085](0085-live-input-settings.md) | Accepted | Fixed live Atrium→Input keyboard-layout and mouse-acceleration settings control |
