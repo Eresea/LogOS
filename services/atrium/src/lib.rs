@@ -18,6 +18,7 @@ const MIN_PANE_HEIGHT: u32 = 96;
 const SPLITTER_HIT_RADIUS: i32 = 6;
 pub const MAX_CALCULATOR_TEXT: usize = 32;
 pub const SURFACE_MOVE_STEP: i32 = 32;
+pub const SHELL_RAIL_WIDTH: u32 = 60;
 pub const FULLSCREEN_SURFACE_BOUNDS: GuiRect = GuiRect::new(
     0,
     0,
@@ -26,9 +27,9 @@ pub const FULLSCREEN_SURFACE_BOUNDS: GuiRect = GuiRect::new(
 );
 /// The tiled desktop excludes the shell rail on the left.
 pub const DESKTOP_SURFACE_BOUNDS: GuiRect = GuiRect::new(
-    112,
+    SHELL_RAIL_WIDTH as i32,
     0,
-    logos_abi::DEFAULT_SCREEN_WIDTH as u32 - 112,
+    logos_abi::DEFAULT_SCREEN_WIDTH as u32 - SHELL_RAIL_WIDTH,
     logos_abi::DEFAULT_SCREEN_HEIGHT as u32,
 );
 pub const TERMINAL_SURFACE_BOUNDS: GuiRect = DESKTOP_SURFACE_BOUNDS;
@@ -96,8 +97,15 @@ pub const COMMAND_MENU_ITEM_TOP: i32 = 304;
 pub const COMMAND_MENU_ITEM_WIDTH: u32 = 512;
 pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 64;
 pub const COMMAND_MENU_ITEM_GAP: i32 = 12;
-pub const SIDEBAR_BOUNDS: GuiRect = GuiRect::new(0, 0, 112, 800);
-pub const SIDEBAR_SETTINGS_BOUNDS: GuiRect = GuiRect::new(16, 720, 80, 48);
+pub const SIDEBAR_BOUNDS: GuiRect = GuiRect::new(0, 0, SHELL_RAIL_WIDTH, 800);
+pub const SIDEBAR_SETTINGS_BOUNDS: GuiRect = GuiRect::new(10, 720, 40, 48);
+pub const SIDEBAR_MENU_ANCHOR_BOUNDS: GuiRect = GuiRect::new(10, 720, 220, 48);
+pub const SIDEBAR_MENU_OPTION_HEIGHT: u32 = 40;
+pub const SIDEBAR_MENU_MAX_HEIGHT: u32 = 120;
+pub const SIDEBAR_MENU_LABELS: [&[u8]; 3] = [b"Shutdown", b"Restart", b"Settings"];
+pub const SETTINGS_SELECT_BOUNDS: GuiRect = GuiRect::new(280, 180, 360, 48);
+pub const SETTINGS_SELECT_OPTION_HEIGHT: u32 = 48;
+pub const SETTINGS_SELECT_MAX_HEIGHT: u32 = 192;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsPage {
@@ -237,6 +245,9 @@ pub enum AtriumAction {
     CloseFocused,
     OpenCommandMenu,
     CloseCommandMenu,
+    CloseSettingsMenu,
+    Shutdown,
+    Restart,
     Logout,
 }
 
@@ -265,6 +276,8 @@ pub struct Atrium {
     lock_surface: SurfaceHandle,
     settings_page: SettingsPage,
     keyboard_layout: KeyboardLayout,
+    keyboard_select: logos_ui::UiSelect,
+    settings_menu: logos_ui::UiPopover,
 }
 
 impl Atrium {
@@ -288,6 +301,8 @@ impl Atrium {
             lock_surface: SurfaceHandle::EMPTY,
             settings_page: SettingsPage::Overview,
             keyboard_layout: KeyboardLayout::Azerty,
+            keyboard_select: logos_ui::UiSelect::with_selection(2, Some(0)),
+            settings_menu: logos_ui::UiPopover::new(),
         }
     }
 
@@ -324,6 +339,7 @@ impl Atrium {
     }
 
     pub fn open_command_menu(&mut self) {
+        self.settings_menu.close();
         if !self.command_menu_open {
             self.command_menu.clear_query();
             self.command_menu_matches = [0, 1, 2, 3];
@@ -375,6 +391,77 @@ impl Atrium {
         self.keyboard_layout
     }
 
+    pub const fn keyboard_select_open(&self) -> bool {
+        self.keyboard_select.is_open()
+    }
+
+    pub const fn keyboard_select_hovered(&self) -> bool {
+        self.keyboard_select.is_hovered()
+    }
+
+    pub const fn settings_menu_open(&self) -> bool {
+        self.settings_menu.is_open()
+    }
+
+    pub fn settings_menu_popover(&self, viewport: GuiRect) -> logos_ui::UiPopoverLayout {
+        self.settings_menu.layout(
+            logos_ui::UiRect::new(
+                SIDEBAR_MENU_ANCHOR_BOUNDS.x,
+                SIDEBAR_MENU_ANCHOR_BOUNDS.y,
+                SIDEBAR_MENU_ANCHOR_BOUNDS.width,
+                SIDEBAR_MENU_ANCHOR_BOUNDS.height,
+            ),
+            logos_ui::UiRect::new(viewport.x, viewport.y, viewport.width, viewport.height),
+            SIDEBAR_MENU_LABELS.len() as u8,
+            SIDEBAR_MENU_OPTION_HEIGHT,
+            SIDEBAR_MENU_MAX_HEIGHT,
+        )
+    }
+
+    pub fn settings_menu_input(&mut self, input: &InputMessage) -> Option<AtriumAction> {
+        let pointer = input.pointer_event()?;
+        let x = i32::from(pointer.x);
+        let y = i32::from(pointer.y);
+        if pointer.state == PointerState::Move {
+            return None;
+        }
+        if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
+            return None;
+        }
+        if self.settings_menu_open() {
+            let layout = self.settings_menu_popover(FULLSCREEN_SURFACE_BOUNDS);
+            if let Some(index) = layout.option_at(x, y) {
+                self.settings_menu.close();
+                return match index {
+                    0 => Some(AtriumAction::Shutdown),
+                    1 => Some(AtriumAction::Restart),
+                    2 => Some(AtriumAction::Launch(AppId::Settings)),
+                    _ => None,
+                };
+            }
+            self.settings_menu.close();
+            return None;
+        }
+        if SIDEBAR_SETTINGS_BOUNDS.contains(x, y) {
+            self.settings_menu.open();
+        }
+        None
+    }
+
+    pub fn keyboard_select_popover(&self, viewport: GuiRect) -> logos_ui::UiPopoverLayout {
+        self.keyboard_select.popover_layout(
+            logos_ui::UiRect::new(
+                SETTINGS_SELECT_BOUNDS.x,
+                SETTINGS_SELECT_BOUNDS.y,
+                SETTINGS_SELECT_BOUNDS.width,
+                SETTINGS_SELECT_BOUNDS.height,
+            ),
+            logos_ui::UiRect::new(viewport.x, viewport.y, viewport.width, viewport.height),
+            SETTINGS_SELECT_OPTION_HEIGHT,
+            SETTINGS_SELECT_MAX_HEIGHT,
+        )
+    }
+
     pub const fn sidebar_contains(x: i32, y: i32) -> bool {
         SIDEBAR_BOUNDS.contains(x, y)
     }
@@ -385,11 +472,14 @@ impl Atrium {
 
     pub fn settings_input(&mut self, input: &InputMessage) -> bool {
         let Some(pointer) = input.pointer_event() else { return false };
+        let x = i32::from(pointer.x);
+        let y = i32::from(pointer.y);
+        if self.settings_page == SettingsPage::Keyboard && pointer.state == PointerState::Move {
+            return self.keyboard_select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y));
+        }
         if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
             return false;
         }
-        let x = i32::from(pointer.x);
-        let y = i32::from(pointer.y);
         match self.settings_page {
             SettingsPage::Overview if (20..=260).contains(&x) && (76..=132).contains(&y) => {
                 self.settings_page = SettingsPage::Keyboard;
@@ -397,15 +487,32 @@ impl Atrium {
             }
             SettingsPage::Keyboard if (20..=140).contains(&x) && (44..=84).contains(&y) => {
                 self.settings_page = SettingsPage::Overview;
+                self.keyboard_select.close();
                 true
             }
-            SettingsPage::Keyboard if (280..=760).contains(&x) && (132..=192).contains(&y) => {
-                self.keyboard_layout = KeyboardLayout::Azerty;
-                true
-            }
-            SettingsPage::Keyboard if (280..=760).contains(&x) && (204..=264).contains(&y) => {
-                self.keyboard_layout = KeyboardLayout::Qwerty;
-                true
+            SettingsPage::Keyboard => {
+                if self.keyboard_select.is_open() {
+                    let layout = self.keyboard_select_popover(FULLSCREEN_SURFACE_BOUNDS);
+                    if let Some(index) = layout.option_at(x, y) {
+                        if self.keyboard_select.select(index) {
+                            self.keyboard_layout = if index == 0 {
+                                KeyboardLayout::Azerty
+                            } else {
+                                KeyboardLayout::Qwerty
+                            };
+                        }
+                        return true;
+                    }
+                    if SETTINGS_SELECT_BOUNDS.contains(x, y) {
+                        self.keyboard_select.close();
+                        return true;
+                    }
+                    return self.keyboard_select.close();
+                }
+                if SETTINGS_SELECT_BOUNDS.contains(x, y) {
+                    return self.keyboard_select.open();
+                }
+                false
             }
             _ => false,
         }
@@ -757,6 +864,9 @@ impl Atrium {
                 AtriumAction::OpenCommandMenu
             };
         }
+        if self.settings_menu_open() && code == KeyCode::ESCAPE {
+            return AtriumAction::CloseSettingsMenu;
+        }
         if self.command_menu_open && code == KeyCode::ESCAPE {
             return AtriumAction::CloseCommandMenu;
         }
@@ -878,11 +988,19 @@ impl Atrium {
                 self.close_command_menu();
                 Ok(())
             }
+            AtriumAction::CloseSettingsMenu => {
+                self.settings_menu.close();
+                Ok(())
+            }
             AtriumAction::Logout => {
                 self.logout();
                 Ok(())
             }
-            AtriumAction::None | AtriumAction::LauncherChanged | AtriumAction::Launch(_) => Ok(()),
+            AtriumAction::None
+            | AtriumAction::LauncherChanged
+            | AtriumAction::Launch(_)
+            | AtriumAction::Shutdown
+            | AtriumAction::Restart => Ok(()),
         }
     }
 
@@ -898,6 +1016,8 @@ impl Atrium {
         self.command_menu.set_item_count(COMMAND_MENU_ITEMS.len() as u8);
         self.command_menu_matches = [0, 1, 2, 3];
         self.command_menu.set_selected(0);
+        self.keyboard_select.close();
+        self.settings_menu.close();
         self.next_focus_order = 1;
     }
 
@@ -2062,6 +2182,36 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_menu_selects_power_and_settings_actions() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        atrium.close_command_menu();
+        let open = InputMessage::pointer(20, 740, 1, PointerState::Down).unwrap();
+        assert_eq!(atrium.settings_menu_input(&open), None);
+        assert!(atrium.settings_menu_open());
+        let layout = atrium.settings_menu_popover(FULLSCREEN_SURFACE_BOUNDS);
+        for (index, expected) in
+            [AtriumAction::Shutdown, AtriumAction::Restart, AtriumAction::Launch(AppId::Settings)]
+                .into_iter()
+                .enumerate()
+        {
+            let option = layout.option_bounds(index as u8);
+            let click = InputMessage::pointer(
+                (option.x + 1) as i16,
+                (option.y + 1) as i16,
+                1,
+                PointerState::Down,
+            )
+            .unwrap();
+            assert_eq!(atrium.settings_menu_input(&click), Some(expected));
+            if index != 2 {
+                assert_eq!(atrium.settings_menu_input(&open), None);
+            }
+        }
+        assert!(!atrium.settings_menu_open());
+    }
+
+    #[test]
     fn settings_page_selects_keyboard_layout() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
@@ -2073,9 +2223,14 @@ mod tests {
         assert!(atrium.settings_input(&open_keyboard));
         assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
 
-        let select_qwerty = InputMessage::pointer(300, 230, 1, PointerState::Down).unwrap();
+        let open_select = InputMessage::pointer(300, 200, 1, PointerState::Down).unwrap();
+        assert!(atrium.settings_input(&open_select));
+        assert!(atrium.keyboard_select_open());
+
+        let select_qwerty = InputMessage::pointer(300, 300, 1, PointerState::Down).unwrap();
         assert!(atrium.settings_input(&select_qwerty));
         assert_eq!(atrium.keyboard_layout(), KeyboardLayout::Qwerty);
+        assert!(!atrium.keyboard_select_open());
     }
 
     #[test]
@@ -2098,6 +2253,11 @@ mod tests {
     fn app_surfaces_use_desktop_composition_and_close_button_is_bounded() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
+        assert_eq!(DESKTOP_SURFACE_BOUNDS.x, SIDEBAR_BOUNDS.width as i32);
+        assert_eq!(
+            DESKTOP_SURFACE_BOUNDS.width + SIDEBAR_BOUNDS.width,
+            logos_abi::DEFAULT_SCREEN_WIDTH as u32
+        );
         for (index, app) in [AppId::Calculator, AppId::Files, AppId::Terminal, AppId::System]
             .into_iter()
             .enumerate()
@@ -2220,25 +2380,25 @@ mod tests {
         let calculator = atrium.spawn_surface(calculator_request, surface(3)).unwrap();
         let files_request = atrium.request_surface(AppId::Files, client(1)).unwrap();
         let files = atrium.spawn_surface(files_request, surface(4)).unwrap();
-        assert_eq!(atrium.surface(calculator.id).unwrap().bounds, GuiRect::new(112, 0, 584, 800));
-        assert_eq!(files.bounds, GuiRect::new(696, 0, 584, 800));
+        assert_eq!(atrium.surface(calculator.id).unwrap().bounds, GuiRect::new(60, 0, 610, 800));
+        assert_eq!(files.bounds, GuiRect::new(670, 0, 610, 800));
         assert_eq!(atrium.surface_at(200, 100).unwrap().id, calculator.id);
         assert_eq!(atrium.surface_at(800, 100).unwrap().id, files.id);
-        assert_eq!(atrium.splitter_at(696, 100), Some(0));
+        assert_eq!(atrium.splitter_at(670, 100), Some(0));
         atrium.focus(calculator.id).unwrap();
         assert_eq!(atrium.surface_at(800, 100).unwrap().id, files.id);
         assert_eq!(atrium.surface_at(200, 0).unwrap().id, calculator.id);
         assert!(atrium.handle_splitter_pointer(
-            &InputMessage::pointer(696, 100, 1, PointerState::Down).unwrap()
+            &InputMessage::pointer(670, 100, 1, PointerState::Down).unwrap()
         ));
         assert!(atrium.handle_splitter_pointer(
-            &InputMessage::pointer(756, 100, 1, PointerState::Move).unwrap()
+            &InputMessage::pointer(730, 100, 1, PointerState::Move).unwrap()
         ));
         assert!(atrium.handle_splitter_pointer(
-            &InputMessage::pointer(756, 100, 0, PointerState::Up).unwrap()
+            &InputMessage::pointer(730, 100, 0, PointerState::Up).unwrap()
         ));
-        assert_eq!(atrium.surface(calculator.id).unwrap().bounds.width, 643);
-        assert_eq!(atrium.surface(files.id).unwrap().bounds.x, 755);
+        assert_eq!(atrium.surface(calculator.id).unwrap().bounds.width, 669);
+        assert_eq!(atrium.surface(files.id).unwrap().bounds.x, 729);
         let stale = SurfaceHandle {
             generation: calculator.reference.generation + 1,
             ..calculator.reference

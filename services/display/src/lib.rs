@@ -1544,6 +1544,17 @@ mod tests {
     }
 
     #[test]
+    fn settings_material_symbol_has_a_gear_and_center_hole() {
+        let command = logos_abi::GuiDrawCommand::material_symbol(
+            logos_abi::GuiRect::new(0, 0, 24, 24),
+            0xffffff,
+            logos_abi::GuiMaterialSymbol::Settings,
+        );
+        assert!(crate::gui::material_symbol_source_coverage(command, 12, 3).is_some());
+        assert!(crate::gui::material_symbol_source_coverage(command, 12, 12).is_none());
+    }
+
+    #[test]
     fn coverage_blends_background_and_foreground() {
         assert_eq!(blend_color(0x102030, 0xe0d0c0, 0), 0x102030);
         assert_eq!(blend_color(0x102030, 0xe0d0c0, 255), 0xe0d0c0);
@@ -2109,6 +2120,74 @@ mod tests {
         }
         let pixel = (63 * 96 + 95) * 4;
         assert_eq!(&framebuffer[pixel..pixel + 4], &[0x40, 0x30, 0x20, 0]);
+    }
+
+    #[test]
+    fn destroying_a_desktop_surface_keeps_the_external_rail_composed() {
+        let mut display = Display::new(1);
+        let mut terminal = RenderMessage::empty(MessageKind::FullRedraw);
+        terminal.columns = 16;
+        terminal.rows = 4;
+        display.apply(1, &terminal).unwrap();
+
+        let screen = GuiRect::new(0, 0, 128, 64);
+        let mut root_request =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root_request.bounds = screen;
+        display.gui_mut().create(11, root_request).unwrap();
+
+        let mut home_request =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        home_request.bounds = screen;
+        home_request.z_order = 3;
+        let home = display.gui_mut().create(13, home_request).unwrap().surface;
+
+        let mut app_request =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 3);
+        app_request.bounds = GuiRect::new(20, 0, 108, 64);
+        app_request.z_order = 2;
+        let app = display.gui_mut().create(11, app_request).unwrap().surface;
+
+        let mut clear = GuiSceneOp::clear(home, 1);
+        clear.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        display.gui_mut().apply_scene_op(13, clear).unwrap();
+        display
+            .gui_mut()
+            .apply_scene_op(
+                13,
+                GuiSceneOp::upsert(
+                    home,
+                    1,
+                    1,
+                    logos_abi::GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 20, 64), 0x203040),
+                ),
+            )
+            .unwrap();
+
+        let mut clear = GuiSceneOp::clear(app, 1);
+        clear.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+        display.gui_mut().apply_scene_op(11, clear).unwrap();
+        display
+            .gui_mut()
+            .apply_scene_op(
+                11,
+                GuiSceneOp::upsert(app, 1, 1, logos_abi::GuiDrawCommand::fill_surface(0x101820)),
+            )
+            .unwrap();
+
+        let mut framebuffer = std::vec![0; 128 * 64 * 4];
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 128, 64, 128 * 4, PixelFormat::Bgr8).unwrap();
+        }
+        let rail_pixel = (4 * 128 + 4) * 4;
+        let rail_color = [0x40, 0x30, 0x20, 0];
+        assert_eq!(&framebuffer[rail_pixel..rail_pixel + 4], &rail_color);
+
+        display.gui_mut().destroy(11, app).unwrap();
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 128, 64, 128 * 4, PixelFormat::Bgr8).unwrap();
+        }
+        assert_eq!(&framebuffer[rail_pixel..rail_pixel + 4], &rail_color);
     }
 
     #[test]

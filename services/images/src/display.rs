@@ -121,19 +121,14 @@ fn gui_status(error: logos_display::GuiRegistryError) -> logos_abi::GuiStatus {
     }
 }
 
-fn is_cursor_surface_request(
-    request: GuiSurfaceRequest,
-    owner: u32,
-    width: u32,
-    height: u32,
-) -> bool {
+fn is_cursor_surface_request(request: GuiSurfaceRequest, owner: u32) -> bool {
     let expected_z = match owner {
         12 => 2,
         13 => 3,
         _ => return false,
     };
     request.operation == GuiSurfaceOperation::CreateModal
-        && request.bounds == GuiRect::new(0, 0, width, height)
+        && request.flags & logos_abi::GUI_SURFACE_FLAG_CURSOR != 0
         && request.z_order == expected_z
 }
 
@@ -174,6 +169,26 @@ fn create_fps_surface(display: &mut logos_display::Display) -> SurfaceHandle {
         .create(11, request)
         .map(|response| response.surface)
         .unwrap_or(SurfaceHandle::EMPTY)
+}
+
+fn initialize_root_scene(
+    display: &mut logos_display::Display,
+    surface: SurfaceHandle,
+    width: u32,
+    height: u32,
+) {
+    if !surface.is_valid() {
+        return;
+    }
+    let _ = display.gui_mut().apply_scene_op(
+        11,
+        GuiSceneOp::upsert(
+            surface,
+            1,
+            1,
+            GuiDrawCommand::fill_rect(GuiRect::new(0, 0, width, height), 0x101820),
+        ),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -300,7 +315,12 @@ pub extern "C" fn _start() -> ! {
         };
     let mut root_request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateRoot, 1);
     root_request.bounds = GuiRect::new(0, 0, config.width, config.height);
-    let _ = display.gui_mut().create(11, root_request);
+    let root_surface = display
+        .gui_mut()
+        .create(11, root_request)
+        .map(|response| response.surface)
+        .unwrap_or(SurfaceHandle::EMPTY);
+    initialize_root_scene(display, root_surface, config.width, config.height);
     let mut fps_surface = create_fps_surface(display);
     let mut fps_scene_frame = 0;
     update_fps_surface(display, fps_surface, &mut fps_scene_frame, 0);
@@ -329,7 +349,12 @@ pub extern "C" fn _start() -> ! {
             display.replace_generation(generation);
             let mut root_request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateRoot, 1);
             root_request.bounds = GuiRect::new(0, 0, config.width, config.height);
-            let _ = display.gui_mut().create(11, root_request);
+            let root_surface = display
+                .gui_mut()
+                .create(11, root_request)
+                .map(|response| response.surface)
+                .unwrap_or(SurfaceHandle::EMPTY);
+            initialize_root_scene(display, root_surface, config.width, config.height);
             fps_surface = create_fps_surface(display);
             render_pending = false;
             render_complete = false;
@@ -353,8 +378,7 @@ pub extern "C" fn _start() -> ! {
             {
                 progressed = true;
                 let mut response = GuiSurfaceResponse::new(surface_request, GuiStatus::Malformed);
-                let cursor_request =
-                    is_cursor_surface_request(surface_request, 13, config.width, config.height);
+                let cursor_request = is_cursor_surface_request(surface_request, 13);
                 let fps_toggle = surface_request.operation == GuiSurfaceOperation::ToggleFps;
                 let cursor_destroy = display.is_cursor_surface(surface_request.surface);
                 let result = match surface_request.operation {
@@ -411,12 +435,7 @@ pub extern "C" fn _start() -> ! {
                 progressed = true;
                 let mut response =
                     GuiSurfaceResponse::new(lockscreen_surface_request, GuiStatus::Malformed);
-                let cursor_request = is_cursor_surface_request(
-                    lockscreen_surface_request,
-                    12,
-                    config.width,
-                    config.height,
-                );
+                let cursor_request = is_cursor_surface_request(lockscreen_surface_request, 12);
                 let cursor_destroy = display.is_cursor_surface(lockscreen_surface_request.surface);
                 let result = match lockscreen_surface_request.operation {
                     GuiSurfaceOperation::CreateRoot | GuiSurfaceOperation::CreateModal => {

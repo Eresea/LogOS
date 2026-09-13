@@ -312,6 +312,7 @@ fn request_cursor_surface(
     next: &mut u32,
 ) -> Option<GuiSurfaceRequest> {
     let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, next_id(next));
+    request.flags = logos_abi::GUI_SURFACE_FLAG_CURSOR;
     request.bounds = CURSOR_BOUNDS;
     request.z_order = 3;
     (common::ipc_send_handle(display, &request) == IpcStatus::Ok).then_some(request)
