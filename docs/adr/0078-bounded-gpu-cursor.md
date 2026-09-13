@@ -10,8 +10,10 @@ commands. Display remains the owner of cursor appearance and publishes fixed
 cursor position, visibility, press state, and sequence metadata through the existing
 `FramebufferPresentState` page. Core owns the fixed 24x24 BGRA dot-and-halo
 bitmap in bounded DMA storage and attaches it to the cursor resource. The
-bitmap is regenerated from local framebuffer luminance when the cursor moves
-or the composed frame changes.
+cursor uses a stable white core with a black contour and soft black glow, so
+its appearance does not change as it moves across the framebuffer. The bitmap
+is regenerated through the existing bounded cursor-update path, but never
+reads framebuffer pixels to choose its colors.
 
 This keeps the present page small and stable while avoiding a per-frame bitmap
 copy. Core sends `UPDATE_CURSOR` when the cursor becomes visible, moves, changes

@@ -44,6 +44,7 @@ const SCANOUT_ID: u32 = 0;
 const CURSOR_BACKING_BYTES: u32 = 4096;
 const CURSOR_BITMAP_SIZE: i32 = 24;
 const CURSOR_CORE_RADIUS_SQUARED: i32 = 12;
+const CURSOR_OUTLINE_RADIUS_SQUARED: i32 = 25;
 const CURSOR_GLOW_RADIUS: i32 = 9;
 const CURSOR_PRESS_RADIUS: i32 = 8;
 
@@ -353,32 +354,9 @@ fn with_device_mut<T>(
     result
 }
 
-fn cursor_luminance(framebuffer: crate::boot_resources::FramebufferInfo, x: i16, y: i16) -> u8 {
-    let x = i32::from(x).clamp(0, framebuffer.width().saturating_sub(1) as i32) as usize;
-    let y = i32::from(y).clamp(0, framebuffer.height().saturating_sub(1) as i32) as usize;
-    let offset =
-        y.saturating_mul(framebuffer.stride() as usize).saturating_add(x.saturating_mul(4));
-    let source = unsafe {
-        core::slice::from_raw_parts(framebuffer.base() as *const u8, framebuffer.bytes() as usize)
-    };
-    if offset.saturating_add(3) > source.len() {
-        return 0;
-    }
-    let red = source[offset + 2];
-    let green = source[offset + 1];
-    let blue = source[offset];
-    ((u32::from(red) * 54 + u32::from(green) * 183 + u32::from(blue) * 19) >> 8) as u8
-}
-
-fn cursor_color(framebuffer: crate::boot_resources::FramebufferInfo, x: i16, y: i16) -> [u8; 3] {
-    if cursor_luminance(framebuffer, x, y) > 150 { [0, 0, 0] } else { [0xff, 0xff, 0xff] }
-}
-
-const fn cursor_alpha(distance_squared: i32) -> u8 {
-    if distance_squared <= CURSOR_CORE_RADIUS_SQUARED {
+const fn cursor_glow_alpha(distance_squared: i32) -> u8 {
+    if distance_squared <= CURSOR_OUTLINE_RADIUS_SQUARED {
         u8::MAX
-    } else if distance_squared <= 25 {
-        24
     } else if distance_squared <= 49 {
         8
     } else if distance_squared <= CURSOR_GLOW_RADIUS * CURSOR_GLOW_RADIUS {
@@ -398,7 +376,22 @@ const fn cursor_press_alpha(distance_squared: i32) -> u8 {
     }
 }
 
-fn initialize_cursor_memory(color: [u8; 3], pressed: bool) {
+fn cursor_pixel(distance_squared: i32, pressed: bool) -> ([u8; 3], u8) {
+    let (color, mut alpha) = if distance_squared <= CURSOR_CORE_RADIUS_SQUARED {
+        ([0xff, 0xff, 0xff], u8::MAX)
+    } else {
+        ([0, 0, 0], cursor_glow_alpha(distance_squared))
+    };
+    if alpha != 0 && pressed {
+        let ring_alpha = cursor_press_alpha(distance_squared);
+        if ring_alpha != 0 {
+            alpha = ring_alpha;
+        }
+    }
+    (color, alpha)
+}
+
+fn initialize_cursor_memory(pressed: bool) {
     let memory = unsafe { &mut (*core::ptr::addr_of_mut!(CURSOR_MEMORY)).0 };
     memory.fill(0);
     for row in 0..CURSOR_BITMAP_SIZE {
@@ -406,30 +399,19 @@ fn initialize_cursor_memory(color: [u8; 3], pressed: bool) {
             let distance_squared = (column - CURSOR_BITMAP_SIZE / 2)
                 * (column - CURSOR_BITMAP_SIZE / 2)
                 + (row - CURSOR_BITMAP_SIZE / 2) * (row - CURSOR_BITMAP_SIZE / 2);
-            let alpha = cursor_alpha(distance_squared);
+            let (color, alpha) = cursor_pixel(distance_squared, pressed);
             if alpha == 0 {
                 continue;
             }
             let offset = (row as usize * CURSOR_BITMAP_SIZE as usize + column as usize) * 4;
             let pixel = [color[2], color[1], color[0], alpha];
             memory[offset..offset + 4].copy_from_slice(&pixel);
-            if pressed {
-                let ring_alpha = cursor_press_alpha(distance_squared);
-                if ring_alpha != 0 {
-                    memory[offset + 3] = ring_alpha;
-                }
-            }
         }
     }
 }
 
-fn update_cursor_memory(
-    framebuffer: crate::boot_resources::FramebufferInfo,
-    x: i16,
-    y: i16,
-    pressed: bool,
-) {
-    initialize_cursor_memory(cursor_color(framebuffer, x, y), pressed);
+fn update_cursor_memory(pressed: bool) {
+    initialize_cursor_memory(pressed);
 }
 
 impl VirtioGpuDevice {
@@ -543,7 +525,7 @@ impl VirtioGpuDevice {
         let _ = cursor_state.ok_or(GpuError::InvalidFramebuffer)?;
         #[cfg(feature = "qemu-proof")]
         crate::arch_proof_line(b"LogOS vNext: VirtIO GPU cursor memory");
-        initialize_cursor_memory([0xff, 0xff, 0xff], false);
+        initialize_cursor_memory(false);
         device.command(VirtioGpuCommand::ResourceCreate2d {
             resource_id: CURSOR_RESOURCE_ID,
             format: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
@@ -777,7 +759,7 @@ impl VirtioGpuDevice {
                 #[cfg(feature = "qemu-proof")]
                 let cursor_update = visible && !self.cursor_initialized;
                 let command = if visible {
-                    update_cursor_memory(framebuffer, x, y, pressed);
+                    update_cursor_memory(pressed);
                     self.cursor_initialized = true;
                     VirtioGpuCommand::UpdateCursor {
                         x,
