@@ -37,6 +37,9 @@ files also fail closed to Disabled:
 .\scripts\run.ps1 -Proof -VirtioGpu -Cpus 1 -QmpPort 4450
 ```
 
+Interactive runs use QEMU's SDL display so relative mouse capture recenters
+the host pointer after the click; `Ctrl+Alt+G` toggles the grab.
+
 `-VirtioGpu` replaces the proof VGA device with QEMU's VirtIO-GPU device and
 exercises the Core-owned scanout and hardware cursor path; the proof checks
 cursor-plane publication and movement markers because QEMU framebuffer dumps

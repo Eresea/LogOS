@@ -102,7 +102,9 @@ if ($networkEnabled) {
 $espPath = ((Resolve-Path $esp).Path).Replace('\', '/')
 $inputTracePath = Join-Path $target "qemu-input-$PID.trace"
 $inputDebugLogPath = Join-Path $target "qemu-input-$PID.log"
-$display = if ($interactiveMode) { 'gtk,zoom-to-fit=off' } else { 'none' }
+# SDL's relative grab recenters the host pointer after capture, so motion does
+# not depend on where the user clicked inside the QEMU window.
+$display = if ($interactiveMode) { 'sdl' } else { 'none' }
 $qemuArgs = @(
     '-machine', 'q35', '-m', '256M', '-smp', $Cpus,
     '-drive', "if=pflash,format=raw,readonly=on,file=$ovmf",
