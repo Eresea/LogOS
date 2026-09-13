@@ -158,7 +158,7 @@ pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
-pub const IPC_ENDPOINT_COUNT: usize = 65;
+pub const IPC_ENDPOINT_COUNT: usize = 66;
 pub const FRAMEBUFFER_CURSOR_WIDTH: usize = 24;
 pub const FRAMEBUFFER_CURSOR_HEIGHT: usize = 24;
 
@@ -999,6 +999,7 @@ pub enum IpcEndpointId {
     AtriumToSystemSurface = 62,
     AtriumToSystemSurfaceInput = 63,
     SystemToAtriumSurfaceDraw = 64,
+    AtriumToInputControl = 65,
 }
 
 impl IpcEndpointId {
@@ -1075,6 +1076,7 @@ impl IpcEndpointId {
             62 => Some(Self::AtriumToSystemSurface),
             63 => Some(Self::AtriumToSystemSurfaceInput),
             64 => Some(Self::SystemToAtriumSurfaceDraw),
+            65 => Some(Self::AtriumToInputControl),
             _ => None,
         }
     }
@@ -1133,6 +1135,7 @@ impl IpcEndpointId {
             Self::SystemToAtriumSurface => ServiceId::System,
             Self::AtriumToSystemSurface | Self::AtriumToSystemSurfaceInput => ServiceId::Atrium,
             Self::SystemToAtriumSurfaceDraw => ServiceId::System,
+            Self::AtriumToInputControl => ServiceId::Atrium,
         }
     }
 
@@ -1189,6 +1192,7 @@ impl IpcEndpointId {
             Self::SystemToAtriumSurface => ServiceId::Atrium,
             Self::AtriumToSystemSurface | Self::AtriumToSystemSurfaceInput => ServiceId::System,
             Self::SystemToAtriumSurfaceDraw => ServiceId::Atrium,
+            Self::AtriumToInputControl => ServiceId::Input,
         }
     }
 }
@@ -1378,6 +1382,34 @@ pub struct InputMessage {
     pub text: [u8; MAX_TEXT_BYTES],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct InputSettings {
+    pub keyboard_layout: u8,
+    pub mouse_acceleration: u8,
+    pub reserved: [u8; 2],
+}
+
+impl InputSettings {
+    pub const KEYBOARD_AZERTY: u8 = 0;
+    pub const KEYBOARD_QWERTY: u8 = 1;
+    pub const MOUSE_ACCELERATION_OFF: u8 = 0;
+    pub const MOUSE_ACCELERATION_LOW: u8 = 1;
+    pub const MOUSE_ACCELERATION_MEDIUM: u8 = 2;
+    pub const MOUSE_ACCELERATION_HIGH: u8 = 3;
+
+    pub const fn new(keyboard_layout: u8, mouse_acceleration: u8) -> Self {
+        Self { keyboard_layout, mouse_acceleration, reserved: [0; 2] }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.reserved[0] == 0
+            && self.reserved[1] == 0
+            && self.keyboard_layout <= Self::KEYBOARD_QWERTY
+            && self.mouse_acceleration <= Self::MOUSE_ACCELERATION_HIGH
+    }
+}
+
 impl InputMessage {
     pub const fn key(code: KeyCode, state: KeyState, modifiers: u16) -> Self {
         Self {
@@ -1562,6 +1594,7 @@ pub const IPC_CONTRACT_ATRIUM_SURFACE_REQUEST: u16 = 21;
 pub const IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE: u16 = 22;
 pub const IPC_CONTRACT_ATRIUM_SURFACE_INPUT: u16 = 23;
 pub const IPC_CONTRACT_ATRIUM_SURFACE_DRAW: u16 = 24;
+pub const IPC_CONTRACT_INPUT_SETTINGS: u16 = 25;
 
 /// Stable typed contract identifier for an endpoint's wire payload.
 ///
@@ -1632,6 +1665,9 @@ pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
     }
     if endpoint == IpcEndpointId::AtriumToShell as usize {
         return Some(IPC_CONTRACT_ATRIUM_CONTROL);
+    }
+    if endpoint == IpcEndpointId::AtriumToInputControl as usize {
+        return Some(IPC_CONTRACT_INPUT_SETTINGS);
     }
     if endpoint == IpcEndpointId::TerminalToAtriumSurface as usize {
         return Some(IPC_CONTRACT_ATRIUM_SURFACE_REQUEST);
@@ -1719,11 +1755,15 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
         34 => Some(IpcMessageType::Gui),
         35..=38 | 40 => Some(IpcMessageType::Bytes),
         39 => Some(IpcMessageType::SessionContext),
+        65 => Some(IpcMessageType::Bytes),
         _ => None,
     }
 }
 
 pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
+    if endpoint == IpcEndpointId::AtriumToInputControl as usize {
+        return Some(core::mem::size_of::<InputSettings>());
+    }
     if endpoint == IpcEndpointId::SystemToAtriumSurface as usize {
         return Some(core::mem::size_of::<AtriumSurfaceRequest>());
     }
@@ -2658,8 +2698,19 @@ mod tests {
     }
 
     #[test]
+    fn input_settings_are_fixed_and_validated() {
+        let settings = InputSettings::new(
+            InputSettings::KEYBOARD_QWERTY,
+            InputSettings::MOUSE_ACCELERATION_HIGH,
+        );
+        assert!(settings.is_valid());
+        assert!(!InputSettings { reserved: [1, 0], ..settings }.is_valid());
+        assert!(!InputSettings::new(2, InputSettings::MOUSE_ACCELERATION_OFF).is_valid());
+    }
+
+    #[test]
     fn lockscreen_auth_and_display_endpoints_are_typed_and_directional() {
-        assert_eq!(IPC_ENDPOINT_COUNT, 65);
+        assert_eq!(IPC_ENDPOINT_COUNT, 66);
         assert_eq!(IpcEndpointId::LockScreenToShellAuth.producer(), ServiceId::LockScreen);
         assert_eq!(IpcEndpointId::LockScreenToShellAuth.consumer(), ServiceId::Shell);
         assert_eq!(IpcEndpointId::ShellToLockScreenAuth.producer(), ServiceId::Shell);
@@ -2726,6 +2777,16 @@ mod tests {
         assert_eq!(IpcEndpointId::SystemToAtriumSurface.consumer(), ServiceId::Atrium);
         assert_eq!(IpcEndpointId::AtriumToSystemSurface.producer(), ServiceId::Atrium);
         assert_eq!(IpcEndpointId::AtriumToSystemSurface.consumer(), ServiceId::System);
+        assert_eq!(IpcEndpointId::AtriumToInputControl.producer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToInputControl.consumer(), ServiceId::Input);
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::AtriumToInputControl as usize),
+            Some(IPC_CONTRACT_INPUT_SETTINGS)
+        );
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::AtriumToInputControl as usize),
+            Some(core::mem::size_of::<InputSettings>())
+        );
         assert_eq!(
             ipc_contract_id(IpcEndpointId::SystemToAtriumSurfaceDraw as usize),
             Some(IPC_CONTRACT_ATRIUM_SURFACE_DRAW)

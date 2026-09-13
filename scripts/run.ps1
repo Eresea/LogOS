@@ -674,7 +674,7 @@ try {
         if (-not (Wait-ProofMarker 'LogOS vNext: VirtIO GPU cursor moved' $TimeoutSeconds)) {
             throw 'QEMU pointer motion did not move the VirtIO-GPU cursor plane.'
         }
-        } elseif (-not (Framebuffer-HasNativeCursor $pointerAfter 681 380)) {
+        } elseif (-not (Framebuffer-HasNativeCursor $pointerAfter 688 376)) {
         throw 'QEMU pointer motion did not move the native cursor to the decoded position.'
         }
     }

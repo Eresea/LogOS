@@ -14,6 +14,8 @@ pub const MOD_ALT: u16 = logos_abi::MOD_ALT;
 pub const MOD_META: u16 = logos_abi::MOD_META;
 pub const MOD_CAPS_LOCK: u16 = logos_abi::MOD_CAPS_LOCK;
 pub const MOD_NUM_LOCK: u16 = logos_abi::MOD_NUM_LOCK;
+const POINTER_BASE_SPEED_NUMERATOR: i32 = 224;
+const POINTER_SCALE: i32 = 256 * 256;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum KeyboardLayout {
@@ -26,6 +28,43 @@ pub enum KeyboardLayout {
 }
 
 pub const DEFAULT_KEYBOARD_LAYOUT: KeyboardLayout = KeyboardLayout::Azerty;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MouseAcceleration {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl MouseAcceleration {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            logos_abi::InputSettings::MOUSE_ACCELERATION_OFF => Some(Self::Off),
+            logos_abi::InputSettings::MOUSE_ACCELERATION_LOW => Some(Self::Low),
+            logos_abi::InputSettings::MOUSE_ACCELERATION_MEDIUM => Some(Self::Medium),
+            logos_abi::InputSettings::MOUSE_ACCELERATION_HIGH => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    fn gain(self, delta: i16) -> i32 {
+        // ponytail: packet-magnitude curve; timing-aware acceleration waits for device timestamps.
+        let magnitude = delta.unsigned_abs();
+        let acceleration = if magnitude <= 2 {
+            256
+        } else {
+            match self {
+                Self::Off => 256,
+                Self::Low => 288,
+                Self::Medium => 352,
+                Self::High => 448,
+            }
+        };
+        i32::from(delta) * POINTER_BASE_SPEED_NUMERATOR * acceleration
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodedInput {
@@ -183,7 +222,10 @@ pub struct PointerDecoder {
     packet_len: u8,
     x: i16,
     y: i16,
+    x_remainder: i32,
+    y_remainder: i32,
     buttons: u8,
+    acceleration: MouseAcceleration,
 }
 
 impl PointerDecoder {
@@ -193,12 +235,33 @@ impl PointerDecoder {
             packet_len: 0,
             x: (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16,
             y: (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i16,
+            x_remainder: 0,
+            y_remainder: 0,
             buttons: 0,
+            acceleration: MouseAcceleration::Off,
         }
     }
 
     pub const fn position(&self) -> (i16, i16) {
         (self.x, self.y)
+    }
+
+    pub fn set_acceleration(&mut self, acceleration: MouseAcceleration) {
+        self.acceleration = acceleration;
+    }
+
+    fn apply_delta(
+        position: &mut i16,
+        remainder: &mut i32,
+        delta: i16,
+        acceleration: MouseAcceleration,
+    ) -> i16 {
+        let scaled = remainder.saturating_add(acceleration.gain(delta));
+        let pixels = scaled / POINTER_SCALE;
+        *remainder = scaled % POINTER_SCALE;
+        let previous = *position;
+        *position = position.saturating_add(pixels as i16);
+        position.saturating_sub(previous)
     }
 
     pub fn feed(&mut self, byte: u8) -> Option<InputMessage> {
@@ -216,10 +279,12 @@ impl PointerDecoder {
         if status & 0xc0 != 0 {
             return None;
         }
-        let dx = self.packet[1] as i8 as i16;
-        let dy = self.packet[2] as i8 as i16;
-        self.x = self.x.saturating_add(dx).clamp(0, (logos_abi::DEFAULT_SCREEN_WIDTH - 1) as i16);
-        self.y = self.y.saturating_sub(dy).clamp(0, (logos_abi::DEFAULT_SCREEN_HEIGHT - 1) as i16);
+        let raw_dx = self.packet[1] as i8 as i16;
+        let raw_dy = self.packet[2] as i8 as i16;
+        let dx = Self::apply_delta(&mut self.x, &mut self.x_remainder, raw_dx, self.acceleration);
+        let dy = Self::apply_delta(&mut self.y, &mut self.y_remainder, -raw_dy, self.acceleration);
+        self.x = self.x.clamp(0, (logos_abi::DEFAULT_SCREEN_WIDTH - 1) as i16);
+        self.y = self.y.clamp(0, (logos_abi::DEFAULT_SCREEN_HEIGHT - 1) as i16);
         let buttons = status & logos_abi::POINTER_BUTTONS_MASK;
         let state = if buttons != self.buttons {
             if buttons & !self.buttons != 0 { PointerState::Down } else { PointerState::Up }
@@ -583,8 +648,8 @@ mod tests {
         assert_eq!(decoder.feed(0x08), None);
         assert_eq!(decoder.feed(4), None);
         let event = decoder.feed(2).unwrap();
-        assert_eq!(event.pointer_event().unwrap().x, 644);
-        assert_eq!(event.pointer_event().unwrap().y, 398);
+        assert_eq!(event.pointer_event().unwrap().x, 643);
+        assert_eq!(event.pointer_event().unwrap().y, 399);
 
         let _ = decoder.feed(0x09);
         let _ = decoder.feed(0);
@@ -592,6 +657,19 @@ mod tests {
         let _ = decoder.feed(0x08);
         let _ = decoder.feed(0);
         assert_eq!(decoder.feed(0).unwrap().pointer_event().unwrap().state, PointerState::Up);
+    }
+
+    #[test]
+    fn pointer_acceleration_preserves_fractional_base_speed_and_boosts_fast_motion() {
+        let mut decoder = PointerDecoder::new();
+        decoder.set_acceleration(MouseAcceleration::High);
+        assert_eq!(decoder.feed(0x08), None);
+        assert_eq!(decoder.feed(2), None);
+        assert_eq!(decoder.feed(2).unwrap().pointer_event().unwrap().x, 641);
+
+        assert_eq!(decoder.feed(0x08), None);
+        assert_eq!(decoder.feed(4), None);
+        assert_eq!(decoder.feed(0).unwrap().pointer_event().unwrap().x, 647);
     }
 
     #[test]

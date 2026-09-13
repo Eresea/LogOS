@@ -5,8 +5,9 @@
 mod common;
 
 use logos_abi::{
-    INPUT_KEYBOARD_RING_BASE, INPUT_POINTER_RING_BASE, IPC_CONTRACT_GUI_INPUT, InputMessage,
-    IpcStatus, KeyboardByteRing, PointerByteRing,
+    INPUT_KEYBOARD_RING_BASE, INPUT_POINTER_RING_BASE, IPC_CONTRACT_GUI_INPUT,
+    IPC_CONTRACT_INPUT_SETTINGS, InputMessage, InputSettings, IpcStatus, KeyboardByteRing,
+    PointerByteRing,
 };
 
 static mut PENDING: Option<InputMessage> = None;
@@ -67,6 +68,15 @@ pub extern "C" fn _start() -> ! {
         Ok(capability) => capability,
         Err(_) => common::idle(),
     };
+    let atrium_settings = match common::discover_capability_contract_named(
+        b"atrium",
+        logos_abi::IpcRights::Receive,
+        IPC_CONTRACT_INPUT_SETTINGS,
+        core::mem::size_of::<InputSettings>(),
+    ) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
     let keyboard = unsafe { &*(INPUT_KEYBOARD_RING_BASE as *const KeyboardByteRing) };
     let pointer = unsafe { &*(INPUT_POINTER_RING_BASE as *const PointerByteRing) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
@@ -75,9 +85,29 @@ pub extern "C" fn _start() -> ! {
     let pointer_sent_mask = unsafe { &mut *core::ptr::addr_of_mut!(POINTER_SENT_MASK) };
     let mut decoder = logos_input::InputDecoder::new();
     let mut pointer_decoder = logos_input::PointerDecoder::new();
+    pointer_decoder.set_acceleration(logos_input::MouseAcceleration::Medium);
+    let mut settings = InputSettings::new(
+        InputSettings::KEYBOARD_AZERTY,
+        InputSettings::MOUSE_ACCELERATION_MEDIUM,
+    );
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        while common::ipc_receive_handle(atrium_settings, &mut settings) == IpcStatus::Ok {
+            if settings.is_valid() {
+                let layout = if settings.keyboard_layout == InputSettings::KEYBOARD_QWERTY {
+                    logos_input::KeyboardLayout::Qwerty
+                } else {
+                    logos_input::KeyboardLayout::Azerty
+                };
+                decoder.set_layout(layout);
+                if let Some(acceleration) =
+                    logos_input::MouseAcceleration::from_raw(settings.mouse_acceleration)
+                {
+                    pointer_decoder.set_acceleration(acceleration);
+                }
+            }
+        }
         if pending_pointer.is_some() {
             let _ = flush_pointer(atrium_output, pending_pointer, pointer_sent_mask);
         }
@@ -125,9 +155,9 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if pending_pointer.is_some() {
-            common::wait_on_capability_or_input(atrium_output);
+            common::wait_on_capabilities_or_input(&[atrium_output, atrium_settings]);
         } else {
-            common::sleep_on_input();
+            common::wait_on_capabilities_or_input(&[atrium_settings]);
         }
     }
 }

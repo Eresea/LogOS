@@ -1109,13 +1109,20 @@ pub fn wait_on_capability(capability: logos_abi::CapabilityHandle) {
 
 #[allow(dead_code)]
 pub fn wait_on_capability_or_input(capability: logos_abi::CapabilityHandle) {
+    wait_on_capabilities_or_input(core::slice::from_ref(&capability));
+}
+
+#[allow(dead_code)]
+pub fn wait_on_capabilities_or_input(capabilities: &[logos_abi::CapabilityHandle]) {
     #[cfg(target_os = "none")]
     {
-        let mut events = [logos_abi::EventHandle::EMPTY; 3];
+        let mut events = [logos_abi::EventHandle::EMPTY; 5];
         let mut count = 0;
-        if let Ok(event) = discover_event_for_capability(capability) {
-            events[count] = event;
-            count += 1;
+        for capability in capabilities {
+            if let Ok(event) = discover_event_for_capability(*capability) {
+                events[count] = event;
+                count += 1;
+            }
         }
         for flags in [
             logos_abi::DIRECTORY_EVENT_FLAG_HARDWARE_KEYBOARD,
