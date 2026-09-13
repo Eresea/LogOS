@@ -34,6 +34,7 @@ const LOCKSCREEN_OWNER: u32 = 12;
 const ATRIUM_OWNER: u32 = 13;
 const CURSOR_PRESSED_AUXILIARY: u32 = 1;
 const POINTER_CURSOR_CORE_RADIUS_SQUARED: i32 = 12;
+const POINTER_CURSOR_OUTLINE_RADIUS_SQUARED: i32 = 25;
 const POINTER_CURSOR_GLOW_RADIUS: i32 = 9;
 const POINTER_CURSOR_PRESS_RADIUS: i32 = 8;
 const GLYPH_CACHE_ENTRIES: usize = 32;
@@ -303,56 +304,13 @@ fn draw_cursor_pixel(
     framebuffer[offset..offset + 4].copy_from_slice(&pixel_bytes(blended, format));
 }
 
-fn cursor_luminance(
-    framebuffer: &[u8],
-    width: usize,
-    height: usize,
-    stride: usize,
-    format: PixelFormat,
-    x: i32,
-    y: i32,
-) -> u8 {
-    if width == 0 || height == 0 {
-        return 0;
-    }
-    let x = x.clamp(0, width.saturating_sub(1) as i32) as usize;
-    let y = y.clamp(0, height.saturating_sub(1) as i32) as usize;
-    let offset = y.saturating_mul(stride).saturating_add(x.saturating_mul(4));
-    if offset.saturating_add(3) > framebuffer.len() {
-        return 0;
-    }
-    let (red, green, blue) = match format {
-        PixelFormat::Rgb8 => {
-            (framebuffer[offset], framebuffer[offset + 1], framebuffer[offset + 2])
-        }
-        PixelFormat::Bgr8 => {
-            (framebuffer[offset + 2], framebuffer[offset + 1], framebuffer[offset])
-        }
-    };
-    ((u32::from(red) * 54 + u32::from(green) * 183 + u32::from(blue) * 19) >> 8) as u8
-}
-
-fn cursor_color(
-    framebuffer: &[u8],
-    width: usize,
-    height: usize,
-    stride: usize,
-    format: PixelFormat,
-    x: i32,
-    y: i32,
-) -> u32 {
-    if cursor_luminance(framebuffer, width, height, stride, format, x, y) > 150 {
-        0x000000
-    } else {
-        0xffffff
-    }
+const fn cursor_color(distance_squared: i32) -> u32 {
+    if distance_squared <= POINTER_CURSOR_CORE_RADIUS_SQUARED { 0xffffff } else { 0x000000 }
 }
 
 const fn cursor_alpha(distance_squared: i32) -> u8 {
-    if distance_squared <= POINTER_CURSOR_CORE_RADIUS_SQUARED {
+    if distance_squared <= POINTER_CURSOR_OUTLINE_RADIUS_SQUARED {
         u8::MAX
-    } else if distance_squared <= 25 {
-        24
     } else if distance_squared <= 49 {
         8
     } else if distance_squared <= POINTER_CURSOR_GLOW_RADIUS * POINTER_CURSOR_GLOW_RADIUS {
@@ -650,10 +608,11 @@ impl Display {
         if intersect(bounds, clip).is_empty() {
             return;
         }
-        let color = cursor_color(framebuffer, width, height, stride, format, layer.x, layer.y);
         for y in -POINTER_CURSOR_GLOW_RADIUS..=POINTER_CURSOR_GLOW_RADIUS {
             for x in -POINTER_CURSOR_GLOW_RADIUS..=POINTER_CURSOR_GLOW_RADIUS {
-                let alpha = cursor_alpha(x * x + y * y);
+                let distance_squared = x * x + y * y;
+                let color = cursor_color(distance_squared);
+                let alpha = cursor_alpha(distance_squared);
                 draw_cursor_pixel(
                     framebuffer,
                     width,
@@ -676,7 +635,7 @@ impl Display {
                         layer.x.saturating_add(x),
                         layer.y.saturating_add(y),
                         color,
-                        cursor_press_alpha(x * x + y * y),
+                        cursor_press_alpha(distance_squared),
                         clip,
                     );
                 }
@@ -2037,14 +1996,11 @@ mod tests {
     }
 
     #[test]
-    fn software_cursor_adapts_to_background_luminance() {
-        let bright = [0xf0, 0xf0, 0xf0, 0];
-        let dark = [0x20, 0x30, 0x40, 0];
-
-        assert_eq!(cursor_color(&bright, 1, 1, 4, PixelFormat::Bgr8, 0, 0), 0x000000);
-        assert_eq!(cursor_color(&dark, 1, 1, 4, PixelFormat::Bgr8, 0, 0), 0xffffff);
+    fn software_cursor_uses_a_stable_two_tone_shape() {
+        assert_eq!(cursor_color(0), 0xffffff);
+        assert_eq!(cursor_color(13), 0x000000);
         assert_eq!(cursor_alpha(10), u8::MAX);
-        assert_eq!(cursor_alpha(16), 24);
+        assert_eq!(cursor_alpha(16), u8::MAX);
         assert!(cursor_alpha(16) > 0);
         assert_eq!(cursor_alpha(100), 0);
     }
@@ -2087,7 +2043,7 @@ mod tests {
         );
 
         let ring_pixel = (16 * 32 + 24) * 4;
-        assert!(pressed[ring_pixel] > released[ring_pixel]);
+        assert!(pressed[ring_pixel] < released[ring_pixel]);
     }
 
     #[test]
