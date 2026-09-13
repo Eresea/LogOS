@@ -43,10 +43,12 @@ const CURSOR_RESOURCE_ID: u32 = 2;
 const SCANOUT_ID: u32 = 0;
 const CURSOR_BACKING_BYTES: u32 = 4096;
 const CURSOR_BITMAP_SIZE: i32 = 24;
-const CURSOR_CORE_RADIUS_SQUARED: i32 = 12;
-const CURSOR_OUTLINE_RADIUS_SQUARED: i32 = 25;
-const CURSOR_GLOW_RADIUS: i32 = 9;
-const CURSOR_PRESS_RADIUS: i32 = 8;
+const CURSOR_CORE_RADIUS_QUARTERS: i32 = 14;
+const CURSOR_OUTLINE_RADIUS_QUARTERS: i32 = 22;
+const CURSOR_GLOW_RADIUS_QUARTERS: i32 = 36;
+const CURSOR_PRESS_INNER_RADIUS_QUARTERS: i32 = 28;
+const CURSOR_PRESS_OUTER_RADIUS_QUARTERS: i32 = 34;
+const CURSOR_SAMPLE_OFFSETS: [i32; 4] = [-3, -1, 1, 3];
 
 #[repr(C, align(4096))]
 struct QueueMemory {
@@ -354,38 +356,54 @@ fn with_device_mut<T>(
     result
 }
 
-const fn cursor_glow_alpha(distance_squared: i32) -> u8 {
-    if distance_squared <= CURSOR_OUTLINE_RADIUS_SQUARED {
-        u8::MAX
-    } else if distance_squared <= 49 {
-        8
-    } else if distance_squared <= CURSOR_GLOW_RADIUS * CURSOR_GLOW_RADIUS {
-        2
-    } else {
-        0
+fn circle_coverage(x: i32, y: i32, radius_quarters: i32) -> u8 {
+    let mut covered = 0u16;
+    for sample_y in CURSOR_SAMPLE_OFFSETS {
+        for sample_x in CURSOR_SAMPLE_OFFSETS {
+            let sample_x = x * 4 + sample_x;
+            let sample_y = y * 4 + sample_y;
+            if sample_x * sample_x + sample_y * sample_y <= radius_quarters * radius_quarters {
+                covered += 1;
+            }
+        }
     }
+    ((covered * u16::from(u8::MAX)) / 16) as u8
 }
 
-const fn cursor_press_alpha(distance_squared: i32) -> u8 {
-    if distance_squared >= (CURSOR_PRESS_RADIUS - 1) * (CURSOR_PRESS_RADIUS - 1)
-        && distance_squared <= CURSOR_GLOW_RADIUS * CURSOR_GLOW_RADIUS
-    {
-        100
-    } else {
-        0
-    }
+fn cursor_press_alpha(x: i32, y: i32) -> u8 {
+    let outer = circle_coverage(x, y, CURSOR_PRESS_OUTER_RADIUS_QUARTERS);
+    let inner = circle_coverage(x, y, CURSOR_PRESS_INNER_RADIUS_QUARTERS);
+    ((u16::from(outer.saturating_sub(inner)) * 100) / u16::from(u8::MAX)) as u8
 }
 
-fn cursor_pixel(distance_squared: i32, pressed: bool) -> ([u8; 3], u8) {
-    let (color, mut alpha) = if distance_squared <= CURSOR_CORE_RADIUS_SQUARED {
-        ([0xff, 0xff, 0xff], u8::MAX)
+fn alpha_over(top: u8, bottom: u8) -> u8 {
+    (u16::from(top) + u16::from(bottom) * (u16::from(u8::MAX) - u16::from(top)) / 255) as u8
+}
+
+fn cursor_pixel(x: i32, y: i32, pressed: bool) -> ([u8; 3], u8) {
+    let outline_alpha = circle_coverage(x, y, CURSOR_OUTLINE_RADIUS_QUARTERS);
+    let glow_alpha = ((u16::from(circle_coverage(x, y, CURSOR_GLOW_RADIUS_QUARTERS)) * 24)
+        / u16::from(u8::MAX)) as u8;
+    let core_alpha = circle_coverage(x, y, CURSOR_CORE_RADIUS_QUARTERS);
+    let mut alpha = alpha_over(core_alpha, outline_alpha.max(glow_alpha));
+    let mut color = if alpha == 0 {
+        [0, 0, 0]
     } else {
-        ([0, 0, 0], cursor_glow_alpha(distance_squared))
+        let channel = ((u32::from(core_alpha) * u32::from(u8::MAX)) / u32::from(alpha)) as u8;
+        [channel; 3]
     };
-    if alpha != 0 && pressed {
-        let ring_alpha = cursor_press_alpha(distance_squared);
-        if ring_alpha != 0 {
-            alpha = ring_alpha;
+
+    if pressed {
+        let press_alpha = cursor_press_alpha(x, y);
+        if press_alpha != 0 {
+            let old_alpha = alpha;
+            alpha = alpha_over(press_alpha, old_alpha);
+            let remaining = u32::from(color[0])
+                * u32::from(old_alpha)
+                * (u32::from(u8::MAX) - u32::from(press_alpha))
+                / u32::from(u8::MAX);
+            let channel = if alpha == 0 { 0 } else { (remaining / u32::from(alpha)) as u8 };
+            color = [channel; 3];
         }
     }
     (color, alpha)
@@ -396,10 +414,11 @@ fn initialize_cursor_memory(pressed: bool) {
     memory.fill(0);
     for row in 0..CURSOR_BITMAP_SIZE {
         for column in 0..CURSOR_BITMAP_SIZE {
-            let distance_squared = (column - CURSOR_BITMAP_SIZE / 2)
-                * (column - CURSOR_BITMAP_SIZE / 2)
-                + (row - CURSOR_BITMAP_SIZE / 2) * (row - CURSOR_BITMAP_SIZE / 2);
-            let (color, alpha) = cursor_pixel(distance_squared, pressed);
+            let (color, alpha) = cursor_pixel(
+                column - CURSOR_BITMAP_SIZE / 2,
+                row - CURSOR_BITMAP_SIZE / 2,
+                pressed,
+            );
             if alpha == 0 {
                 continue;
             }

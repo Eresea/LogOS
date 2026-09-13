@@ -33,10 +33,13 @@ const CURSOR_LAYERS: usize = 2;
 const LOCKSCREEN_OWNER: u32 = 12;
 const ATRIUM_OWNER: u32 = 13;
 const CURSOR_PRESSED_AUXILIARY: u32 = 1;
-const POINTER_CURSOR_CORE_RADIUS_SQUARED: i32 = 12;
-const POINTER_CURSOR_OUTLINE_RADIUS_SQUARED: i32 = 25;
+const POINTER_CURSOR_CORE_RADIUS_QUARTERS: i32 = 14;
+const POINTER_CURSOR_OUTLINE_RADIUS_QUARTERS: i32 = 22;
+const POINTER_CURSOR_GLOW_RADIUS_QUARTERS: i32 = 36;
+const POINTER_CURSOR_PRESS_INNER_RADIUS_QUARTERS: i32 = 28;
+const POINTER_CURSOR_PRESS_OUTER_RADIUS_QUARTERS: i32 = 34;
 const POINTER_CURSOR_GLOW_RADIUS: i32 = 9;
-const POINTER_CURSOR_PRESS_RADIUS: i32 = 8;
+const CURSOR_SAMPLE_OFFSETS: [i32; 4] = [-3, -1, 1, 3];
 const GLYPH_CACHE_ENTRIES: usize = 32;
 const DIRTY_WORDS: usize = (MAX_COLUMNS * MAX_ROWS).div_ceil(usize::BITS as usize);
 const ASCII_FIRST: u32 = 0x20;
@@ -304,30 +307,37 @@ fn draw_cursor_pixel(
     framebuffer[offset..offset + 4].copy_from_slice(&pixel_bytes(blended, format));
 }
 
-const fn cursor_color(distance_squared: i32) -> u32 {
-    if distance_squared <= POINTER_CURSOR_CORE_RADIUS_SQUARED { 0xffffff } else { 0x000000 }
+fn circle_coverage(x: i32, y: i32, radius_quarters: i32) -> u8 {
+    let mut covered = 0u16;
+    for sample_y in CURSOR_SAMPLE_OFFSETS {
+        for sample_x in CURSOR_SAMPLE_OFFSETS {
+            let sample_x = x * 4 + sample_x;
+            let sample_y = y * 4 + sample_y;
+            if sample_x * sample_x + sample_y * sample_y <= radius_quarters * radius_quarters {
+                covered += 1;
+            }
+        }
+    }
+    ((covered * u16::from(u8::MAX)) / 16) as u8
 }
 
-const fn cursor_alpha(distance_squared: i32) -> u8 {
-    if distance_squared <= POINTER_CURSOR_OUTLINE_RADIUS_SQUARED {
-        u8::MAX
-    } else if distance_squared <= 49 {
-        8
-    } else if distance_squared <= POINTER_CURSOR_GLOW_RADIUS * POINTER_CURSOR_GLOW_RADIUS {
-        2
-    } else {
-        0
-    }
+fn cursor_core_alpha(x: i32, y: i32) -> u8 {
+    circle_coverage(x, y, POINTER_CURSOR_CORE_RADIUS_QUARTERS)
 }
 
-const fn cursor_press_alpha(distance_squared: i32) -> u8 {
-    if distance_squared >= (POINTER_CURSOR_PRESS_RADIUS - 1) * (POINTER_CURSOR_PRESS_RADIUS - 1)
-        && distance_squared <= POINTER_CURSOR_GLOW_RADIUS * POINTER_CURSOR_GLOW_RADIUS
-    {
-        100
-    } else {
-        0
-    }
+fn cursor_outline_alpha(x: i32, y: i32) -> u8 {
+    circle_coverage(x, y, POINTER_CURSOR_OUTLINE_RADIUS_QUARTERS)
+}
+
+fn cursor_glow_alpha(x: i32, y: i32) -> u8 {
+    let coverage = circle_coverage(x, y, POINTER_CURSOR_GLOW_RADIUS_QUARTERS);
+    ((u16::from(coverage) * 24) / u16::from(u8::MAX)) as u8
+}
+
+fn cursor_press_alpha(x: i32, y: i32) -> u8 {
+    let outer = circle_coverage(x, y, POINTER_CURSOR_PRESS_OUTER_RADIUS_QUARTERS);
+    let inner = circle_coverage(x, y, POINTER_CURSOR_PRESS_INNER_RADIUS_QUARTERS);
+    ((u16::from(outer.saturating_sub(inner)) * 100) / u16::from(u8::MAX)) as u8
 }
 
 fn fill_row(row: &mut [u8], pixel: [u8; 4]) {
@@ -610,9 +620,7 @@ impl Display {
         }
         for y in -POINTER_CURSOR_GLOW_RADIUS..=POINTER_CURSOR_GLOW_RADIUS {
             for x in -POINTER_CURSOR_GLOW_RADIUS..=POINTER_CURSOR_GLOW_RADIUS {
-                let distance_squared = x * x + y * y;
-                let color = cursor_color(distance_squared);
-                let alpha = cursor_alpha(distance_squared);
+                let outline_alpha = cursor_outline_alpha(x, y).max(cursor_glow_alpha(x, y));
                 draw_cursor_pixel(
                     framebuffer,
                     width,
@@ -621,8 +629,20 @@ impl Display {
                     format,
                     layer.x.saturating_add(x),
                     layer.y.saturating_add(y),
-                    color,
-                    alpha,
+                    0x000000,
+                    outline_alpha,
+                    clip,
+                );
+                draw_cursor_pixel(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    format,
+                    layer.x.saturating_add(x),
+                    layer.y.saturating_add(y),
+                    0xffffff,
+                    cursor_core_alpha(x, y),
                     clip,
                 );
                 if layer.pressed {
@@ -634,8 +654,8 @@ impl Display {
                         format,
                         layer.x.saturating_add(x),
                         layer.y.saturating_add(y),
-                        color,
-                        cursor_press_alpha(distance_squared),
+                        0x000000,
+                        cursor_press_alpha(x, y),
                         clip,
                     );
                 }
@@ -1996,13 +2016,13 @@ mod tests {
     }
 
     #[test]
-    fn software_cursor_uses_a_stable_two_tone_shape() {
-        assert_eq!(cursor_color(0), 0xffffff);
-        assert_eq!(cursor_color(13), 0x000000);
-        assert_eq!(cursor_alpha(10), u8::MAX);
-        assert_eq!(cursor_alpha(16), u8::MAX);
-        assert!(cursor_alpha(16) > 0);
-        assert_eq!(cursor_alpha(100), 0);
+    fn software_cursor_uses_antialiased_two_tone_circles() {
+        assert_eq!(cursor_core_alpha(0, 0), u8::MAX);
+        assert_eq!(cursor_outline_alpha(0, 0), u8::MAX);
+        assert!(cursor_core_alpha(4, 0) > 0);
+        assert!(cursor_core_alpha(4, 0) < u8::MAX);
+        assert!(cursor_outline_alpha(5, 0) > 0);
+        assert_eq!(cursor_glow_alpha(100, 100), 0);
     }
 
     #[test]
