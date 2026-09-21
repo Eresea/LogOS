@@ -5,11 +5,12 @@
 
 ## Decision
 
-The supervisor owns graph-wide service replacement. A missed heartbeat or contained service fault
-first quiesces every service task at a scheduler boundary. Only after all service tasks are completed
-are process records, address-space mappings, page-table frames, image frames, device mappings, and IPC
-pages reclaimed. The replacement graph receives a new IPC generation and service epoch; old messages
-are rejected by the shared ABI identity check.
+`service_runtime::RestartCoordinator` owns graph-wide service replacement and uses
+`supervisor::LiveSupervisor` for the bounded health and restart policy. A missed heartbeat or contained
+service fault first quiesces every service task at a scheduler boundary. Only after all service tasks
+are completed are process records, address-space mappings, page-table frames, image frames, device
+mappings, and IPC pages reclaimed. The replacement graph receives a new IPC generation and service
+epoch; old messages are rejected by the shared ABI identity check.
 
 Restart is bounded by the existing service, process, mapping, image, frame, and scheduler limits.
 The UEFI restart workload runs on the fixed 256 KiB task stack, a deliberate bound required by the nested
