@@ -212,7 +212,7 @@ pub(crate) enum ServiceFaultOutcome {
 
 pub struct ServiceRuntime {
     frame_pool: FramePool,
-    executions: Vec<ServiceExecution>,
+    executions: Vec<Box<ServiceExecution>>,
     processes: crate::process::ProcessTable,
     launch_ready: bool,
     dynamic_ipc: Option<RuntimeIpcRegistry>,
@@ -704,7 +704,7 @@ impl ServiceRuntime {
 
         self.service_handles.push(handle);
         if add_resources {
-            self.executions.push(ServiceExecution::empty());
+            self.executions.push(Box::new(ServiceExecution::empty()));
         }
         Ok(index)
     }
@@ -775,11 +775,10 @@ impl ServiceRuntime {
             }
             registry.start(handles[service.index()]).map_err(|_| ServiceRuntimeError::Resources)?;
         }
-        self.service_handles.clear();
         for (slot, handle) in handles.iter().copied().enumerate() {
-            self.ensure_service_runtime_slot(handle)?;
             registry.bind_runtime_slot(handle, slot).map_err(|_| ServiceRuntimeError::Resources)?;
         }
+        self.service_handles = handles;
         if self.service_epoch > 1 {
             for handle in &self.service_handles {
                 if registry.state(*handle) == Ok(crate::runtime_services::ServiceState::Running) {
@@ -1046,8 +1045,7 @@ impl ServiceRuntime {
     ) -> Result<(), ServiceRuntimeError> {
         // Dynamic runtime storage must be allocated only after Core owns a
         // live heap; before this point the global allocator has no backend.
-        self.executions.resize_with(SERVICE_COUNT, ServiceExecution::empty);
-        self.service_handles.resize(SERVICE_COUNT, logos_abi::ServiceHandle::EMPTY);
+        self.executions.resize_with(SERVICE_COUNT, || Box::new(ServiceExecution::empty()));
         self.prepared_packages.resize_with(SERVICE_COUNT, || None);
         self.active_packages.resize(SERVICE_COUNT, None);
 
