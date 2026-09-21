@@ -469,6 +469,75 @@ impl Drop for ServiceRestartGate {
     }
 }
 
+struct RestartCoordinator;
+
+impl RestartCoordinator {
+    /// Own the complete live graph replacement transition. The supervisor
+    /// supplies the bounded restart policy; runtime resource mechanics stay
+    /// private behind this one seam.
+    fn run(
+        runtime: &mut ServiceRuntime,
+        bundle: &ServiceImageBundle,
+        runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
+    ) -> Result<(), ServiceRuntimeError> {
+        let _restart_gate = ServiceRestartGate::acquire();
+        crate::arch::begin_service_runtime_transition();
+        runtime.ipc_generation = runtime.ipc_generation.wrapping_add(1).max(1);
+        runtime.service_epoch = runtime.service_epoch.wrapping_add(1).max(1);
+        runtime.network_config.service_epoch =
+            runtime.network_config.service_epoch.wrapping_add(1).max(1);
+        if !runtime.supervisor.prepare_restart() {
+            return Err(ServiceRuntimeError::RestartLimit);
+        }
+        runtime.stop_tasks(runtime_guard)?;
+        runtime.retain_active_package_images()?;
+        crate::arch::prepare_task_address_space(0);
+        crate::arch::restart_critical_section_held(|| {
+            crate::arch::disable_keyboard_irq();
+            crate::arch::disable_pointer_irq();
+            crate::arch::reset_events();
+            runtime.reclaim_resources()?;
+            #[cfg(feature = "qemu-proof")]
+            if runtime.dynamic_ipc.is_some()
+                || runtime.dynamic_services.is_some()
+                || runtime.dynamic_events.is_some()
+                || !runtime.service_handles.is_empty()
+                || !runtime.images.is_empty()
+                || !runtime.tables.is_empty()
+                || !runtime.tasks.is_empty()
+                || !runtime.ipc_staging_frames.is_empty()
+            {
+                return Err(ServiceRuntimeError::Resources);
+            }
+            #[cfg(feature = "qemu-proof")]
+            crate::proof::restart_resources_reclaimed();
+            runtime.start(bundle)?;
+            for suppressed in &runtime.suppressed_heartbeats {
+                suppressed.store(false, Ordering::Release);
+            }
+            let old_service_epoch = runtime.service_epoch.wrapping_sub(1).max(1);
+            let stale_rejected = runtime.dynamic_ipc.is_some()
+                && runtime.dynamic_ipc.as_ref().is_some_and(|registry| {
+                    registry.all_endpoint_generations_differ(old_service_epoch as u32)
+                });
+            if !stale_rejected {
+                return Err(ServiceRuntimeError::StaleGeneration);
+            }
+            let result = runtime.start_tasks();
+            if result.is_ok() {
+                #[cfg(feature = "qemu-proof")]
+                crate::proof::network_restart_completed();
+                #[cfg(feature = "qemu-proof")]
+                crate::proof::manager_restart_completed();
+                crate::arch::enable_keyboard_irq();
+                crate::arch::enable_pointer_irq();
+                crate::arch::finish_service_runtime_transition();
+            }
+            result
+        })
+    }
+}
+
 impl ServiceRuntime {
     pub const fn new() -> Self {
         Self {
@@ -5772,61 +5841,7 @@ impl ServiceRuntime {
         bundle: &ServiceImageBundle,
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<(), ServiceRuntimeError> {
-        let _restart_gate = ServiceRestartGate::acquire();
-        crate::arch::begin_service_runtime_transition();
-        self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
-        self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
-        self.network_config.service_epoch =
-            self.network_config.service_epoch.wrapping_add(1).max(1);
-        if !self.supervisor.prepare_restart() {
-            return Err(ServiceRuntimeError::RestartLimit);
-        }
-        self.stop_tasks(runtime_guard)?;
-        self.retain_active_package_images()?;
-        crate::arch::prepare_task_address_space(0);
-        crate::arch::restart_critical_section_held(|| {
-            crate::arch::disable_keyboard_irq();
-            crate::arch::disable_pointer_irq();
-            crate::arch::reset_events();
-            self.reclaim_resources()?;
-            #[cfg(feature = "qemu-proof")]
-            if self.dynamic_ipc.is_some()
-                || self.dynamic_services.is_some()
-                || self.dynamic_events.is_some()
-                || !self.service_handles.is_empty()
-                || !self.images.is_empty()
-                || !self.tables.is_empty()
-                || !self.tasks.is_empty()
-                || !self.ipc_staging_frames.is_empty()
-            {
-                return Err(ServiceRuntimeError::Resources);
-            }
-            #[cfg(feature = "qemu-proof")]
-            crate::proof::restart_resources_reclaimed();
-            self.start(bundle)?;
-            for suppressed in &self.suppressed_heartbeats {
-                suppressed.store(false, Ordering::Release);
-            }
-            let old_service_epoch = self.service_epoch.wrapping_sub(1).max(1);
-            let stale_rejected = self.dynamic_ipc.is_some()
-                && self.dynamic_ipc.as_ref().is_some_and(|registry| {
-                    registry.all_endpoint_generations_differ(old_service_epoch as u32)
-                });
-            if !stale_rejected {
-                return Err(ServiceRuntimeError::StaleGeneration);
-            }
-            let result = self.start_tasks();
-            if result.is_ok() {
-                #[cfg(feature = "qemu-proof")]
-                crate::proof::network_restart_completed();
-                #[cfg(feature = "qemu-proof")]
-                crate::proof::manager_restart_completed();
-                crate::arch::enable_keyboard_irq();
-                crate::arch::enable_pointer_irq();
-                crate::arch::finish_service_runtime_transition();
-            }
-            result
-        })
+        RestartCoordinator::run(self, bundle, runtime_guard)
     }
 
     fn restart_network(
