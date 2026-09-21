@@ -1,7 +1,7 @@
 use logos_abi::{
-    GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch,
-    GuiDrawCommand, GuiDrawKind, GuiMaterialSymbol, GuiNodeOperation, GuiRect, GuiSceneOp,
-    GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, MAX_GUI_BATCH_FRAGMENTS,
+    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT,
+    GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiMaterialSymbol, GuiNodeOperation, GuiRect,
+    GuiSceneOp, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
     MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, SurfaceHandle,
 };
 
@@ -78,9 +78,9 @@ impl GuiRenderBackend for SoftwareRenderBackend<'_, '_> {
 struct SurfaceSlot {
     handle: SurfaceHandle,
     bounds: GuiRect,
-    batches: [Option<GuiDrawBatch>; MAX_GUI_BATCH_FRAGMENTS],
-    batch_count: u8,
-    sequence: u32,
+    legacy_sequence: u32,
+    legacy_next_node_id: u32,
+    legacy_last_batch: Option<GuiDrawBatch>,
     z_order: i16,
     order: u32,
     terminal: bool,
@@ -96,9 +96,9 @@ impl SurfaceSlot {
     const EMPTY: Self = Self {
         handle: SurfaceHandle::EMPTY,
         bounds: GuiRect::EMPTY,
-        batches: [None; MAX_GUI_BATCH_FRAGMENTS],
-        batch_count: 0,
-        sequence: 0,
+        legacy_sequence: 0,
+        legacy_next_node_id: 1,
+        legacy_last_batch: None,
         z_order: 0,
         order: 0,
         terminal: false,
@@ -192,9 +192,9 @@ impl GuiSurfaceRegistry {
         *slot = SurfaceSlot {
             handle,
             bounds: request.bounds,
-            batches: [None; MAX_GUI_BATCH_FRAGMENTS],
-            batch_count: 0,
-            sequence: 0,
+            legacy_sequence: 0,
+            legacy_next_node_id: 1,
+            legacy_last_batch: None,
             z_order: if matches!(request.operation, GuiSurfaceOperation::CreateRoot) {
                 0
             } else {
@@ -221,39 +221,33 @@ impl GuiSurfaceRegistry {
             return Err(GuiRegistryError::Malformed);
         }
         let index = self.authorized_index(owner, batch.surface)?;
-        if self.slots[index].sequence == batch.sequence
-            && self.slots[index].batches[..self.slots[index].batch_count as usize]
-                .iter()
-                .flatten()
-                .any(|old| *old == batch)
-        {
+        if self.slots[index].legacy_sequence != batch.sequence {
+            let mut clear = GuiSceneOp::clear(batch.surface, batch.sequence);
+            clear.flags = if batch.command_count == 0 { batch.flags } else { GUI_DRAW_FLAG_MORE };
+            self.apply_scene_op(owner, clear)?;
+            self.slots[index].legacy_sequence = batch.sequence;
+            self.slots[index].legacy_next_node_id = 1;
+            self.slots[index].legacy_last_batch = None;
+        } else if self.slots[index].legacy_last_batch == Some(batch) {
             return Ok(());
         }
-        if self.slots[index].sequence != batch.sequence {
-            self.damage_legacy_nodes(index)?;
-            self.slots[index].batches = [None; MAX_GUI_BATCH_FRAGMENTS];
-            self.slots[index].batch_count = 0;
-            self.slots[index].sequence = batch.sequence;
+        if batch.command_count == 0 {
+            self.add_damage(batch.damage)?;
+            self.slots[index].legacy_last_batch = Some(batch);
+            return Ok(());
         }
-        if usize::from(self.slots[index].batch_count) == MAX_GUI_BATCH_FRAGMENTS {
-            return Err(GuiRegistryError::Backpressure);
+        for command in batch.commands[..usize::from(batch.command_count)].iter().copied() {
+            let node_id = self.slots[index].legacy_next_node_id;
+            let mut operation = GuiSceneOp::upsert(batch.surface, batch.sequence, node_id, command);
+            operation.flags = GUI_DRAW_FLAG_MORE;
+            self.apply_scene_op(owner, operation)?;
+            self.slots[index].legacy_next_node_id = node_id.saturating_add(1);
         }
-        let slot = &mut self.slots[index];
-        slot.batches[usize::from(slot.batch_count)] = Some(batch);
-        slot.batch_count += 1;
-        self.plan.valid = false;
+        if batch.flags & GUI_DRAW_FLAG_MORE == 0 {
+            self.apply_scene_op(owner, GuiSceneOp::commit(batch.surface, batch.sequence))?;
+        }
         self.add_damage(batch.damage)?;
-        Ok(())
-    }
-
-    fn damage_legacy_nodes(&mut self, index: usize) -> Result<(), GuiRegistryError> {
-        let batches = self.slots[index].batches;
-        let batch_count = self.slots[index].batch_count as usize;
-        for batch in batches[..batch_count].iter().flatten() {
-            for command in batch.commands[..batch.command_count as usize].iter().copied() {
-                self.add_damage(command_rect(command))?;
-            }
-        }
+        self.slots[index].legacy_last_batch = Some(batch);
         Ok(())
     }
 
@@ -382,20 +376,11 @@ impl GuiSurfaceRegistry {
         let mut selected = usize::MAX;
         for index in 0..MAX_GUI_SURFACES {
             let slot = self.slots[index];
-            let command = if slot.active_frame != 0 {
-                slot.active_nodes[..slot.active_node_count as usize]
-                    .iter()
-                    .flatten()
-                    .map(|node| node.command)
-                    .find(|command| is_surface_background(*command, slot.bounds, root_bounds))
-            } else {
-                slot.batches[..slot.batch_count as usize]
-                    .iter()
-                    .flatten()
-                    .filter_map(|batch| batch.commands[..batch.command_count as usize].first())
-                    .copied()
-                    .find(|command| is_surface_background(*command, slot.bounds, root_bounds))
-            };
+            let command = slot.active_nodes[..slot.active_node_count as usize]
+                .iter()
+                .flatten()
+                .map(|node| node.command)
+                .find(|command| is_surface_background(*command, slot.bounds, root_bounds));
             if command.is_some()
                 && (selected == usize::MAX
                     || (slot.z_order, slot.order)
@@ -408,23 +393,12 @@ impl GuiSurfaceRegistry {
             None
         } else {
             let slot = self.slots[selected];
-            if slot.active_frame != 0 {
-                slot.active_nodes[..slot.active_node_count as usize]
-                    .iter()
-                    .flatten()
-                    .map(|node| node.command)
-                    .find(|command| is_surface_background(*command, slot.bounds, root_bounds))
-                    .map(|command| command.color)
-            } else {
-                slot.batches.iter().flatten().find_map(|batch| {
-                    batch.commands[..batch.command_count as usize]
-                        .first()
-                        .filter(|command| {
-                            is_surface_background(**command, slot.bounds, root_bounds)
-                        })
-                        .map(|command| command.color)
-                })
-            }
+            slot.active_nodes[..slot.active_node_count as usize]
+                .iter()
+                .flatten()
+                .map(|node| node.command)
+                .find(|command| is_surface_background(*command, slot.bounds, root_bounds))
+                .map(|command| command.color)
         }
     }
 
@@ -584,21 +558,11 @@ impl GuiSurfaceRegistry {
 
         for index in order[..count].iter().copied() {
             let mut clip = self.slots[index].bounds;
-            if self.slots[index].active_frame != 0 {
-                let node_count = self.slots[index].active_node_count as usize;
-                let nodes = self.slots[index].active_nodes;
-                for node in nodes[..node_count].iter().flatten() {
-                    let command = node.command;
-                    self.append_plan_entry(command, &mut clip);
-                }
-            } else {
-                let batch_count = self.slots[index].batch_count as usize;
-                let batches = self.slots[index].batches;
-                for batch in batches[..batch_count].iter().flatten() {
-                    for command in batch.commands[..batch.command_count as usize].iter().copied() {
-                        self.append_plan_entry(command, &mut clip);
-                    }
-                }
+            let node_count = self.slots[index].active_node_count as usize;
+            let nodes = self.slots[index].active_nodes;
+            for node in nodes[..node_count].iter().flatten() {
+                let command = node.command;
+                self.append_plan_entry(command, &mut clip);
             }
         }
         let occluder_count = self.plan.occluder_count;
@@ -2779,16 +2743,16 @@ mod tests {
     }
 
     #[test]
-    fn same_sequence_batches_accumulate_with_a_bounded_fragment_limit() {
+    fn legacy_batches_accumulate_with_retained_node_limit() {
         let mut registry = GuiSurfaceRegistry::new();
         let root = registry
             .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 16, 16)))
             .unwrap()
             .surface;
         registry.take_damage();
-        for index in 0..MAX_GUI_BATCH_FRAGMENTS {
+        for index in 0..MAX_GUI_NODES {
             let mut batch = GuiDrawBatch::new(root, 4, GuiRect::new(index as i32, 0, 1, 1));
-            if index + 1 < MAX_GUI_BATCH_FRAGMENTS {
+            if index + 1 < MAX_GUI_NODES {
                 batch.flags = logos_abi::GUI_DRAW_FLAG_MORE;
             }
             assert!(
@@ -2799,7 +2763,8 @@ mod tests {
             );
             registry.update(7, batch).unwrap();
         }
-        let overflow = GuiDrawBatch::new(root, 4, GuiRect::new(8, 0, 1, 1));
+        let mut overflow = GuiDrawBatch::new(root, 4, GuiRect::new(0, 1, 1, 1));
+        assert!(overflow.push(GuiDrawCommand::fill_rect(GuiRect::new(0, 1, 1, 1), 0xffffff,)));
         assert_eq!(registry.update(7, overflow), Err(GuiRegistryError::Backpressure));
     }
 
