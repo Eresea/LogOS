@@ -212,25 +212,15 @@ pub(crate) enum ServiceFaultOutcome {
 
 pub struct ServiceRuntime {
     frame_pool: FramePool,
-    images: Vec<Box<LoadedImage>>,
-    tables: Vec<Option<Box<PageTableBuilder>>>,
-    table_ready: Vec<bool>,
+    executions: Vec<ServiceExecution>,
     processes: crate::process::ProcessTable,
-    launches: Vec<Option<(ProcessHandle, UserLaunch)>>,
     launch_ready: bool,
     dynamic_ipc: Option<RuntimeIpcRegistry>,
     dynamic_services: Option<crate::runtime_services::RuntimeServiceRegistry>,
     service_handles: Vec<logos_abi::ServiceHandle>,
     dynamic_events: Option<crate::runtime_events::RuntimeEventRegistry>,
-    ipc_staging_frames: Vec<Option<FrameAddress>>,
-    service_bootstrap_frames: Vec<u64>,
-    bootstrap_control: Vec<logos_abi::CapabilityHandle>,
-    bootstrap_directory: Vec<logos_abi::CapabilityHandle>,
-    bootstrap_heap: Vec<logos_abi::CapabilityHandle>,
     keyboard_event: logos_abi::EventHandle,
     pointer_event: logos_abi::EventHandle,
-    service_heaps: Vec<ServiceHeapState>,
-    service_stacks: Vec<ServiceStackState>,
     user_kdf_workspace: [u64; logos_abi::USER_KDF_WORKSPACE_PAGES],
     storage_data_frames: [Option<FrameAddress>; logos_abi::STORAGE_DATA_PAGES],
     network_config: logos_abi::NetworkConfig,
@@ -240,7 +230,6 @@ pub struct ServiceRuntime {
     framebuffer_present_frame: Option<FrameAddress>,
     keyboard_frame: Option<FrameAddress>,
     pointer_frame: Option<FrameAddress>,
-    tasks: Vec<Option<crate::TaskHandle>>,
     supervisor: LiveSupervisor,
     manager: ProgramManager,
     pending_restart: Option<Vec<ServiceHandle>>,
@@ -265,7 +254,6 @@ pub struct ServiceRuntime {
     pending_program_start: Option<(usize, logos_abi::ServiceManagerRecord)>,
     network_packet_response: Option<logos_abi::NetworkPacketDescriptor>,
     network_packet_sequence: u32,
-    suppressed_heartbeats: Vec<AtomicBool>,
     frame_pool_ready: bool,
     #[cfg(feature = "storage-proof")]
     storage_proof: crate::storage_proof::StorageProofObserver,
@@ -281,6 +269,42 @@ struct PreparedServiceImage {
 struct ActivePackageImage {
     handle: ServiceHandle,
     plan: crate::process::ElfLoadPlan,
+}
+
+struct ServiceExecution {
+    image: LoadedImage,
+    table: Option<Box<PageTableBuilder>>,
+    table_ready: bool,
+    launch: Option<(ProcessHandle, UserLaunch)>,
+    ipc_staging_frame: Option<FrameAddress>,
+    bootstrap_frame: u64,
+    bootstrap_control: logos_abi::CapabilityHandle,
+    bootstrap_directory: logos_abi::CapabilityHandle,
+    bootstrap_heap: logos_abi::CapabilityHandle,
+    heap: ServiceHeapState,
+    stack: ServiceStackState,
+    task: Option<crate::TaskHandle>,
+    suppressed_heartbeat: AtomicBool,
+}
+
+impl ServiceExecution {
+    const fn empty() -> Self {
+        Self {
+            image: LoadedImage::empty(),
+            table: None,
+            table_ready: false,
+            launch: None,
+            ipc_staging_frame: None,
+            bootstrap_frame: 0,
+            bootstrap_control: logos_abi::CapabilityHandle::EMPTY,
+            bootstrap_directory: logos_abi::CapabilityHandle::EMPTY,
+            bootstrap_heap: logos_abi::CapabilityHandle::EMPTY,
+            heap: ServiceHeapState::empty(),
+            stack: ServiceStackState::empty(),
+            task: None,
+            suppressed_heartbeat: AtomicBool::new(false),
+        }
+    }
 }
 
 struct ProgramRuntime {
@@ -542,25 +566,15 @@ impl ServiceRuntime {
     pub const fn new() -> Self {
         Self {
             frame_pool: FramePool::empty(),
-            images: Vec::new(),
-            tables: Vec::new(),
-            table_ready: Vec::new(),
+            executions: Vec::new(),
             processes: crate::process::ProcessTable::new(),
-            launches: Vec::new(),
             launch_ready: false,
             dynamic_ipc: None,
             dynamic_services: None,
             service_handles: Vec::new(),
             dynamic_events: None,
-            ipc_staging_frames: Vec::new(),
-            service_bootstrap_frames: Vec::new(),
-            bootstrap_control: Vec::new(),
-            bootstrap_directory: Vec::new(),
-            bootstrap_heap: Vec::new(),
             keyboard_event: logos_abi::EventHandle::EMPTY,
             pointer_event: logos_abi::EventHandle::EMPTY,
-            service_heaps: Vec::new(),
-            service_stacks: Vec::new(),
             user_kdf_workspace: [0; logos_abi::USER_KDF_WORKSPACE_PAGES],
             storage_data_frames: [None; logos_abi::STORAGE_DATA_PAGES],
             network_config: logos_abi::NetworkConfig::disabled(),
@@ -570,7 +584,6 @@ impl ServiceRuntime {
             framebuffer_present_frame: None,
             keyboard_frame: None,
             pointer_frame: None,
-            tasks: Vec::new(),
             supervisor: LiveSupervisor::new(),
             manager: ProgramManager::new(),
             pending_restart: None,
@@ -593,7 +606,6 @@ impl ServiceRuntime {
             pending_program_start: None,
             network_packet_response: None,
             network_packet_sequence: 1,
-            suppressed_heartbeats: Vec::new(),
             frame_pool_ready: false,
             #[cfg(feature = "storage-proof")]
             storage_proof: crate::storage_proof::StorageProofObserver::new(),
@@ -664,7 +676,7 @@ impl ServiceRuntime {
             .ok_or(logos_abi::ManagerStatus::Stale)?
             .bind_runtime_slot(handle, slot)
             .map_err(|_| logos_abi::ManagerStatus::Capacity)?;
-        self.service_heaps[slot].quota_pages = quota;
+        self.executions[slot].heap.quota_pages = quota;
         Ok(slot)
     }
 
@@ -684,64 +696,18 @@ impl ServiceRuntime {
         if index != self.service_handles.len() {
             return Err(ServiceRuntimeError::Resources);
         }
-        let add_resources = self.images.len() == self.service_handles.len();
-        let resources_consistent = self.tables.len() == self.images.len()
-            && self.table_ready.len() == self.images.len()
-            && self.launches.len() == self.images.len()
-            && self.ipc_staging_frames.len() == self.images.len()
-            && self.service_bootstrap_frames.len() == self.images.len()
-            && self.bootstrap_control.len() == self.images.len()
-            && self.bootstrap_directory.len() == self.images.len()
-            && self.bootstrap_heap.len() == self.images.len()
-            && self.service_heaps.len() == self.images.len()
-            && self.service_stacks.len() == self.images.len()
-            && self.tasks.len() == self.images.len()
-            && self.prepared_packages.len() == self.images.len()
-            && self.active_packages.len() == self.images.len()
-            && self.suppressed_heartbeats.len() == self.images.len();
-        if !resources_consistent {
+        let add_resources = self.executions.len() == self.service_handles.len();
+        if self.executions.len() != self.service_handles.len() {
             return Err(ServiceRuntimeError::Resources);
         }
         self.service_handles.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
         if add_resources {
-            self.images.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.tables.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.table_ready.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.launches.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.ipc_staging_frames.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.service_bootstrap_frames
-                .try_reserve(1)
-                .map_err(|_| ServiceRuntimeError::Resources)?;
-            self.bootstrap_control.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.bootstrap_directory.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.bootstrap_heap.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.service_heaps.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.service_stacks.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.tasks.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.prepared_packages.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.active_packages.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.suppressed_heartbeats
-                .try_reserve(1)
-                .map_err(|_| ServiceRuntimeError::Resources)?;
+            self.executions.try_reserve(1).map_err(|_| ServiceRuntimeError::Resources)?;
         }
 
         self.service_handles.push(handle);
         if add_resources {
-            self.images.push(Box::new(LoadedImage::empty()));
-            self.tables.push(None);
-            self.table_ready.push(false);
-            self.launches.push(None);
-            self.ipc_staging_frames.push(None);
-            self.service_bootstrap_frames.push(0);
-            self.bootstrap_control.push(logos_abi::CapabilityHandle::EMPTY);
-            self.bootstrap_directory.push(logos_abi::CapabilityHandle::EMPTY);
-            self.bootstrap_heap.push(logos_abi::CapabilityHandle::EMPTY);
-            self.service_heaps.push(ServiceHeapState::empty());
-            self.service_stacks.push(ServiceStackState::empty());
-            self.tasks.push(None);
-            self.prepared_packages.push(None);
-            self.active_packages.push(None);
-            self.suppressed_heartbeats.push(AtomicBool::new(false));
+            self.executions.push(ServiceExecution::empty());
         }
         Ok(index)
     }
@@ -761,7 +727,7 @@ impl ServiceRuntime {
                         spec.name(),
                         b"package",
                         &[],
-                        self.service_heaps[index].quota_pages,
+                        self.executions[index].heap.quota_pages,
                     )
                     .map_err(|_| ServiceRuntimeError::Resources)?
             } else {
@@ -770,7 +736,7 @@ impl ServiceRuntime {
                         spec.name(),
                         b"builtin",
                         &[],
-                        self.service_heaps[index].quota_pages,
+                        self.executions[index].heap.quota_pages,
                     )
                     .map_err(|_| ServiceRuntimeError::Resources)?
             };
@@ -1083,27 +1049,13 @@ impl ServiceRuntime {
     ) -> Result<(), ServiceRuntimeError> {
         // Dynamic runtime storage must be allocated only after Core owns a
         // live heap; before this point the global allocator has no backend.
-        self.images.resize_with(SERVICE_COUNT, || Box::new(LoadedImage::empty()));
-        self.tables.resize_with(SERVICE_COUNT, || None);
-        self.table_ready.resize(SERVICE_COUNT, false);
-        self.launches.resize(SERVICE_COUNT, None);
+        self.executions.resize_with(SERVICE_COUNT, ServiceExecution::empty);
+        self.service_handles.resize(SERVICE_COUNT, logos_abi::ServiceHandle::EMPTY);
         self.prepared_packages.resize_with(SERVICE_COUNT, || None);
         self.active_packages.resize(SERVICE_COUNT, None);
-        self.service_heaps.resize_with(SERVICE_COUNT, ServiceHeapState::empty);
-        self.service_stacks.resize_with(SERVICE_COUNT, ServiceStackState::empty);
-        self.tasks.resize(SERVICE_COUNT, None);
-        while self.suppressed_heartbeats.len() < SERVICE_COUNT {
-            self.suppressed_heartbeats.push(AtomicBool::new(false));
-        }
-        self.ipc_staging_frames.resize(SERVICE_COUNT, None);
-        self.service_bootstrap_frames.resize(SERVICE_COUNT, 0);
-        self.bootstrap_control.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
-        self.bootstrap_directory.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
-        self.bootstrap_heap.resize(SERVICE_COUNT, logos_abi::CapabilityHandle::EMPTY);
-        self.service_handles.resize(SERVICE_COUNT, logos_abi::ServiceHandle::EMPTY);
 
         for spec in SERVICE_IMAGES {
-            self.service_heaps[spec.service().index()].quota_pages =
+            self.executions[spec.service().index()].heap.quota_pages =
                 logos_abi::SERVICE_HEAP_MAX_PAGES;
         }
         self.initialize_dynamic_services()?;
@@ -1249,10 +1201,11 @@ impl ServiceRuntime {
                         return Err(ServiceRuntimeError::Process(error));
                     }
                 };
-            self.launches[index] = Some((process, launch));
-            self.images[index] = loaded;
-            self.tables[index] = Some(Box::new(tables));
-            self.table_ready[index] = true;
+            let execution = &mut self.executions[index];
+            execution.launch = Some((process, launch));
+            execution.image = *loaded;
+            execution.table = Some(Box::new(tables));
+            execution.table_ready = true;
         }
         self.initialize_dynamic_ipc()?;
         let mut memory = IdentityPageTableMemory;
@@ -1263,7 +1216,7 @@ impl ServiceRuntime {
                 return Err(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle));
             };
             let staging = self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
-            self.ipc_staging_frames[index] = Some(staging);
+            self.executions[index].ipc_staging_frame = Some(staging);
             memory.clear(staging).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
             self.map_ipc_private_page(
                 process,
@@ -1346,7 +1299,7 @@ impl ServiceRuntime {
 
     pub fn image(&self, service: ServiceId) -> Option<&LoadedImage> {
         let index = service.index();
-        if self.table_ready[index] { Some(&self.images[index]) } else { None }
+        if self.executions[index].table_ready { Some(&self.executions[index].image) } else { None }
     }
 
     #[cfg(feature = "package-proof")]
@@ -1366,14 +1319,14 @@ impl ServiceRuntime {
             else {
                 return false;
             };
-            let runtime_frames = self.service_heaps[service.index()].frames.len()
-                + self.service_stacks[service.index()].frames.len()
-                + usize::from(self.service_bootstrap_frames[service.index()] != 0)
+            let execution = &self.executions[service.index()];
+            let runtime_frames = execution.heap.frames.len()
+                + execution.stack.frames.len()
+                + usize::from(execution.bootstrap_frame != 0)
                 + if service == ServiceId::User { logos_abi::USER_KDF_WORKSPACE_PAGES } else { 0 };
             let image_frames = match source {
                 ServiceImageSource::FilesystemPackage => {
-                    image.page_count()
-                        + self.tables[service.index()].as_ref().unwrap().table_count()
+                    image.page_count() + execution.table.as_ref().unwrap().table_count()
                 }
                 ServiceImageSource::Builtin => 0,
             };
@@ -1385,16 +1338,16 @@ impl ServiceRuntime {
 
     pub fn root(&self, service: ServiceId) -> Option<usize> {
         let index = service.index();
-        if !self.table_ready[index] {
+        if !self.executions[index].table_ready {
             return None;
         }
         // SAFETY: `table_ready` is set only after the corresponding builder is
         // initialized and remains true for the runtime lifetime.
-        Some(self.tables[index].as_ref().unwrap().root().raw() as usize)
+        Some(self.executions[index].table.as_ref().unwrap().root().raw() as usize)
     }
 
     pub fn launch(&self, service: ServiceId) -> Option<(ProcessHandle, UserLaunch)> {
-        self.launches[service.index()]
+        self.executions[service.index()].launch
     }
 
     pub fn all_launch_ready(&self) -> bool {
@@ -1439,7 +1392,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::FramebufferProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.tables[index].as_mut().unwrap();
+        let tables = self.executions[index].table.as_mut().unwrap();
         for page in 0..pages {
             let offset = (page as u64)
                 .checked_mul(crate::boot_resources::PAGE_SIZE)
@@ -1475,7 +1428,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::KeyboardProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.tables[index].as_mut().unwrap();
+        let tables = self.executions[index].table.as_mut().unwrap();
         tables
             .map_raw_page(
                 logos_abi::INPUT_KEYBOARD_RING_BASE,
@@ -1502,7 +1455,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::PointerProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.tables[index].as_mut().unwrap();
+        let tables = self.executions[index].table.as_mut().unwrap();
         tables
             .map_raw_page(
                 logos_abi::INPUT_POINTER_RING_BASE,
@@ -1533,7 +1486,8 @@ impl ServiceRuntime {
             .service_slot_for_process(process)
             .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle))?;
         let mut memory = IdentityPageTableMemory;
-        self.tables[index]
+        self.executions[index]
+            .table
             .as_mut()
             .unwrap()
             .map_raw_page(virtual_address, frame, flags, &mut self.frame_pool, &mut memory)
@@ -1569,7 +1523,8 @@ impl ServiceRuntime {
             self.service_handles.get(index).copied().ok_or(ServiceRuntimeError::StaleGeneration)?;
         let owner =
             OwnerId::service_handle(service_handle).ok_or(ServiceRuntimeError::Resources)?;
-        if !self.service_heaps[index].frames.is_empty() || self.service_bootstrap_frames[index] != 0
+        if !self.executions[index].heap.frames.is_empty()
+            || self.executions[index].bootstrap_frame != 0
         {
             return Err(ServiceRuntimeError::Resources);
         }
@@ -1578,26 +1533,26 @@ impl ServiceRuntime {
             .dynamic_services
             .as_ref()
             .and_then(|registry| registry.heap_quota_pages(self.service_handles[index]).ok())
-            .unwrap_or(self.service_heaps[index].quota_pages);
+            .unwrap_or(self.executions[index].heap.quota_pages);
         if heap_quota_pages == 0 {
             return Err(ServiceRuntimeError::Resources);
         }
         let initial_heap_pages = logos_abi::SERVICE_HEAP_INITIAL_PAGES;
-        self.service_heaps[index].quota_pages = heap_quota_pages;
-        if self.service_heaps[index].frames.try_reserve_exact(initial_heap_pages).is_err() {
+        self.executions[index].heap.quota_pages = heap_quota_pages;
+        if self.executions[index].heap.frames.try_reserve_exact(initial_heap_pages).is_err() {
             return Err(ServiceRuntimeError::Resources);
         }
         let bootstrap =
             self.frame_pool.allocate_for(owner).map_err(|_| ServiceRuntimeError::Resources)?;
-        self.service_bootstrap_frames[index] = bootstrap.raw();
+        self.executions[index].bootstrap_frame = bootstrap.raw();
         memory.clear(bootstrap).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         let generation = service_handle.generation();
         let control = bootstrap_capability(index, 0, generation)?;
         let directory = bootstrap_capability(index, 1, generation)?;
         let heap = bootstrap_capability(index, 2, generation)?;
-        self.bootstrap_control[index] = control;
-        self.bootstrap_directory[index] = directory;
-        self.bootstrap_heap[index] = heap;
+        self.executions[index].bootstrap_control = control;
+        self.executions[index].bootstrap_directory = directory;
+        self.executions[index].bootstrap_heap = heap;
         let page = logos_abi::ServiceBootstrapPage {
             abi_version: logos_abi::RUNTIME_ABI_VERSION,
             flags: 0,
@@ -1636,14 +1591,15 @@ impl ServiceRuntime {
         for heap_page in 0..initial_heap_pages {
             let frame =
                 self.frame_pool.allocate_for(owner).map_err(|_| ServiceRuntimeError::Resources)?;
-            self.service_heaps[index].frames.push(frame);
+            self.executions[index].heap.frames.push(frame);
             memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
             let address = logos_abi::SERVICE_HEAP_BASE + heap_page * crate::loader::PAGE_SIZE;
             tables
                 .map_raw_page(address, frame, MappingFlags::DATA, &mut self.frame_pool, &mut memory)
                 .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         }
-        let heap_physical = self.service_heaps[index]
+        let heap_physical = self.executions[index]
+            .heap
             .frames
             .first()
             .map(|frame| frame.raw() as usize)
@@ -1682,7 +1638,7 @@ impl ServiceRuntime {
         {
             return logos_abi::IpcStatus::Stale;
         }
-        let expected = self.bootstrap_heap[service_slot];
+        let expected = self.executions[service_slot].bootstrap_heap;
         if !expected.is_valid() {
             return logos_abi::IpcStatus::Stale;
         }
@@ -1690,16 +1646,16 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Unauthorized;
         }
         let index = service_slot;
-        let page = self.service_heaps[index].frames.len();
+        let page = self.executions[index].heap.frames.len();
         let quota_pages = self
             .dynamic_services
             .as_ref()
             .and_then(|registry| registry.heap_quota_pages(service_handle).ok())
-            .unwrap_or(self.service_heaps[index].quota_pages);
+            .unwrap_or(self.executions[index].heap.quota_pages);
         if page >= quota_pages || pages > quota_pages - page {
             return logos_abi::IpcStatus::Full;
         }
-        if self.service_heaps[index].frames.try_reserve(pages).is_err() {
+        if self.executions[index].heap.frames.try_reserve(pages).is_err() {
             return logos_abi::IpcStatus::Full;
         }
         let mut frames = [None; MAX_HEAP_GROWTH_PAGES];
@@ -1711,8 +1667,11 @@ impl ServiceRuntime {
                     for rollback in 0..offset {
                         let address = logos_abi::SERVICE_HEAP_BASE
                             + (page + rollback) * crate::loader::PAGE_SIZE;
-                        let _ =
-                            self.tables[index].as_mut().unwrap().unmap_page(address, &mut memory);
+                        let _ = self.executions[index]
+                            .table
+                            .as_mut()
+                            .unwrap()
+                            .unmap_page(address, &mut memory);
                     }
                     for frame in frames[..offset].iter().flatten().copied() {
                         let _ = self.frame_pool.release(frame);
@@ -1724,7 +1683,11 @@ impl ServiceRuntime {
                 for rollback in 0..offset {
                     let address =
                         logos_abi::SERVICE_HEAP_BASE + (page + rollback) * crate::loader::PAGE_SIZE;
-                    let _ = self.tables[index].as_mut().unwrap().unmap_page(address, &mut memory);
+                    let _ = self.executions[index]
+                        .table
+                        .as_mut()
+                        .unwrap()
+                        .unmap_page(address, &mut memory);
                 }
                 let _ = self.frame_pool.release(frame);
                 for frame in frames[..offset].iter().flatten().copied() {
@@ -1733,7 +1696,8 @@ impl ServiceRuntime {
                 return logos_abi::IpcStatus::Full;
             }
             let address = logos_abi::SERVICE_HEAP_BASE + (page + offset) * crate::loader::PAGE_SIZE;
-            if self.tables[index]
+            if self.executions[index]
+                .table
                 .as_mut()
                 .unwrap()
                 .map_raw_page(address, frame, MappingFlags::DATA, &mut self.frame_pool, &mut memory)
@@ -1742,7 +1706,8 @@ impl ServiceRuntime {
                 for rollback in 0..offset {
                     let rollback_address =
                         logos_abi::SERVICE_HEAP_BASE + (page + rollback) * crate::loader::PAGE_SIZE;
-                    let _ = self.tables[index]
+                    let _ = self.executions[index]
+                        .table
                         .as_mut()
                         .unwrap()
                         .unmap_page(rollback_address, &mut memory);
@@ -1755,23 +1720,26 @@ impl ServiceRuntime {
             }
             *frame_slot = Some(frame);
         }
-        self.service_heaps[index].frames.extend(frames[..pages].iter().flatten().copied());
+        self.executions[index].heap.frames.extend(frames[..pages].iter().flatten().copied());
         if self
             .dynamic_services
             .as_mut()
             .and_then(|registry| {
-                registry.set_heap_pages(service_handle, self.service_heaps[index].frames.len()).ok()
+                registry
+                    .set_heap_pages(service_handle, self.executions[index].heap.frames.len())
+                    .ok()
             })
             .is_none()
         {
             for (offset, frame) in frames.iter().enumerate().take(pages) {
                 let address =
                     logos_abi::SERVICE_HEAP_BASE + (page + offset) * crate::loader::PAGE_SIZE;
-                let _ = self.tables[index]
+                let _ = self.executions[index]
+                    .table
                     .as_mut()
                     .unwrap()
                     .unmap_page(address, &mut IdentityPageTableMemory);
-                let _ = self.service_heaps[index].frames.pop();
+                let _ = self.executions[index].heap.frames.pop();
                 if let Some(frame) = *frame {
                     let _ = self.frame_pool.release(frame);
                 }
@@ -1804,7 +1772,7 @@ impl ServiceRuntime {
         {
             return logos_abi::IpcStatus::Stale;
         }
-        let expected = self.bootstrap_heap[service_slot];
+        let expected = self.executions[service_slot].bootstrap_heap;
         if !expected.is_valid() {
             return logos_abi::IpcStatus::Stale;
         }
@@ -1812,12 +1780,12 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Unauthorized;
         }
         let index = service_slot;
-        let page = self.service_heaps[index].frames.len();
+        let page = self.executions[index].heap.frames.len();
         if page <= logos_abi::SERVICE_HEAP_INITIAL_PAGES {
             return logos_abi::IpcStatus::Full;
         }
         let address = logos_abi::SERVICE_HEAP_BASE + (page - 1) * crate::loader::PAGE_SIZE;
-        let tables = self.tables[index].as_mut().unwrap();
+        let tables = self.executions[index].table.as_mut().unwrap();
         let mut memory = IdentityPageTableMemory;
         let frame = match tables.unmap_page(address, &mut memory) {
             Ok(frame) => frame,
@@ -1826,12 +1794,14 @@ impl ServiceRuntime {
         if self.frame_pool.release(frame).is_err() {
             crate::arch_fatal(b"LogOS vNext: service heap release");
         }
-        let _ = self.service_heaps[index].frames.pop();
+        let _ = self.executions[index].heap.frames.pop();
         if self
             .dynamic_services
             .as_mut()
             .and_then(|registry| {
-                registry.set_heap_pages(service_handle, self.service_heaps[index].frames.len()).ok()
+                registry
+                    .set_heap_pages(service_handle, self.executions[index].heap.frames.len())
+                    .ok()
             })
             .is_none()
         {
@@ -1847,7 +1817,7 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::FramebufferConfigProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.tables[index].as_mut().unwrap();
+        let tables = self.executions[index].table.as_mut().unwrap();
         tables
             .map_raw_page(
                 logos_abi::DISPLAY_CONFIG_BASE,
@@ -1876,7 +1846,7 @@ impl ServiceRuntime {
             ));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.tables[index].as_mut().unwrap();
+        let tables = self.executions[index].table.as_mut().unwrap();
         tables
             .map_raw_page(
                 logos_abi::DISPLAY_PRESENT_BASE,
@@ -1910,8 +1880,16 @@ impl ServiceRuntime {
             self.start_service_task(service)?;
         }
         #[cfg(feature = "qemu-proof")]
-        if self.tasks.get(ServiceId::Atrium.index()).and_then(Option::as_ref).is_some()
-            && self.tasks.get(ServiceId::LockScreen.index()).and_then(Option::as_ref).is_some()
+        if self
+            .executions
+            .get(ServiceId::Atrium.index())
+            .and_then(|slot| slot.task.as_ref())
+            .is_some()
+            && self
+                .executions
+                .get(ServiceId::LockScreen.index())
+                .and_then(|slot| slot.task.as_ref())
+                .is_some()
         {
             crate::arch_proof_line(b"LogOS vNext: Atrium and LockScreen tasks admitted");
         }
@@ -1938,7 +1916,7 @@ impl ServiceRuntime {
 
     fn start_service_task(&mut self, service: ServiceId) -> Result<(), ServiceRuntimeError> {
         let index = service.index();
-        if self.tasks[index].is_some() {
+        if self.executions[index].task.is_some() {
             return Ok(());
         }
         let handle = self.runtime_service_handle(service)?;
@@ -1956,7 +1934,7 @@ impl ServiceRuntime {
                     crate::SpawnError::UserLaunch => ServiceRuntimeError::TaskLaunch,
                 }
             })?;
-        self.tasks[index] = Some(task);
+        self.executions[index].task = Some(task);
         let now = crate::current_ticks();
         let _ = self.supervisor.register(handle, now);
         self.sync_dynamic_service_running(service);
@@ -1966,8 +1944,8 @@ impl ServiceRuntime {
     fn sync_dynamic_service_running(&mut self, service: ServiceId) {
         let Ok(handle) = self.runtime_service_handle(service) else { return };
         let Some((process, launch)) = self.launch(service) else { return };
-        let Some(task) = self.tasks[service.index()] else { return };
-        let heap_pages = self.service_heaps[service.index()].frames.len();
+        let Some(task) = self.executions[service.index()].task else { return };
+        let heap_pages = self.executions[service.index()].heap.frames.len();
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.start(handle);
             let _ = registry.set_runtime_ownership(
@@ -2064,10 +2042,11 @@ impl ServiceRuntime {
         };
         let plan = spec.validate_image(image).map_err(|_| ServiceRuntimeError::Image)?;
         let mut memory = IdentityPageTableMemory;
-        self.images[service.index()]
+        self.executions[service.index()]
+            .image
             .populate(plan, image, &mut memory)
             .map_err(ServiceRuntimeError::Populate)?;
-        if let Some(frame) = self.ipc_staging_frames[service.index()] {
+        if let Some(frame) = self.executions[service.index()].ipc_staging_frame {
             memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         }
         if service == ServiceId::Storage {
@@ -2178,26 +2157,26 @@ impl ServiceRuntime {
     }
 
     fn release_service_heap_slot(&mut self, index: usize) -> Result<(), ServiceRuntimeError> {
-        while let Some(frame) = self.service_stacks[index].frames.pop() {
+        while let Some(frame) = self.executions[index].stack.frames.pop() {
             if self.frame_pool.release(frame).is_err() {
-                self.service_stacks[index].frames.push(frame);
+                self.executions[index].stack.frames.push(frame);
                 return Err(ServiceRuntimeError::Resources);
             }
         }
-        while let Some(frame) = self.service_heaps[index].frames.pop() {
+        while let Some(frame) = self.executions[index].heap.frames.pop() {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
         }
-        if let Some(frame) = self.ipc_staging_frames[index].take() {
+        if let Some(frame) = self.executions[index].ipc_staging_frame.take() {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
         }
-        if self.service_bootstrap_frames[index] != 0 {
-            let frame = FrameAddress::from_raw(self.service_bootstrap_frames[index]);
-            self.service_bootstrap_frames[index] = 0;
+        if self.executions[index].bootstrap_frame != 0 {
+            let frame = FrameAddress::from_raw(self.executions[index].bootstrap_frame);
+            self.executions[index].bootstrap_frame = 0;
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
         }
-        self.bootstrap_control[index] = logos_abi::CapabilityHandle::EMPTY;
-        self.bootstrap_directory[index] = logos_abi::CapabilityHandle::EMPTY;
-        self.bootstrap_heap[index] = logos_abi::CapabilityHandle::EMPTY;
+        self.executions[index].bootstrap_control = logos_abi::CapabilityHandle::EMPTY;
+        self.executions[index].bootstrap_directory = logos_abi::CapabilityHandle::EMPTY;
+        self.executions[index].bootstrap_heap = logos_abi::CapabilityHandle::EMPTY;
         Ok(())
     }
 
@@ -2350,12 +2329,13 @@ impl ServiceRuntime {
                 });
             }
         };
-        *self.images[index] = loaded;
-        self.tables[index] = Some(Box::new(tables));
-        self.table_ready[index] = true;
-        self.launches[index] = Some((process, launch));
-        self.ipc_staging_frames[index] = Some(staging);
-        self.tasks[index] = Some(task);
+        self.executions[index].image = loaded;
+        self.executions[index].table = Some(Box::new(tables));
+        self.executions[index].table_ready = true;
+        self.executions[index].launch = Some((process, launch));
+        self.executions[index].ipc_staging_frame = Some(staging);
+        self.executions[index].task = Some(task);
+        let heap_pages = self.executions[index].heap.frames.len();
         let now = crate::current_ticks();
         let _ = self.supervisor.register(handle, now);
         if let Some(registry) = self.dynamic_services.as_mut() {
@@ -2365,7 +2345,7 @@ impl ServiceRuntime {
                 process.raw(),
                 launch.address_space_root().raw() as u64,
                 task.raw(),
-                self.service_heaps[index].frames.len(),
+                heap_pages,
             );
             let _ = registry.set_heartbeat(handle, now);
         }
@@ -2382,7 +2362,7 @@ impl ServiceRuntime {
             .as_ref()
             .and_then(|registry| registry.runtime_slot(handle).ok().flatten())
             .ok_or(ServiceRuntimeError::StaleGeneration)?;
-        if ServiceId::from_index(index).is_some() || self.tasks[index].is_some() {
+        if ServiceId::from_index(index).is_some() || self.executions[index].task.is_some() {
             return Err(ServiceRuntimeError::Resources);
         }
         let name = self
@@ -2520,7 +2500,8 @@ impl ServiceRuntime {
             .core_capability(package_endpoint, logos_abi::IpcRights::Send)
             .map_err(|_| ProcessError::ReadFailure)?;
         if request_capability.is_valid() {
-            let Some(staging_frame) = self.ipc_staging_frames[ServiceId::Storage.index()] else {
+            let Some(staging_frame) = self.executions[ServiceId::Storage.index()].ipc_staging_frame
+            else {
                 self.set_package_request_slot(None);
                 return Err(ProcessError::ReadFailure);
             };
@@ -2728,12 +2709,15 @@ impl ServiceRuntime {
             if self.prepared_packages[index].is_some() {
                 continue;
             }
-            if !self.table_ready[index] {
+            if !self.executions[index].table_ready {
                 return Err(ServiceRuntimeError::Image);
             }
-            let image = core::mem::replace(&mut self.images[index], Box::new(LoadedImage::empty()));
-            self.prepared_packages[index] =
-                Some(PreparedServiceImage { handle: active.handle, plan: active.plan, image });
+            let image = core::mem::replace(&mut self.executions[index].image, LoadedImage::empty());
+            self.prepared_packages[index] = Some(PreparedServiceImage {
+                handle: active.handle,
+                plan: active.plan,
+                image: Box::new(image),
+            });
         }
         Ok(())
     }
@@ -2743,14 +2727,14 @@ impl ServiceRuntime {
     }
 
     fn request_stop_task_slot(&mut self, index: usize) -> Result<bool, ServiceRuntimeError> {
-        let Some(task) = self.tasks[index] else {
+        let Some(task) = self.executions[index].task else {
             return Err(ServiceRuntimeError::TaskStop);
         };
         if crate::SCHEDULER.request_stop(task) {
             return Ok(true);
         }
         if crate::SCHEDULER.state(task).is_none() {
-            self.tasks[index] = None;
+            self.executions[index].task = None;
             if let Some(handle) = self.service_handles.get(index).copied() {
                 self.supervisor.unregister(handle);
             }
@@ -2777,11 +2761,7 @@ impl ServiceRuntime {
         else {
             return false;
         };
-        if !self
-            .suppressed_heartbeats
-            .get(service_slot)
-            .is_some_and(|suppressed| suppressed.load(Ordering::Acquire))
-        {
+        if !self.executions[service_slot].suppressed_heartbeat.load(Ordering::Acquire) {
             if let Some(registry) = self.dynamic_services.as_mut() {
                 let _ = registry.set_heartbeat(owner, now);
             }
@@ -2806,7 +2786,7 @@ impl ServiceRuntime {
 
     #[cfg(feature = "qemu-proof")]
     pub(crate) fn suppress_heartbeat(&self, service: ServiceId) {
-        self.suppressed_heartbeats[service.index()].store(true, Ordering::Release);
+        self.executions[service.index()].suppressed_heartbeat.store(true, Ordering::Release);
     }
 
     fn dynamic_device_request(
@@ -2815,7 +2795,7 @@ impl ServiceRuntime {
         caller: logos_abi::ServiceHandle,
         capability: logos_abi::CapabilityHandle,
     ) -> crate::service_ipc::IpcOutcome {
-        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+        let Some(staging_frame) = self.executions[service.index()].ipc_staging_frame else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Unauthorized,
                 notified: false,
@@ -2931,7 +2911,7 @@ impl ServiceRuntime {
         endpoint: logos_abi::EndpointHandle,
         message_bytes: usize,
     ) -> logos_abi::IpcStatus {
-        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+        let Some(staging_frame) = self.executions[service.index()].ipc_staging_frame else {
             return logos_abi::IpcStatus::Unauthorized;
         };
         let request = unsafe {
@@ -2961,7 +2941,7 @@ impl ServiceRuntime {
         endpoint: logos_abi::EndpointHandle,
         message_bytes: usize,
     ) -> logos_abi::IpcStatus {
-        let Some(staging_frame) = self.ipc_staging_frames[service.index()] else {
+        let Some(staging_frame) = self.executions[service.index()].ipc_staging_frame else {
             return logos_abi::IpcStatus::Unauthorized;
         };
         let core = match dynamic_core_handle((self.service_epoch as u32).max(1)) {
@@ -4209,7 +4189,8 @@ impl ServiceRuntime {
         if length != core::mem::size_of::<logos_abi::DirectoryRequest>() {
             return logos_abi::DirectoryStatus::Malformed;
         }
-        let Some(staging_frame) = self.ipc_staging_frames.get(service_slot).copied().flatten()
+        let Some(staging_frame) =
+            self.executions.get(service_slot).and_then(|slot| slot.ipc_staging_frame)
         else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
@@ -4236,7 +4217,9 @@ impl ServiceRuntime {
         let Some(directory) = logos_abi::CapabilityHandle::from_raw(capability_raw) else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
-        let Some(expected_directory) = self.bootstrap_directory.get(service_slot).copied() else {
+        let Some(expected_directory) =
+            self.executions.get(service_slot).map(|slot| slot.bootstrap_directory)
+        else {
             return logos_abi::DirectoryStatus::Stale;
         };
         if !expected_directory.is_valid() {
@@ -4304,7 +4287,8 @@ impl ServiceRuntime {
         {
             return logos_abi::IpcStatus::Stale;
         }
-        let Some(control) = self.bootstrap_control.get(service_slot).copied() else {
+        let Some(control) = self.executions.get(service_slot).map(|slot| slot.bootstrap_control)
+        else {
             return logos_abi::IpcStatus::Stale;
         };
         if !control.is_valid() {
@@ -4321,7 +4305,8 @@ impl ServiceRuntime {
             .as_ref()
             .and_then(|registry| registry.manager_rights(service_handle).ok())
             .unwrap_or(logos_abi::ManagerRights::NONE);
-        let Some(staging_frame) = self.ipc_staging_frames.get(service_slot).copied().flatten()
+        let Some(staging_frame) =
+            self.executions.get(service_slot).and_then(|slot| slot.ipc_staging_frame)
         else {
             return logos_abi::IpcStatus::Unauthorized;
         };
@@ -4733,7 +4718,8 @@ impl ServiceRuntime {
                 }
                 if self.pending_restart.is_some()
                     || services.iter().any(|service| {
-                        self.tasks[service.index()]
+                        self.executions[service.index()]
+                            .task
                             .is_none_or(|task| crate::SCHEDULER.state(task).is_none())
                     })
                 {
@@ -4850,7 +4836,8 @@ impl ServiceRuntime {
         if length != core::mem::size_of::<logos_abi::EventRequest>() {
             return logos_abi::EventStatus::Malformed;
         }
-        let Some(staging_frame) = self.ipc_staging_frames.get(service_slot).copied().flatten()
+        let Some(staging_frame) =
+            self.executions.get(service_slot).and_then(|slot| slot.ipc_staging_frame)
         else {
             return logos_abi::EventStatus::Unauthorized;
         };
@@ -4989,7 +4976,7 @@ impl ServiceRuntime {
     ) -> Result<(), logos_abi::EventStatus> {
         let events = self.dynamic_events.as_ref().ok_or(logos_abi::EventStatus::Stale)?;
         let _ = events.members(owner, set).map_err(event_status)?;
-        let Some(task) = self.tasks.get(service_slot).copied().flatten() else {
+        let Some(task) = self.executions.get(service_slot).and_then(|slot| slot.task) else {
             return Err(logos_abi::EventStatus::Stale);
         };
         let should_block = crate::arch::prepare_service_event_set_wait(task, set, deadline)
@@ -5016,7 +5003,7 @@ impl ServiceRuntime {
             else {
                 return;
             };
-            if self.tasks.get(service_slot).copied().flatten().is_none() {
+            if self.executions.get(service_slot).and_then(|slot| slot.task).is_none() {
                 return;
             }
             crate::arch::signal_event_set(set);
@@ -5029,7 +5016,7 @@ impl ServiceRuntime {
         request: logos_abi::ManagerRequest,
     ) -> Option<logos_abi::ManagerResponse> {
         let process = self.launch(ServiceId::Flow)?.0;
-        let frame = self.ipc_staging_frames[ServiceId::Flow.index()]?;
+        let frame = self.executions[ServiceId::Flow.index()].ipc_staging_frame?;
         unsafe {
             core::ptr::write_unaligned(
                 frame.raw() as usize as *mut logos_abi::ManagerRequest,
@@ -5038,7 +5025,7 @@ impl ServiceRuntime {
         }
         if self.manager_call(
             process,
-            self.bootstrap_control[ServiceId::Flow.index()].raw(),
+            self.executions[ServiceId::Flow.index()].bootstrap_control.raw(),
             core::mem::size_of::<logos_abi::ManagerRequest>(),
         ) != logos_abi::IpcStatus::Ok
         {
@@ -5232,12 +5219,11 @@ impl ServiceRuntime {
             Some(handle) if handle.is_valid() => handle,
             _ => return false,
         };
-        let capability =
-            self.bootstrap_heap.get(index).copied().unwrap_or(logos_abi::CapabilityHandle::EMPTY);
+        let capability = self.executions[index].bootstrap_heap;
         if !capability.is_valid() {
             return false;
         }
-        let current_pages = self.service_heaps[index].frames.len();
+        let current_pages = self.executions[index].heap.frames.len();
         let old_quota = match self
             .dynamic_services
             .as_ref()
@@ -5261,7 +5247,7 @@ impl ServiceRuntime {
             && self.grow_service_heap(process, capability.raw(), 1) == logos_abi::IpcStatus::Ok;
         let reclaimed = grown
             && self.shrink_service_heap(process, capability.raw(), 1) == logos_abi::IpcStatus::Ok
-            && self.service_heaps[index].frames.len() == current_pages;
+            && self.executions[index].heap.frames.len() == current_pages;
         if exhausted && reclaimed {
             crate::proof::allocator_quota_proven();
             true
@@ -5402,7 +5388,7 @@ impl ServiceRuntime {
         request: logos_abi::EventRequest,
     ) -> Option<(logos_abi::EventStatus, logos_abi::EventResponse)> {
         let slot = self.service_slot_for_process(process)?;
-        let frame = self.ipc_staging_frames.get(slot).copied().flatten()?;
+        let frame = self.executions.get(slot).and_then(|execution| execution.ipc_staging_frame)?;
         unsafe {
             core::ptr::write_unaligned(
                 frame.raw() as usize as *mut logos_abi::EventRequest,
@@ -5433,8 +5419,8 @@ impl ServiceRuntime {
     }
 
     fn service_slot_for_process(&self, process: ProcessHandle) -> Option<usize> {
-        self.launches.iter().enumerate().find_map(|(index, launch)| {
-            launch.is_some_and(|(current, _)| current == process).then_some(index)
+        self.executions.iter().enumerate().find_map(|(index, execution)| {
+            execution.launch.is_some_and(|(current, _)| current == process).then_some(index)
         })
     }
 
@@ -5457,7 +5443,9 @@ impl ServiceRuntime {
 
     fn staging_frame_for_process(&self, process: ProcessHandle) -> Option<FrameAddress> {
         self.service_slot_for_process(process)
-            .and_then(|index| self.ipc_staging_frames.get(index).copied().flatten())
+            .and_then(|index| {
+                self.executions.get(index).and_then(|execution| execution.ipc_staging_frame)
+            })
             .or_else(|| {
                 self.program_slot_for_process(process)
                     .and_then(|slot| self.programs[slot].ipc_staging)
@@ -5543,7 +5531,7 @@ impl ServiceRuntime {
         ) {
             return Ok(false);
         }
-        let extra_pages = self.service_stacks[index].frames.len();
+        let extra_pages = self.executions[index].stack.frames.len();
         let Some(next_page) = crate::loader::service_stack_growth_address(extra_pages) else {
             return Ok(false);
         };
@@ -5560,7 +5548,8 @@ impl ServiceRuntime {
             if missing_pages > max_missing {
                 return Ok(false);
             }
-            self.service_stacks[index]
+            self.executions[index]
+                .stack
                 .frames
                 .try_reserve(missing_pages)
                 .map_err(|_| ProcessError::Capacity)?;
@@ -5575,7 +5564,7 @@ impl ServiceRuntime {
                     let _ = self.frame_pool.release(frame);
                     return Err(ProcessError::AddressSpace);
                 }
-                let mapped = self.tables[index].as_mut().unwrap().map_raw_page(
+                let mapped = self.executions[index].table.as_mut().unwrap().map_raw_page(
                     address,
                     frame,
                     MappingFlags::DATA,
@@ -5586,7 +5575,7 @@ impl ServiceRuntime {
                     let _ = self.frame_pool.release(frame);
                     return Ok(false);
                 }
-                self.service_stacks[index].frames.push(frame);
+                self.executions[index].stack.frames.push(frame);
             }
             return Ok(true);
         }
@@ -5616,10 +5605,10 @@ impl ServiceRuntime {
         let index = self
             .service_slot_for_process(process)
             .ok_or(ServiceRuntimeError::Process(ProcessError::InvalidHandle))?;
-        if !self.table_ready[index] {
+        if !self.executions[index].table_ready {
             return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
         }
-        let tables = self.tables[index].as_mut().unwrap();
+        let tables = self.executions[index].table.as_mut().unwrap();
         let mut memory = IdentityPageTableMemory;
         for page in 0..mapping.pages() {
             let address = mapping
@@ -5667,10 +5656,10 @@ impl ServiceRuntime {
         if last_slot > logos_abi::STORAGE_CACHE_PAGES {
             return Err(PageTableError::InvalidFrame);
         }
-        if !self.table_ready[service.index()] {
+        if !self.executions[service.index()].table_ready {
             return Err(PageTableError::InvalidMapping);
         }
-        let tables = self.tables[service.index()].as_mut().unwrap();
+        let tables = self.executions[service.index()].table.as_mut().unwrap();
         let mut memory = IdentityPageTableMemory;
         for page in 0..request.pages as usize {
             let virtual_address = request.target_page as usize + page * crate::loader::PAGE_SIZE;
@@ -5842,6 +5831,58 @@ impl ServiceRuntime {
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<(), ServiceRuntimeError> {
         RestartCoordinator::run(self, bundle, runtime_guard)
+        let _restart_gate = ServiceRestartGate::acquire();
+        crate::arch::begin_service_runtime_transition();
+        self.ipc_generation = self.ipc_generation.wrapping_add(1).max(1);
+        self.service_epoch = self.service_epoch.wrapping_add(1).max(1);
+        self.network_config.service_epoch =
+            self.network_config.service_epoch.wrapping_add(1).max(1);
+        if !self.supervisor.prepare_restart() {
+            return Err(ServiceRuntimeError::RestartLimit);
+        }
+        self.stop_tasks(runtime_guard)?;
+        self.retain_active_package_images()?;
+        crate::arch::prepare_task_address_space(0);
+        crate::arch::restart_critical_section_held(|| {
+            crate::arch::disable_keyboard_irq();
+            crate::arch::disable_pointer_irq();
+            crate::arch::reset_events();
+            self.reclaim_resources()?;
+            #[cfg(feature = "qemu-proof")]
+            if self.dynamic_ipc.is_some()
+                || self.dynamic_services.is_some()
+                || self.dynamic_events.is_some()
+                || !self.service_handles.is_empty()
+                || !self.executions.is_empty()
+            {
+                return Err(ServiceRuntimeError::Resources);
+            }
+            #[cfg(feature = "qemu-proof")]
+            crate::proof::restart_resources_reclaimed();
+            self.start(bundle)?;
+            for execution in &self.executions {
+                execution.suppressed_heartbeat.store(false, Ordering::Release);
+            }
+            let old_service_epoch = self.service_epoch.wrapping_sub(1).max(1);
+            let stale_rejected = self.dynamic_ipc.is_some()
+                && self.dynamic_ipc.as_ref().is_some_and(|registry| {
+                    registry.all_endpoint_generations_differ(old_service_epoch as u32)
+                });
+            if !stale_rejected {
+                return Err(ServiceRuntimeError::StaleGeneration);
+            }
+            let result = self.start_tasks();
+            if result.is_ok() {
+                #[cfg(feature = "qemu-proof")]
+                crate::proof::network_restart_completed();
+                #[cfg(feature = "qemu-proof")]
+                crate::proof::manager_restart_completed();
+                crate::arch::enable_keyboard_irq();
+                crate::arch::enable_pointer_irq();
+                crate::arch::finish_service_runtime_transition();
+            }
+            result
+        })
     }
 
     fn restart_network(
@@ -5934,15 +5975,14 @@ impl ServiceRuntime {
             let Some(handle) = self.service_handles.get(index).copied() else {
                 continue;
             };
-            let Some(task) = self.tasks[index] else {
+            let Some(task) = self.executions[index].task else {
                 continue;
             };
             if crate::SCHEDULER.state(task) == Some(crate::TaskState::Completed) {
                 let process_state = self
-                    .launches
+                    .executions
                     .get(index)
-                    .copied()
-                    .flatten()
+                    .and_then(|execution| execution.launch)
                     .and_then(|(process, _)| self.processes.state(process))
                     .unwrap_or(crate::process::ProcessState::Faulted(0xff));
                 let process_failed =
@@ -5954,7 +5994,7 @@ impl ServiceRuntime {
                 if !crate::SCHEDULER.reclaim_completed(task) {
                     return Err(ServiceRuntimeError::TaskStop);
                 }
-                self.tasks[index] = None;
+                self.executions[index].task = None;
                 self.supervisor.unregister(handle);
                 if ServiceId::from_index(index).is_none()
                     && self.pending_dynamic_restart == Some(handle)
@@ -6006,7 +6046,7 @@ impl ServiceRuntime {
                     .map_err(|_| ServiceRuntimeError::StaleGeneration)?;
                 services.push(service);
             }
-            if services.iter().any(|service| self.tasks[service.index()].is_some()) {
+            if services.iter().any(|service| self.executions[service.index()].task.is_some()) {
                 self.pending_restart = Some(handles);
                 return Ok(false);
             }
@@ -6048,12 +6088,8 @@ impl ServiceRuntime {
         process_states.resize(self.service_handles.len(), None);
         for (index, handle) in self.service_handles.iter().copied().enumerate() {
             heartbeats[index] = self.dynamic_service_heartbeat_handle(handle);
-            process_states[index] = self.tasks.get(index).copied().flatten().and_then(|_| {
-                self.launches
-                    .get(index)
-                    .copied()
-                    .flatten()
-                    .and_then(|(process, _)| self.processes.state(process))
+            process_states[index] = self.executions.get(index).and_then(|execution| {
+                execution.launch.and_then(|(process, _)| self.processes.state(process))
             });
         }
         if let Some(failed) = self.supervisor.poll(now, &heartbeats, &process_states) {
@@ -6087,20 +6123,20 @@ impl ServiceRuntime {
         } else if let Some(events) = self.dynamic_events.as_mut() {
             events.destroy_service(handle);
         }
-        if let Some((process, _)) = self.launches[index].take() {
+        if let Some((process, _)) = self.executions[index].launch.take() {
             if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
                 let _ = self.processes.fault(process, 0xff);
             }
             self.processes.reclaim(process).map_err(ServiceRuntimeError::Process)?;
         }
-        if self.table_ready[index] {
+        if self.executions[index].table_ready {
             let mut memory = IdentityPageTableMemory;
-            if let Some(mut tables) = self.tables[index].take() {
+            if let Some(mut tables) = self.executions[index].table.take() {
                 tables.reclaim(&mut self.frame_pool, &mut memory);
             }
-            self.table_ready[index] = false;
+            self.executions[index].table_ready = false;
         }
-        self.images[index].reclaim(&mut self.frame_pool);
+        self.executions[index].image.reclaim(&mut self.frame_pool);
         self.release_service_heap_slot(index)?;
         if let Some(registry) = self.dynamic_services.as_mut() {
             let _ = registry.clear_execution_resources(handle);
@@ -6654,12 +6690,12 @@ impl ServiceRuntime {
         &mut self,
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<(), ServiceRuntimeError> {
-        for task in self.tasks.iter().flatten().copied() {
+        for task in self.executions.iter().filter_map(|execution| execution.task) {
             if !crate::SCHEDULER.request_stop(task) {
                 return Err(ServiceRuntimeError::TaskStop);
             }
         }
-        for task in self.tasks.iter().flatten().copied() {
+        for task in self.executions.iter().filter_map(|execution| execution.task) {
             let mut waited = 0;
             while crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed) {
                 if waited == 1024 {
@@ -6674,7 +6710,9 @@ impl ServiceRuntime {
                 return Err(ServiceRuntimeError::TaskStop);
             }
         }
-        self.tasks.fill(None);
+        for execution in &mut self.executions {
+            execution.task = None;
+        }
         for slot in 0..MAX_PROGRAMS {
             let Some(task) = self.programs[slot].task else { continue };
             if !crate::SCHEDULER.request_stop(task) {
@@ -6791,41 +6829,36 @@ impl ServiceRuntime {
             self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             self.framebuffer_present_frame = None;
         }
-        for frame in &mut self.ipc_staging_frames {
-            if let Some(frame) = frame.take() {
+        for execution in &mut self.executions {
+            if let Some(frame) = execution.ipc_staging_frame.take() {
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             }
         }
-        for index in 0..self.service_heaps.len() {
-            while let Some(frame) = self.service_stacks[index].frames.pop() {
+        for execution in &mut self.executions {
+            while let Some(frame) = execution.stack.frames.pop() {
                 if self.frame_pool.release(frame).is_err() {
-                    self.service_stacks[index].frames.push(frame);
+                    execution.stack.frames.push(frame);
                     return Err(ServiceRuntimeError::Resources);
                 }
             }
-            while let Some(frame) = self.service_heaps[index].frames.pop() {
+            while let Some(frame) = execution.heap.frames.pop() {
                 if self.frame_pool.release(frame).is_err() {
-                    self.service_heaps[index].frames.push(frame);
+                    execution.heap.frames.push(frame);
                     return Err(ServiceRuntimeError::Resources);
                 }
             }
-            self.service_heaps[index].frames = Vec::new();
-            self.service_heaps[index].quota_pages = 0;
-            if self.service_bootstrap_frames[index] != 0 {
-                let frame = FrameAddress::from_raw(self.service_bootstrap_frames[index]);
-                self.service_bootstrap_frames[index] = 0;
+            execution.heap.frames = Vec::new();
+            execution.heap.quota_pages = 0;
+            if execution.bootstrap_frame != 0 {
+                let frame = FrameAddress::from_raw(execution.bootstrap_frame);
+                execution.bootstrap_frame = 0;
                 self.frame_pool.release(frame).map_err(|_| ServiceRuntimeError::Resources)?;
             }
+            execution.bootstrap_control = logos_abi::CapabilityHandle::EMPTY;
+            execution.bootstrap_directory = logos_abi::CapabilityHandle::EMPTY;
+            execution.bootstrap_heap = logos_abi::CapabilityHandle::EMPTY;
+            execution.suppressed_heartbeat.store(false, Ordering::Release);
         }
-        self.ipc_staging_frames.clear();
-        self.service_bootstrap_frames.clear();
-        self.bootstrap_control.clear();
-        self.bootstrap_directory.clear();
-        self.bootstrap_heap.clear();
-        self.service_heaps.clear();
-        self.service_stacks.clear();
-        self.tasks.clear();
-        self.suppressed_heartbeats.clear();
         for frame in &mut self.user_kdf_workspace {
             if *frame != 0 {
                 let address = FrameAddress::from_raw(*frame);
@@ -6833,26 +6866,23 @@ impl ServiceRuntime {
                 self.frame_pool.release(address).map_err(|_| ServiceRuntimeError::Resources)?;
             }
         }
-        for index in 0..self.launches.len() {
-            if let Some((process, _)) = self.launches[index].take() {
+        for execution in &mut self.executions {
+            if let Some((process, _)) = execution.launch.take() {
                 if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
                     self.processes.fault(process, 0xff).map_err(ServiceRuntimeError::Process)?;
                 }
                 self.processes.reclaim(process).map_err(ServiceRuntimeError::Process)?;
             }
-            if self.table_ready[index] {
+            if execution.table_ready {
                 let mut memory = IdentityPageTableMemory;
-                if let Some(mut tables) = self.tables[index].take() {
+                if let Some(mut tables) = execution.table.take() {
                     tables.reclaim(&mut self.frame_pool, &mut memory);
                 }
-                self.table_ready[index] = false;
+                execution.table_ready = false;
             }
-            self.images[index].reclaim(&mut self.frame_pool);
+            execution.image.reclaim(&mut self.frame_pool);
         }
-        self.images.clear();
-        self.tables.clear();
-        self.table_ready.clear();
-        self.launches.clear();
+        self.executions.clear();
         for slot in 0..MAX_PROGRAMS {
             if let Some(process) = self.programs[slot].process.take() {
                 if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
