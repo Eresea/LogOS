@@ -7,10 +7,10 @@ extern crate std;
 
 use alloc::vec::Vec;
 use logos_abi::{
-    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, GuiDrawKind, GuiNodeOperation,
-    GuiRect, GuiSceneOp, MAX_COLUMNS, MAX_DISPLAY_PRESENT_RECTS, MAX_FRAMEBUFFER_BYTES,
-    MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind, RENDER_FLAG_MORE, RenderMessage,
-    SurfaceHandle,
+    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, FramebufferPresentState, GuiDrawKind,
+    GuiNodeOperation, GuiRect, GuiSceneOp, MAX_COLUMNS, MAX_DISPLAY_PRESENT_RECTS,
+    MAX_FRAMEBUFFER_BYTES, MAX_GUI_DAMAGE_RECTS, MAX_RENDER_CELLS, MAX_ROWS, MessageKind,
+    RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
 
 mod gui;
@@ -424,6 +424,98 @@ pub enum DisplayError {
     InvalidMessage,
     StaleGeneration,
     InvalidFramebuffer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameCoordinator {
+    accepted_revision: u32,
+    completed_revision: u32,
+    terminal_pending: bool,
+    terminal_complete: bool,
+    gui_requested: bool,
+    gui_in_progress: bool,
+}
+
+impl FrameCoordinator {
+    pub const fn new() -> Self {
+        Self {
+            accepted_revision: 0,
+            completed_revision: 0,
+            terminal_pending: false,
+            terminal_complete: false,
+            gui_requested: false,
+            gui_in_progress: false,
+        }
+    }
+
+    pub fn accept_terminal_fragment(&mut self, more: bool) {
+        self.accepted_revision = self.accepted_revision.wrapping_add(1).max(1);
+        self.terminal_pending = true;
+        self.terminal_complete = !more;
+    }
+
+    pub const fn terminal_ready(self) -> bool {
+        self.terminal_pending && self.terminal_complete
+    }
+
+    pub fn complete_terminal(&mut self) {
+        self.terminal_pending = false;
+        self.terminal_complete = false;
+    }
+
+    pub fn request_gui(&mut self) {
+        self.accepted_revision = self.accepted_revision.wrapping_add(1).max(1);
+        self.gui_requested = true;
+    }
+
+    pub const fn gui_requested(self) -> bool {
+        self.gui_requested
+    }
+
+    pub const fn gui_in_progress(self) -> bool {
+        self.gui_in_progress
+    }
+
+    pub fn complete_gui(&mut self, pending: bool) {
+        self.gui_in_progress = pending;
+        self.gui_requested = pending;
+    }
+
+    pub const fn busy(self) -> bool {
+        self.terminal_ready() || self.gui_requested || self.gui_in_progress
+    }
+
+    pub const fn accepted_revision(self) -> u32 {
+        self.accepted_revision
+    }
+
+    pub const fn completed_revision(self) -> u32 {
+        self.completed_revision
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    pub fn publish_present(
+        &mut self,
+        display: &mut Display,
+        present_state: &FramebufferPresentState,
+    ) -> bool {
+        if !display.presented() {
+            return false;
+        }
+        let (full, rects, count) = display.take_presented_damage();
+        present_state.publish(full, &rects[..count]);
+        self.completed_revision = self.accepted_revision;
+        true
+    }
+}
+
+impl Default for FrameCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub struct Display {
@@ -1426,6 +1518,43 @@ const _: () = assert!(core::mem::size_of::<Display>() <= logos_abi::MAX_SERVICE_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_coordinator_keeps_terminal_and_gui_progress_bounded() {
+        let mut coordinator = FrameCoordinator::new();
+        assert!(!coordinator.busy());
+
+        coordinator.accept_terminal_fragment(true);
+        assert!(!coordinator.terminal_ready());
+        assert!(!coordinator.busy());
+
+        coordinator.accept_terminal_fragment(false);
+        assert!(coordinator.terminal_ready());
+        coordinator.request_gui();
+        coordinator.complete_terminal();
+        coordinator.complete_gui(true);
+        assert!(coordinator.busy());
+
+        coordinator.complete_gui(false);
+        assert!(!coordinator.busy());
+        assert_eq!(coordinator.accepted_revision(), 3);
+    }
+
+    #[test]
+    fn frame_coordinator_publishes_completed_damage_once() {
+        let mut display = Display::new(1);
+        display.ensure_backbuffer(4 * 4 * 4).unwrap();
+        let mut framebuffer = [0; 4 * 4 * 4];
+        display.present_all(&mut framebuffer, 4, 4, 4 * 4);
+        let present_state = FramebufferPresentState::new();
+        let mut coordinator = FrameCoordinator::new();
+        coordinator.request_gui();
+
+        assert!(coordinator.publish_present(&mut display, &present_state));
+        assert_eq!(present_state.sequence(), 1);
+        assert_eq!(coordinator.completed_revision(), coordinator.accepted_revision());
+        assert!(!coordinator.publish_present(&mut display, &present_state));
+    }
 
     #[test]
     fn invalid_scalars_use_the_replacement_glyph() {
