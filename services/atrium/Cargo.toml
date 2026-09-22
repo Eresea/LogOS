@@ -9,6 +9,9 @@ license = "MIT"
 logos-abi = { path = "../../abi" }
 logos-ui = { path = "../../ui" }
 
+[dev-dependencies]
+logos-ui-graphics = { path = "../../ui-graphics" }
+
 [lib]
 name = "logos_atrium"
 path = "src/lib.rs"
