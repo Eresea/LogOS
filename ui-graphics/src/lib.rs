@@ -1028,6 +1028,7 @@ mod tests {
     }
 
     fn pixels(display: &mut Display) -> Vec<u8> {
+        display.gui_mut().invalidate_rect(TEST_BOUNDS);
         let mut framebuffer =
             std::vec![0; TEST_BOUNDS.width as usize * TEST_BOUNDS.height as usize * 4];
         while display.render_pending() {
