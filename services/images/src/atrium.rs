@@ -138,6 +138,12 @@ struct ProgramSurfaceCapabilities {
     draw: logos_abi::CapabilityHandle,
 }
 
+#[derive(Clone, Copy)]
+enum PendingSettingsRender {
+    Controls(SurfaceHandle),
+    SelectHover(SurfaceHandle),
+}
+
 static mut ATRIUM: logos_atrium::Atrium = logos_atrium::Atrium::new();
 static mut CALCULATOR: logos_atrium::Calculator = logos_atrium::Calculator::new();
 static mut COMMAND_MENU_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentTree::new();
@@ -1882,6 +1888,32 @@ fn render_settings_controls_surface(
     draw_settings_controls(display, surface, atrium, *sequence)
 }
 
+fn retry_settings_render(
+    display: logos_abi::CapabilityHandle,
+    atrium: &logos_atrium::Atrium,
+    sequence: &mut u32,
+    pending: PendingSettingsRender,
+) -> bool {
+    let reference = match pending {
+        PendingSettingsRender::Controls(reference)
+        | PendingSettingsRender::SelectHover(reference) => reference,
+    };
+    let Some(surface) = atrium.surface_by_reference(reference) else {
+        return false;
+    };
+    if surface.app != logos_atrium::AppId::Settings {
+        return false;
+    }
+    match pending {
+        PendingSettingsRender::Controls(_) => {
+            render_settings_controls_surface(display, surface, atrium, sequence)
+        }
+        PendingSettingsRender::SelectHover(_) => {
+            render_settings_select_hover(display, surface, atrium, sequence)
+        }
+    }
+}
+
 fn render(
     display: logos_abi::CapabilityHandle,
     atrium: &logos_atrium::Atrium,
@@ -2039,6 +2071,7 @@ pub extern "C" fn _start() -> ! {
     let mut pending_render: Option<RenderMessage> = None;
     let mut pending_draw: Option<GuiSceneOp> = None;
     let mut pending_app_render = false;
+    let mut pending_settings_render = None;
     let mut cursor_surface = SurfaceHandle::EMPTY;
     let mut pending_cursor_surface = queue_cursor_surface(display_control, &mut next_request);
     let mut cursor_x = (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16;
@@ -2062,6 +2095,11 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        if let Some(pending) = pending_settings_render {
+            if !retry_settings_render(display, atrium, &mut sequence, pending) {
+                pending_settings_render = None;
+            }
+        }
         if let Some(settings) = pending_input_settings {
             match common::ipc_send_handle(input_settings, &settings) {
                 IpcStatus::Ok => pending_input_settings = None,
@@ -2993,19 +3031,39 @@ pub extern "C" fn _start() -> ! {
                                         &mut sequence,
                                     )
                                 } else if fast_hover {
-                                    render_settings_select_hover(
-                                        display,
-                                        surface,
-                                        atrium,
-                                        &mut sequence,
-                                    )
+                                    if matches!(
+                                        pending_settings_render,
+                                        Some(PendingSettingsRender::Controls(_))
+                                    ) {
+                                        false
+                                    } else {
+                                        let retry = render_settings_select_hover(
+                                            display,
+                                            surface,
+                                            atrium,
+                                            &mut sequence,
+                                        );
+                                        if retry {
+                                            pending_settings_render =
+                                                Some(PendingSettingsRender::SelectHover(
+                                                    surface.reference,
+                                                ));
+                                        } else {
+                                            pending_settings_render = None;
+                                        }
+                                        false
+                                    }
                                 } else if settings_controls_changed {
-                                    render_settings_controls_surface(
+                                    let retry = render_settings_controls_surface(
                                         display,
                                         surface,
                                         atrium,
                                         &mut sequence,
-                                    )
+                                    );
+                                    pending_settings_render = retry.then_some(
+                                        PendingSettingsRender::Controls(surface.reference),
+                                    );
+                                    false
                                 } else {
                                     render_settings_surface(display, surface, atrium, &mut sequence)
                                 };

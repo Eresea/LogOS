@@ -443,6 +443,8 @@ pub struct Display {
     gui_background_pending: bool,
     gui_damage: [GuiRect; MAX_GUI_DAMAGE_RECTS],
     gui_damage_count: usize,
+    cursor_priority_damage: [GuiRect; MAX_GUI_DAMAGE_RECTS],
+    cursor_priority_damage_count: usize,
     gui_tile_index: usize,
     gui_tile_x: i32,
     gui_tile_y: i32,
@@ -475,6 +477,8 @@ impl Display {
             gui_background_pending: false,
             gui_damage: [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS],
             gui_damage_count: 0,
+            cursor_priority_damage: [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS],
+            cursor_priority_damage_count: 0,
             gui_tile_index: 0,
             gui_tile_x: 0,
             gui_tile_y: 0,
@@ -503,6 +507,18 @@ impl Display {
 
     fn clear_dirty(&mut self, index: usize) {
         self.dirty[index / 64] &= !(1u64 << (index % 64));
+    }
+
+    fn queue_cursor_priority_damage(&mut self, rect: GuiRect) {
+        if append_present_rect(
+            &mut self.cursor_priority_damage,
+            &mut self.cursor_priority_damage_count,
+            rect,
+        ) {
+            return;
+        }
+        self.cursor_priority_damage[0] = union_rect(self.cursor_priority_damage[0], rect);
+        self.cursor_priority_damage_count = 1;
     }
 
     fn set_all_dirty(&mut self, dirty: bool) {
@@ -590,6 +606,8 @@ impl Display {
             let new_bounds = Self::cursor_bounds(op.command.x, op.command.y);
             self.gui.invalidate_rect(old_bounds);
             self.gui.invalidate_rect(new_bounds);
+            self.queue_cursor_priority_damage(old_bounds);
+            self.queue_cursor_priority_damage(new_bounds);
         }
         self.cursor_layers[index].x = op.command.x;
         self.cursor_layers[index].y = op.command.y;
@@ -747,6 +765,8 @@ impl Display {
         self.gui_background_pending = false;
         self.gui_damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
         self.gui_damage_count = 0;
+        self.cursor_priority_damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        self.cursor_priority_damage_count = 0;
         self.gui_tile_index = 0;
         self.gui_tile_x = 0;
         self.gui_tile_y = 0;
@@ -1216,52 +1236,71 @@ impl Display {
         }
         let mut rendered = 0;
         let screen = GuiRect::new(0, 0, width as u32, height as u32);
-        if self.gui_damage_count == 1 && self.gui_damage[0] == screen {
-            let damage = self.gui_damage;
-            if !background_filled {
-                let pixel = pixel_bytes(self.surface_background, format);
-                let row_bytes = width * 4;
-                let backbuffer = self.backbuffer.as_mut().unwrap();
-                for row in 0..height {
-                    let start = row * stride;
-                    fill_row(&mut backbuffer[start..start + row_bytes], pixel);
+        if self.cursor_priority_damage_count != 0 {
+            let queued = self.cursor_priority_damage;
+            let queued_count = self.cursor_priority_damage_count;
+            self.cursor_priority_damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+            self.cursor_priority_damage_count = 0;
+
+            let mut priority = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+            let mut priority_count = 0;
+            for rect in queued[..queued_count].iter().copied() {
+                let rect = intersect(rect, screen);
+                if !rect.is_empty() {
+                    let _ = append_present_rect(&mut priority, &mut priority_count, rect);
                 }
             }
-            let backbuffer = self.backbuffer.as_mut().unwrap();
-            if let Some(surface) = self.gui.terminal_bounds() {
-                rendered += Self::render_terminal_surface(
-                    &self.cells,
-                    self.columns,
-                    self.rows,
-                    self.cursor_column,
-                    self.cursor_row,
-                    self.cursor_visible,
+            if priority_count != 0 {
+                let pixel = pixel_bytes(self.surface_background, format);
+                let backbuffer = self.backbuffer.as_mut().unwrap();
+                for rect in priority[..priority_count].iter().copied() {
+                    let row_bytes = rect.width as usize * 4;
+                    for row in rect.y as usize..rect.y as usize + rect.height as usize {
+                        let start = row * stride + rect.x as usize * 4;
+                        fill_row(&mut backbuffer[start..start + row_bytes], pixel);
+                    }
+                }
+                if let Some(surface) = self.gui.terminal_bounds() {
+                    rendered += Self::render_terminal_surface(
+                        &self.cells,
+                        self.columns,
+                        self.rows,
+                        self.cursor_column,
+                        self.cursor_row,
+                        self.cursor_visible,
+                        &mut self.glyph_cache,
+                        backbuffer,
+                        width,
+                        height,
+                        stride,
+                        format,
+                        surface,
+                        &priority,
+                        priority_count,
+                    );
+                }
+                rendered += self.gui.render(
                     &mut self.glyph_cache,
                     backbuffer,
                     width,
                     height,
                     stride,
                     format,
-                    surface,
-                    &damage,
-                    1,
+                    &priority,
+                    priority_count,
                 );
+                self.present_damage(
+                    framebuffer,
+                    width,
+                    height,
+                    stride,
+                    &priority[..priority_count],
+                );
+                for rect in priority[..priority_count].iter().copied() {
+                    self.render_cursor_layers(framebuffer, width, height, stride, format, rect);
+                }
+                return Ok(rendered);
             }
-            rendered += self.gui.render(
-                &mut self.glyph_cache,
-                backbuffer,
-                width,
-                height,
-                stride,
-                format,
-                &damage,
-                1,
-            );
-            self.present_all(framebuffer, width, height, stride);
-            self.render_cursor_layers(framebuffer, width, height, stride, format, screen);
-            self.gui_damage_count = 0;
-            self.gui_tile_index = 0;
-            return Ok(rendered);
         }
         let mut damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
         let mut damage_count = 0;
@@ -1397,7 +1436,10 @@ impl Display {
     }
 
     pub const fn render_pending(&self) -> bool {
-        self.gui_background_pending || self.gui_damage_count != 0 || self.gui.has_damage()
+        self.gui_background_pending
+            || self.cursor_priority_damage_count != 0
+            || self.gui_damage_count != 0
+            || self.gui.has_damage()
     }
 
     pub fn take_presented(&mut self) -> bool {
@@ -1612,7 +1654,7 @@ mod tests {
     }
 
     #[test]
-    fn gui_composition_finishes_full_screen_in_one_bounded_pass() {
+    fn gui_composition_yields_full_screen_work_before_completing() {
         let mut display = Display::new(1);
         let mut root =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
@@ -1627,7 +1669,7 @@ mod tests {
         display.gui_mut().update(11, batch).unwrap();
         let mut framebuffer = std::vec![0; 640 * 400 * 4];
         display.render_gui(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8).unwrap();
-        assert!(!display.render_pending());
+        assert!(display.render_pending());
         let mut replacement =
             logos_abi::GuiDrawBatch::new(handle, 2, logos_abi::GuiRect::new(24, 24, 16, 16));
         assert!(replacement.push(logos_abi::GuiDrawCommand::fill_rect(
@@ -1635,8 +1677,9 @@ mod tests {
             0xff0000,
         )));
         display.gui_mut().update(11, replacement).unwrap();
-        display.render_gui(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8).unwrap();
-        assert!(!display.render_pending());
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 640, 400, 640 * 4, PixelFormat::Bgr8).unwrap();
+        }
         let pixel = (24 * 640 + 24) * 4;
         assert_eq!(&framebuffer[pixel..pixel + 4], &[0, 0, 255, 0]);
     }
@@ -1898,6 +1941,60 @@ mod tests {
         assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0x30, 0x20, 0x10]);
         let latest_pixel = (8 * 64 + 56) * 4;
         assert_eq!(&framebuffer[latest_pixel..latest_pixel + 3], &[0xff, 0xff, 0xff]);
+    }
+
+    #[test]
+    fn cursor_damage_is_presented_while_full_screen_gui_work_is_pending() {
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = GuiRect::new(0, 0, 256, 256);
+        display.gui_mut().create(11, root).unwrap();
+
+        let mut lockscreen =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        lockscreen.bounds = root.bounds;
+        lockscreen.z_order = 1;
+        let lockscreen_handle = display.gui_mut().create(12, lockscreen).unwrap().surface;
+        let mut background = logos_abi::GuiDrawBatch::new(lockscreen_handle, 1, GuiRect::SURFACE);
+        assert!(background.push(logos_abi::GuiDrawCommand::fill_surface(0x102030)));
+        display.gui_mut().update(12, background).unwrap();
+
+        let mut cursor =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 3);
+        cursor.bounds = root.bounds;
+        cursor.z_order = 3;
+        let cursor_handle = display.gui_mut().create(12, cursor).unwrap().surface;
+        display.register_cursor_surface(12, cursor_handle);
+
+        let mut framebuffer = std::vec![0; 256 * 256 * 4];
+        let mut draw = logos_abi::GuiSceneOp::upsert(
+            cursor_handle,
+            1,
+            1,
+            logos_abi::GuiDrawCommand::fill_rect(GuiRect::new(8, 8, 3, 14), 0xffffff),
+        );
+        assert!(display.apply_cursor_scene_op(draw));
+        while display.render_pending() {
+            display.render_gui(&mut framebuffer, 256, 256, 256 * 4, PixelFormat::Bgr8).unwrap();
+        }
+        let old_pixel = (8 * 256 + 8) * 4;
+        assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0xff, 0xff, 0xff]);
+        let _ = display.take_presented_damage();
+
+        display.gui_mut().invalidate_rect(root.bounds);
+        display.render_gui(&mut framebuffer, 256, 256, 256 * 4, PixelFormat::Bgr8).unwrap();
+        assert!(display.render_pending());
+
+        draw.frame = 2;
+        draw.command.x = 200;
+        assert!(display.apply_cursor_scene_op(draw));
+        display.render_gui(&mut framebuffer, 256, 256, 256 * 4, PixelFormat::Bgr8).unwrap();
+
+        assert!(display.presented());
+        let new_pixel = (8 * 256 + 200) * 4;
+        assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0x30, 0x20, 0x10]);
+        assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0xff, 0xff, 0xff]);
     }
 
     #[test]
