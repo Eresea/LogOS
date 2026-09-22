@@ -917,6 +917,10 @@ impl Atrium {
         self.surfaces.iter().flatten().copied().find(|surface| surface.reference == reference)
     }
 
+    pub fn owns_surface(&self, reference: SurfaceHandle, client: ServiceHandle) -> bool {
+        self.surface_by_reference(reference).is_some_and(|surface| surface.client == client)
+    }
+
     pub fn surface_at(&self, x: i32, y: i32) -> Option<Surface> {
         self.surfaces
             .iter()
@@ -2794,6 +2798,22 @@ mod tests {
         assert_eq!(atrium.surface_for_client(client(2), AppId::Calculator), None);
         let stale = SurfaceHandle { generation: reference.generation + 1, ..reference };
         assert_eq!(atrium.surface_by_reference(stale), None);
+    }
+
+    #[test]
+    fn surface_ownership_requires_live_reference_and_matching_client() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
+        let reference = surface(2);
+        atrium.spawn_surface(request, reference).unwrap();
+
+        assert!(atrium.owns_surface(reference, client(1)));
+        assert!(!atrium.owns_surface(reference, client(2)));
+        assert!(!atrium.owns_surface(
+            SurfaceHandle { generation: reference.generation + 1, ..reference },
+            client(1)
+        ));
     }
 
     #[test]

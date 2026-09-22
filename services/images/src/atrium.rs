@@ -2205,12 +2205,12 @@ pub extern "C" fn _start() -> ! {
         }
         if let Some(batch) = pending_draw {
             let live = atrium.surface_by_reference(batch.surface).is_some_and(|surface| {
-                (surface.app == logos_atrium::AppId::System && surface.client == system_client)
-                    || program_surface_capabilities
-                        .iter()
-                        .flatten()
-                        .any(|caps| caps.client == surface.client)
-            });
+                surface.app == logos_atrium::AppId::System
+                    && atrium.owns_surface(batch.surface, system_client)
+            }) || program_surface_capabilities
+                .iter()
+                .flatten()
+                .any(|caps| atrium.owns_surface(batch.surface, caps.client));
             if !live {
                 pending_draw = None;
             } else {
@@ -2228,11 +2228,11 @@ pub extern "C" fn _start() -> ! {
         if let Some(message) = pending_render {
             let live = atrium.surface_by_reference(message.surface).is_some_and(|surface| {
                 surface.app == logos_atrium::AppId::Terminal
-                    || program_surface_capabilities
-                        .iter()
-                        .flatten()
-                        .any(|caps| caps.client == surface.client)
-            });
+                    && atrium.owns_surface(message.surface, terminal_client)
+            }) || program_surface_capabilities
+                .iter()
+                .flatten()
+                .any(|caps| atrium.owns_surface(message.surface, caps.client));
             if !live {
                 pending_render = None;
             } else {
@@ -2714,9 +2714,10 @@ pub extern "C" fn _start() -> ! {
             while common::ipc_receive_handle(terminal_render, &mut render) == IpcStatus::Ok {
                 let terminal_surface_is_live = render.surface.is_valid()
                     && matches!(render.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
-                    && atrium
-                        .surface_by_reference(render.surface)
-                        .is_some_and(|surface| surface.app == logos_atrium::AppId::Terminal);
+                    && atrium.surface_by_reference(render.surface).is_some_and(|surface| {
+                        surface.app == logos_atrium::AppId::Terminal
+                            && atrium.owns_surface(render.surface, terminal_client)
+                    });
                 if terminal_surface_is_live {
                     pending_render = Some(render);
                     break;
@@ -2729,7 +2730,7 @@ pub extern "C" fn _start() -> ! {
                 let live = op.is_valid()
                     && atrium.surface_by_reference(op.surface).is_some_and(|surface| {
                         surface.app == logos_atrium::AppId::System
-                            && surface.client == system_client
+                            && atrium.owns_surface(op.surface, system_client)
                     });
                 if live {
                     pending_draw = Some(op);
@@ -2742,10 +2743,7 @@ pub extern "C" fn _start() -> ! {
             for caps in program_surface_capabilities.iter().flatten().copied() {
                 let mut op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
                 while common::ipc_receive_handle(caps.draw, &mut op) == IpcStatus::Ok {
-                    let live = op.is_valid()
-                        && atrium
-                            .surface_by_reference(op.surface)
-                            .is_some_and(|surface| surface.client == caps.client);
+                    let live = op.is_valid() && atrium.owns_surface(op.surface, caps.client);
                     if live {
                         pending_draw = Some(op);
                         break;
@@ -2763,9 +2761,7 @@ pub extern "C" fn _start() -> ! {
                 while common::ipc_receive_handle(caps.render, &mut render) == IpcStatus::Ok {
                     let live =
                         matches!(render.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
-                            && atrium
-                                .surface_by_reference(render.surface)
-                                .is_some_and(|surface| surface.client == caps.client);
+                            && atrium.owns_surface(render.surface, caps.client);
                     if live {
                         pending_render = Some(render);
                         break;
@@ -3093,19 +3089,22 @@ pub extern "C" fn _start() -> ! {
                             }
                         } else if routed.is_valid() {
                             if surface.app == logos_atrium::AppId::Terminal {
-                                let _ = common::ipc_send_handle(terminal, &routed);
+                                if atrium.owns_surface(surface.reference, terminal_client) {
+                                    let _ = common::ipc_send_handle(terminal, &routed);
+                                }
                             } else if surface.app == logos_atrium::AppId::System {
-                                let _ = common::ipc_send_handle(system_surface_input, &routed);
+                                if atrium.owns_surface(surface.reference, system_client) {
+                                    let _ = common::ipc_send_handle(system_surface_input, &routed);
+                                }
                             } else if surface.app == logos_atrium::AppId::Calculator
                                 && calculator.input(&local)
                             {
                                 pending_app_render =
                                     render(display, atrium, calculator, &mut sequence);
-                            } else if let Some(caps) = program_surface_capabilities
-                                .iter()
-                                .flatten()
-                                .copied()
-                                .find(|caps| caps.client == surface.client)
+                            } else if let Some(caps) =
+                                program_surface_capabilities.iter().flatten().copied().find(
+                                    |caps| atrium.owns_surface(surface.reference, caps.client),
+                                )
                             {
                                 let _ = common::ipc_send_handle(caps.input, &routed);
                             }
@@ -3333,12 +3332,16 @@ pub extern "C" fn _start() -> ! {
                 if let Some(surface) = atrium.focused_surface() {
                     if surface.app == logos_atrium::AppId::Terminal {
                         let routed = AtriumSurfaceInput::new(surface.reference, event);
-                        if routed.is_valid() {
+                        if routed.is_valid()
+                            && atrium.owns_surface(surface.reference, terminal_client)
+                        {
                             let _ = common::ipc_send_handle(terminal, &routed);
                         }
                     } else if surface.app == logos_atrium::AppId::System {
                         let routed = AtriumSurfaceInput::new(surface.reference, event);
-                        if routed.is_valid() {
+                        if routed.is_valid()
+                            && atrium.owns_surface(surface.reference, system_client)
+                        {
                             let _ = common::ipc_send_handle(system_surface_input, &routed);
                         }
                     } else if surface.app == logos_atrium::AppId::Calculator
@@ -3349,7 +3352,7 @@ pub extern "C" fn _start() -> ! {
                         .iter()
                         .flatten()
                         .copied()
-                        .find(|caps| caps.client == surface.client)
+                        .find(|caps| atrium.owns_surface(surface.reference, caps.client))
                     {
                         let routed = AtriumSurfaceInput::new(surface.reference, event);
                         if routed.is_valid() {
