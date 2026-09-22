@@ -1,5 +1,9 @@
 #![no_std]
 
+mod home_scene;
+
+pub use home_scene::build_home_scene;
+
 #[cfg(test)]
 extern crate std;
 
