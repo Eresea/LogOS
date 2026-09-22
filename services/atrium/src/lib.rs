@@ -2801,18 +2801,26 @@ mod tests {
     }
 
     #[test]
-    fn surface_ownership_requires_live_reference_and_matching_client() {
+    fn ownership_distinguishes_atrium_and_program_calculator_surfaces() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
-        let request = atrium.request_surface(AppId::Calculator, client(1)).unwrap();
-        let reference = surface(2);
-        atrium.spawn_surface(request, reference).unwrap();
+        let atrium_client = client(1);
+        let program_client = client(2);
+        let atrium_request = atrium.request_surface(AppId::Calculator, atrium_client).unwrap();
+        let atrium_surface = atrium.spawn_surface(atrium_request, surface(2)).unwrap();
+        let program_request = atrium.request_surface(AppId::Calculator, program_client).unwrap();
+        let program_surface = atrium.spawn_surface(program_request, surface(3)).unwrap();
 
-        assert!(atrium.owns_surface(reference, client(1)));
-        assert!(!atrium.owns_surface(reference, client(2)));
+        assert!(atrium.owns_surface(atrium_surface.reference, atrium_client));
+        assert!(!atrium.owns_surface(atrium_surface.reference, program_client));
+        assert!(atrium.owns_surface(program_surface.reference, program_client));
+        assert!(!atrium.owns_surface(program_surface.reference, atrium_client));
         assert!(!atrium.owns_surface(
-            SurfaceHandle { generation: reference.generation + 1, ..reference },
-            client(1)
+            SurfaceHandle {
+                generation: atrium_surface.reference.generation + 1,
+                ..atrium_surface.reference
+            },
+            atrium_client
         ));
     }
 
