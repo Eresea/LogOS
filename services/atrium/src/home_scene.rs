@@ -342,5 +342,54 @@ mod tests {
                 check(&atrium, "account menu opens after settings menu");
             }
         }
+
+        for (account, anchor_x, anchor_y, options) in [
+            (false, 20, 760, crate::SIDEBAR_MENU_LABELS.len()),
+            (true, 20, 20, crate::SIDEBAR_ACCOUNT_MENU_LABELS.len()),
+        ] {
+            let mut initial = Atrium::new();
+            initial.authenticate();
+            for selected in 0..initial.launcher_result_count() {
+                let mut atrium = Atrium::new();
+                atrium.authenticate();
+                let bounds = crate::command_menu_item_bounds(selected);
+                atrium.command_menu_item_at(bounds.x + 1, bounds.y + 1);
+                atrium.settings_menu_input(
+                    &InputMessage::pointer(anchor_x, anchor_y, 1, PointerState::Down).unwrap(),
+                );
+                assert!(atrium.command_menu_open());
+                assert_eq!(atrium.account_menu_open(), account);
+                assert_eq!(atrium.settings_menu_open(), !account);
+                check(
+                    &atrium,
+                    &format!(
+                        "combined account={account}, selected={selected}, hovered_option=None"
+                    ),
+                );
+                let layout = if account {
+                    atrium.account_menu_popover(crate::FULLSCREEN_SURFACE_BOUNDS)
+                } else {
+                    atrium.settings_menu_popover(crate::FULLSCREEN_SURFACE_BOUNDS)
+                };
+                for option in 0..options {
+                    let bounds = layout.option_bounds(option as u8);
+                    atrium.settings_menu_input(
+                        &InputMessage::pointer(
+                            (bounds.x + 1) as i16,
+                            (bounds.y + 1) as i16,
+                            0,
+                            PointerState::Move,
+                        )
+                        .unwrap(),
+                    );
+                    check(
+                        &atrium,
+                        &format!(
+                            "combined account={account}, selected={selected}, hovered_option={option}"
+                        ),
+                    );
+                }
+            }
+        }
     }
 }
