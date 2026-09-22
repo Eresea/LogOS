@@ -35,7 +35,7 @@ static SCENE_REJECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "qemu-proof")]
 struct ProofLine {
-    bytes: [u8; 96],
+    bytes: [u8; 128],
     length: usize,
 }
 
@@ -51,26 +51,28 @@ impl core::fmt::Write for ProofLine {
 }
 
 fn apply_scene_op(display: &mut logos_display::Display, owner: u32, op: GuiSceneOp) {
+    #[cfg(feature = "qemu-proof")]
+    let surface = op.surface;
     let Err(error) = display.gui_mut().apply_scene_op(owner, op) else { return };
     #[cfg(feature = "qemu-proof")]
     {
-        let count = SCENE_REJECTION_COUNT
+        let total = SCENE_REJECTION_COUNT
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 Some(count.saturating_add(1))
             })
-            .unwrap_or(usize::MAX);
-        if count < MAX_SCENE_REJECTION_DETAILS {
-            let owner_name = match owner {
-                11 => "Shell",
-                12 => "LockScreen",
-                13 => "Atrium",
-                _ => "unknown",
-            };
-            let mut line = ProofLine { bytes: [0; 96], length: 0 };
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        let mut line = ProofLine { bytes: [0; 128], length: 0 };
+        if total <= MAX_SCENE_REJECTION_DETAILS {
             let _ = write!(
                 line,
-                "LogOS vNext: scene op rejected owner={owner_name}({owner}) error={error:?}"
+                "LogOS vNext: Display scene op rejected owner={owner} surface={}/{} err={error:?}",
+                surface.slot, surface.generation,
             );
+        } else if total.is_power_of_two() {
+            let _ = write!(line, "LogOS vNext: Display scene op rejected total={total}");
+        }
+        if line.length > 0 {
             common::proof_line(&line.bytes[..line.length]);
         }
     }
