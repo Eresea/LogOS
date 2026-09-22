@@ -312,7 +312,10 @@ name = "logos-ui-graphics"
 version = "0.1.0"
 dependencies = [
  "logos-abi",
+ "logos-display",
+ "logos-shell",
  "logos-ui",
+ "logos-ui-compiler",
 ]
 
 [[package]]
