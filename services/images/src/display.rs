@@ -10,6 +10,7 @@ use logos_abi::{
     GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, IpcStatus, MessageKind,
     RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
+use logos_display::FrameCoordinator;
 const FPS_SURFACE_BOUNDS: GuiRect =
     GuiRect::new(logos_abi::DEFAULT_SCREEN_WIDTH as i32 - 80, 8, 72, 24);
 const FPS_NODE_ID: u32 = u32::MAX - 1;
@@ -194,6 +195,7 @@ fn initialize_root_scene(
 #[allow(clippy::too_many_arguments)]
 fn render(
     display: &mut logos_display::Display,
+    coordinator: &mut FrameCoordinator,
     framebuffer: &mut [u8],
     config: &FramebufferConfig,
     present_state: &FramebufferPresentState,
@@ -214,11 +216,22 @@ fn render(
         format,
     );
     common::heartbeat();
-    publish_render(display, present_state, fps, fps_surface, fps_scene_frame, true, fps_enabled)
+    publish_render(
+        display,
+        coordinator,
+        present_state,
+        fps,
+        fps_surface,
+        fps_scene_frame,
+        true,
+        fps_enabled,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_render(
     display: &mut logos_display::Display,
+    coordinator: &mut FrameCoordinator,
     present_state: &FramebufferPresentState,
     fps: &mut FpsCounter,
     fps_surface: SurfaceHandle,
@@ -226,20 +239,12 @@ fn publish_render(
     complete: bool,
     fps_enabled: bool,
 ) -> bool {
-    let presented = display.presented();
+    let presented = coordinator.publish_present(display, present_state);
     let fps_changed = fps_enabled && presented && complete && fps.record(common::current_ticks());
     if fps_changed {
         update_fps_surface(display, fps_surface, fps_scene_frame, fps.value);
     }
-    publish_present(display, present_state);
     fps_changed
-}
-
-fn publish_present(display: &mut logos_display::Display, present_state: &FramebufferPresentState) {
-    let (full, rects, count) = display.take_presented_damage();
-    if full || count != 0 {
-        present_state.publish(full, &rects[..count]);
-    }
 }
 
 fn publish_cursor(
@@ -327,16 +332,14 @@ pub extern "C" fn _start() -> ! {
     #[cfg(feature = "qemu-proof")]
     let _ = common::ipc_probe(logos_abi::IPC_SYSCALL_SEND, 0, 0);
     let mut heartbeat_ticks = 0u16;
-    let mut render_pending = false;
-    let mut render_complete = false;
-    let mut gui_render_pending = false;
-    let mut gui_dirty = true;
+    let mut coordinator = FrameCoordinator::new();
+    coordinator.request_gui();
     let mut fps_enabled = true;
     let mut fps = FpsCounter::new();
     let mut published_cursor = None;
     let mut ready_mask = READY_ALL;
     loop {
-        if render_pending && render_complete || gui_dirty || gui_render_pending {
+        if coordinator.busy() {
             // Rendering is intentionally resumed across loop iterations, but it
             // still keeps the Display task busy and must report health directly.
             common::heartbeat();
@@ -356,10 +359,8 @@ pub extern "C" fn _start() -> ! {
                 .unwrap_or(SurfaceHandle::EMPTY);
             initialize_root_scene(display, root_surface, config.width, config.height);
             fps_surface = create_fps_surface(display);
-            render_pending = false;
-            render_complete = false;
-            gui_render_pending = false;
-            gui_dirty = true;
+            coordinator.reset();
+            coordinator.request_gui();
             fps = FpsCounter::new();
             fps_scene_frame = 0;
             if fps_enabled {
@@ -368,7 +369,7 @@ pub extern "C" fn _start() -> ! {
         }
         if fps_enabled && fps.refresh(common::current_ticks()) {
             update_fps_surface(display, fps_surface, &mut fps_scene_frame, fps.value);
-            gui_dirty = true;
+            coordinator.request_gui();
         }
         let mut progressed = false;
         if ready_mask & READY_SURFACE != 0 {
@@ -420,7 +421,7 @@ pub extern "C" fn _start() -> ! {
                     display.unregister_cursor_surface(surface_request.surface);
                 }
                 let _ = common::ipc_send_handle(surface_response_capability, &response);
-                gui_dirty = true;
+                coordinator.request_gui();
             }
             ready_mask &= !READY_SURFACE;
         }
@@ -468,7 +469,7 @@ pub extern "C" fn _start() -> ! {
                     display.unregister_cursor_surface(lockscreen_surface_request.surface);
                 }
                 let _ = common::ipc_send_handle(lockscreen_response_capability, &response);
-                gui_dirty = true;
+                coordinator.request_gui();
             }
             ready_mask &= !READY_LOCKSCREEN_SURFACE;
         }
@@ -477,9 +478,7 @@ pub extern "C" fn _start() -> ! {
             while common::ipc_receive_handle(input_capability, &mut message) == IpcStatus::Ok {
                 progressed = true;
                 if display.apply(generation, &message).is_ok() {
-                    let more = message.flags & RENDER_FLAG_MORE != 0;
-                    render_pending = true;
-                    render_complete = !more;
+                    coordinator.accept_terminal_fragment(message.flags & RENDER_FLAG_MORE != 0);
                 }
             }
             ready_mask &= !READY_INPUT;
@@ -489,7 +488,7 @@ pub extern "C" fn _start() -> ! {
             while common::ipc_receive_handle(gui_capability, &mut gui_op) == IpcStatus::Ok {
                 progressed = true;
                 let _ = display.gui_mut().apply_scene_op(11, gui_op);
-                gui_dirty = true;
+                coordinator.request_gui();
                 gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
             }
             ready_mask &= !READY_GUI;
@@ -506,14 +505,14 @@ pub extern "C" fn _start() -> ! {
                     cursor_dirty = true;
                 } else {
                     let _ = display.gui_mut().apply_scene_op(13, atrium_op);
-                    gui_dirty = true;
+                    coordinator.request_gui();
                 }
                 atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
             }
             if cursor_dirty {
                 cursor_activity = true;
                 if !display.hardware_cursor_enabled() {
-                    gui_dirty = true;
+                    coordinator.request_gui();
                 }
             }
         }
@@ -528,14 +527,14 @@ pub extern "C" fn _start() -> ! {
                     cursor_dirty = true;
                 } else {
                     let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
-                    gui_dirty = true;
+                    coordinator.request_gui();
                 }
                 lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
             }
             if cursor_dirty {
                 cursor_activity = true;
                 if !display.hardware_cursor_enabled() {
-                    gui_dirty = true;
+                    coordinator.request_gui();
                 }
             }
         }
@@ -550,16 +549,16 @@ pub extern "C" fn _start() -> ! {
             {
                 progressed = true;
                 if display.apply(generation, &atrium_render).is_ok() {
-                    let more = atrium_render.flags & RENDER_FLAG_MORE != 0;
-                    render_pending = true;
-                    render_complete = !more;
+                    coordinator
+                        .accept_terminal_fragment(atrium_render.flags & RENDER_FLAG_MORE != 0);
                 }
             }
             ready_mask &= !READY_ATRIUM_RENDER;
         }
-        if render_pending && render_complete && !gui_render_pending {
+        if coordinator.terminal_ready() && !coordinator.gui_in_progress() {
             let fps_changed = render(
                 display,
+                &mut coordinator,
                 framebuffer,
                 config,
                 present_state,
@@ -569,12 +568,14 @@ pub extern "C" fn _start() -> ! {
                 fps_enabled,
             );
             if display.gui().terminal_bounds().is_some() {
-                gui_dirty = true;
+                coordinator.request_gui();
             }
-            gui_dirty |= fps_changed;
-            render_pending = false;
+            if fps_changed {
+                coordinator.request_gui();
+            }
+            coordinator.complete_terminal();
         }
-        if gui_dirty || gui_render_pending {
+        if coordinator.gui_requested() || coordinator.gui_in_progress() {
             let _ = display.render_gui(
                 framebuffer,
                 config.width as usize,
@@ -585,6 +586,7 @@ pub extern "C" fn _start() -> ! {
             let complete = !display.render_pending();
             let fps_changed = publish_render(
                 display,
+                &mut coordinator,
                 present_state,
                 &mut fps,
                 fps_surface,
@@ -592,8 +594,10 @@ pub extern "C" fn _start() -> ! {
                 complete,
                 fps_enabled,
             );
-            gui_render_pending = display.render_pending();
-            gui_dirty = fps_changed;
+            coordinator.complete_gui(display.render_pending());
+            if fps_changed {
+                coordinator.request_gui();
+            }
             progressed = true;
             // Keep interaction flowing between bounded GUI slices without
             // repeatedly draining render producers while the display is busy.

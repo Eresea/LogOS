@@ -154,6 +154,10 @@ static mut SETTINGS_ROUTE: u8 = u8::MAX;
 static mut PENDING_HOME_SCENE: logos_ui_graphics::UiSceneFrame =
     logos_ui_graphics::UiSceneFrame::new();
 static mut PENDING_HOME_SCENE_INDEX: usize = 0;
+static mut LAST_HOME_SCENE: logos_ui_graphics::UiSceneFrame =
+    logos_ui_graphics::UiSceneFrame::new();
+static mut LAST_HOME_SURFACE: SurfaceHandle = SurfaceHandle::EMPTY;
+static mut LAST_HOME_SCENE_READY: bool = false;
 const SETTINGS_MENU_NODE_BASE: u32 = 100;
 const SETTINGS_SELECT_NODE_BASE: u32 = 200;
 const SETTINGS_POPOVER_NODE_BASE: u32 = 204;
@@ -638,8 +642,20 @@ fn draw_home(
         Ok(scene) => scene,
         Err(_) => return,
     };
+    let delta = unsafe {
+        if *core::ptr::addr_of!(LAST_HOME_SCENE_READY)
+            && *core::ptr::addr_of!(LAST_HOME_SURFACE) == surface
+        {
+            scene.diff_from(&*core::ptr::addr_of!(LAST_HOME_SCENE)).unwrap_or(scene)
+        } else {
+            scene
+        }
+    };
     unsafe {
-        *core::ptr::addr_of_mut!(PENDING_HOME_SCENE) = scene;
+        *core::ptr::addr_of_mut!(LAST_HOME_SCENE) = scene;
+        *core::ptr::addr_of_mut!(LAST_HOME_SURFACE) = surface;
+        *core::ptr::addr_of_mut!(LAST_HOME_SCENE_READY) = true;
+        *core::ptr::addr_of_mut!(PENDING_HOME_SCENE) = delta;
         *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = 0;
     }
     let _ = flush_pending_home_scene(display);
@@ -661,7 +677,10 @@ fn flush_pending_home_scene(display: logos_abi::CapabilityHandle) -> IpcStatus {
                 return IpcStatus::Full;
             }
             status => {
-                unsafe { *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = len };
+                unsafe {
+                    *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = len;
+                    *core::ptr::addr_of_mut!(LAST_HOME_SCENE_READY) = false;
+                }
                 return status;
             }
         }
@@ -1835,6 +1854,10 @@ fn hide_surfaces(
     }
     atrium.lock();
     atrium.clear_surfaces();
+    unsafe {
+        *core::ptr::addr_of_mut!(LAST_HOME_SCENE_READY) = false;
+        *core::ptr::addr_of_mut!(LAST_HOME_SURFACE) = SurfaceHandle::EMPTY;
+    }
 }
 
 fn render_home_surface(

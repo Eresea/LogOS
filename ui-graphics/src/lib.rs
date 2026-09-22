@@ -66,6 +66,55 @@ impl UiSceneFrame {
     pub fn as_slice(&self) -> &[GuiSceneOp] {
         &self.ops[..self.len as usize]
     }
+
+    pub fn diff_from(&self, previous: &Self) -> Result<Self, UiSceneError> {
+        let Some(current) = self.as_slice().first().copied() else {
+            return Ok(Self::new());
+        };
+        if previous.as_slice().first().is_some_and(|old| old.surface != current.surface) {
+            return Ok(*self);
+        }
+        let mut delta = Self::new();
+        for operation in self
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|operation| operation.operation == logos_abi::GuiNodeOperation::Upsert)
+        {
+            let unchanged = previous.as_slice().iter().any(|old| {
+                old.operation == logos_abi::GuiNodeOperation::Upsert
+                    && old.node_id == operation.node_id
+                    && old.command == operation.command
+            });
+            if !unchanged {
+                let mut operation = operation;
+                operation.flags = GUI_DRAW_FLAG_MORE;
+                push(&mut delta, operation)?;
+            }
+        }
+        for old in previous
+            .as_slice()
+            .iter()
+            .copied()
+            .filter(|operation| operation.operation == logos_abi::GuiNodeOperation::Upsert)
+        {
+            let retained = self.as_slice().iter().any(|operation| {
+                operation.operation == logos_abi::GuiNodeOperation::Upsert
+                    && operation.node_id == old.node_id
+            });
+            if !retained {
+                let mut remove = GuiSceneOp::remove(current.surface, current.frame, old.node_id);
+                remove.flags = GUI_DRAW_FLAG_MORE;
+                push(&mut delta, remove)?;
+            }
+        }
+        if delta.is_empty() {
+            return Ok(delta);
+        }
+        push(&mut delta, GuiSceneOp::commit(current.surface, current.frame))?;
+        delta.ops[delta.len() - 1].flags = 0;
+        Ok(delta)
+    }
 }
 
 impl Default for UiSceneFrame {
@@ -591,6 +640,27 @@ mod tests {
         assert_eq!(scene.as_slice()[0].flags, GUI_DRAW_FLAG_MORE);
         assert_eq!(scene.as_slice()[4].flags, 0);
         assert!(scene.as_slice().iter().all(|op| op.is_valid()));
+    }
+
+    #[test]
+    fn scene_diff_emits_only_changed_nodes_and_commit() {
+        let mut tree = sample_tree();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 100, 80));
+        set_bounds(&mut tree, 1, UiRect::new(8, 8, 40, 16));
+        set_bounds(&mut tree, 2, UiRect::new(8, 32, 60, 24));
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let previous = emit(surface, 4, &tree, UiSceneTheme::DEFAULT).unwrap();
+        let label = tree.tree().handle_at(1).unwrap();
+        tree.set_text(label, UiText::from_bytes(b"World").unwrap()).unwrap();
+        let current = emit(surface, 5, &tree, UiSceneTheme::DEFAULT).unwrap();
+
+        let delta = current.diff_from(&previous).unwrap();
+        assert_eq!(delta.len(), 2);
+        assert_eq!(delta.as_slice()[0].operation, logos_abi::GuiNodeOperation::Upsert);
+        assert_eq!(delta.as_slice()[0].node_id, 4);
+        assert_eq!(delta.as_slice()[1].operation, logos_abi::GuiNodeOperation::Commit);
+        assert_eq!(delta.as_slice()[0].flags, GUI_DRAW_FLAG_MORE);
+        assert_eq!(delta.as_slice()[1].flags, 0);
     }
 
     #[test]
