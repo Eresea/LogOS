@@ -116,9 +116,8 @@ pub trait UiSceneSink {
     fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus;
 }
 
-/// Fixed-memory retained-scene publisher. A newer sequence replaces an
-/// incomplete frame, so Display discards its staged operations and receives
-/// one coalesced snapshot.
+/// Fixed-memory retained-scene publisher. It completes an in-flight frame
+/// before sending a newer coalesced snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiScenePublisher {
     baseline: UiSceneFrame,
@@ -171,6 +170,8 @@ impl UiScenePublisher {
 
     /// `cursor_signature` identifies a cursor-owned scene; ordinary surfaces
     /// pass `None` and remain independent of cursor movement.
+    /// Pending frames resume from their stored operations; the tree is only
+    /// read when staging a new frame.
     pub fn publish<S: UiSceneSink>(
         &mut self,
         surface: SurfaceHandle,
@@ -180,19 +181,27 @@ impl UiScenePublisher {
         cursor_signature: Option<u64>,
         sink: &mut S,
     ) -> Result<(IpcStatus, usize), UiSceneError> {
-        if self.pending_ready
-            && self.pending.as_slice().first().is_some_and(|op| op.frame == frame)
-            && self.pending_surface == surface
-            && self.pending_cursor_signature == cursor_signature
-        {
+        let mut sent_before = 0;
+        if self.pending_ready {
+            let pending_frame = self.pending.as_slice()[0].frame;
+            let same_frame = pending_frame == frame
+                && self.pending_surface == surface
+                && self.pending_cursor_signature == cursor_signature;
             let result = self.flush(sink);
-            if result.0 == IpcStatus::Ok {
-                self.complete(surface, frame, tree, theme, cursor_signature)?;
+            if result.0 != IpcStatus::Ok {
+                return Ok(result);
             }
-            return Ok(result);
+            self.complete()?;
+            if same_frame {
+                return Ok(result);
+            }
+            sent_before = result.1;
         }
 
         emit_into(surface, frame, tree, theme, &mut self.pending)?;
+        if cursor_signature.is_none() && has_cursor_shape(&self.pending) {
+            return Err(UiSceneError::InvalidCommand);
+        }
         let force_full = !self.baseline_ready
             || self.baseline_surface != surface
             || self.baseline_cursor_signature != cursor_signature;
@@ -208,15 +217,15 @@ impl UiScenePublisher {
                 self.baseline = self.pending;
                 self.baseline_surface = surface;
                 self.baseline_cursor_signature = cursor_signature;
-                return Ok((IpcStatus::Ok, 0));
+                return Ok((IpcStatus::Ok, sent_before));
             }
         }
 
         let result = self.flush(sink);
         if result.0 == IpcStatus::Ok {
-            self.complete(surface, frame, tree, theme, cursor_signature)?;
+            self.complete()?;
         }
-        Ok(result)
+        Ok((result.0, sent_before + result.1))
     }
 
     fn flush<S: UiSceneSink>(&mut self, sink: &mut S) -> (IpcStatus, usize) {
@@ -235,22 +244,74 @@ impl UiScenePublisher {
         (IpcStatus::Ok, operations.len())
     }
 
-    fn complete(
-        &mut self,
-        surface: SurfaceHandle,
-        frame: u32,
-        tree: &UiComponentTree,
-        theme: UiSceneTheme,
-        cursor_signature: Option<u64>,
-    ) -> Result<(), UiSceneError> {
-        emit_into(surface, frame, tree, theme, &mut self.baseline)?;
-        self.baseline_surface = surface;
-        self.baseline_cursor_signature = cursor_signature;
+    fn complete(&mut self) -> Result<(), UiSceneError> {
+        if self.pending.ops[0].operation == GuiNodeOperation::Clear {
+            self.baseline = self.pending;
+        } else {
+            apply_delta(&mut self.baseline, &self.pending)?;
+        }
+        self.baseline_surface = self.pending_surface;
+        self.baseline_cursor_signature = self.pending_cursor_signature;
         self.baseline_ready = true;
         self.pending_ready = false;
         self.pending_index = 0;
         Ok(())
     }
+}
+
+fn has_cursor_shape(scene: &UiSceneFrame) -> bool {
+    scene.as_slice().iter().any(|operation| {
+        operation.operation == GuiNodeOperation::Upsert
+            && operation.node_id == 1
+            && operation.command.kind == logos_abi::GuiDrawKind::FillRect
+            && operation.command.width == 3
+            && operation.command.height == 14
+    })
+}
+
+fn apply_delta(baseline: &mut UiSceneFrame, delta: &UiSceneFrame) -> Result<(), UiSceneError> {
+    if baseline.len() < 2 || delta.len() < 2 {
+        return Err(UiSceneError::InvalidCommand);
+    }
+    let commit = delta.ops[delta.len() - 1];
+    for operation in &delta.ops[..delta.len() - 1] {
+        match operation.operation {
+            GuiNodeOperation::Remove => {
+                if let Some(index) = baseline.ops[..baseline.len() - 1].iter().position(|old| {
+                    old.operation == GuiNodeOperation::Upsert && old.node_id == operation.node_id
+                }) {
+                    let length = baseline.len();
+                    baseline.ops.copy_within(index + 1..length, index);
+                    baseline.len -= 1;
+                }
+            }
+            GuiNodeOperation::Upsert => {
+                if let Some(index) = baseline.ops[..baseline.len() - 1].iter().position(|old| {
+                    old.operation == GuiNodeOperation::Upsert && old.node_id == operation.node_id
+                }) {
+                    baseline.ops[index] = *operation;
+                } else {
+                    if baseline.len() >= MAX_UI_SCENE_OPS {
+                        return Err(UiSceneError::Capacity);
+                    }
+                    let commit_index = baseline.len() - 1;
+                    baseline.ops[baseline.len()] = baseline.ops[commit_index];
+                    baseline.ops[commit_index] = *operation;
+                    baseline.len += 1;
+                }
+            }
+            GuiNodeOperation::Clear => {
+                return Err(UiSceneError::InvalidCommand);
+            }
+            GuiNodeOperation::Commit => {}
+        }
+    }
+    let length = baseline.len();
+    for operation in &mut baseline.ops[..length] {
+        operation.frame = commit.frame;
+    }
+    baseline.ops[baseline.len() - 1] = commit;
+    Ok(())
 }
 
 impl Default for UiScenePublisher {
@@ -1290,9 +1351,68 @@ mod tests {
             publisher.publish(surface, 3, &tree, UiSceneTheme::DEFAULT, None, &mut sink).unwrap().0,
             IpcStatus::Ok
         );
-        assert!(sink.seen.iter().all(|operation| operation.frame == 3));
+        let frame_two_end = sink
+            .seen
+            .iter()
+            .position(|operation| {
+                operation.operation == GuiNodeOperation::Commit && operation.frame == 2
+            })
+            .unwrap();
+        let frame_three_start =
+            sink.seen.iter().position(|operation| operation.frame == 3).unwrap();
+        assert!(frame_two_end < frame_three_start);
+        assert!(sink.seen.iter().any(|operation| operation.frame == 2));
+        assert!(sink.seen.iter().any(|operation| operation.frame == 3));
         assert_ne!(sink.seen[0].operation, GuiNodeOperation::Clear);
         assert_eq!(sink.registry.active_frame(surface), Some(3));
+    }
+
+    #[test]
+    fn same_frame_resume_with_changed_tree_keeps_display_in_sync() {
+        let mut tree = sample_tree();
+        for index in 0..tree.tree().len() {
+            set_bounds(&mut tree, index, UiRect::new(0, index as i32 * 20, 100, 20));
+        }
+        let mut actual = std::boxed::Box::new(Display::new(1));
+        let surface = display_surface(&mut actual);
+        let mut publisher = UiScenePublisher::new();
+        {
+            let mut sink = RegistrySink {
+                registry: actual.gui_mut(),
+                fail_at: None,
+                calls: 0,
+                failed: false,
+                seen: Vec::new(),
+            };
+            publisher.publish(surface, 1, &tree, UiSceneTheme::DEFAULT, None, &mut sink).unwrap();
+            let label = tree.tree().handle_at(1).unwrap();
+            tree.set_text(label, UiText::from_bytes(b"BBBB").unwrap()).unwrap();
+            sink.calls = 0;
+            sink.fail_at = Some(0);
+            assert_eq!(
+                publisher
+                    .publish(surface, 2, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
+                    .unwrap(),
+                (IpcStatus::Full, 0)
+            );
+            tree.set_text(label, UiText::from_bytes(b"CCCC").unwrap()).unwrap();
+            sink.fail_at = None;
+            sink.calls = 0;
+            publisher.publish(surface, 2, &tree, UiSceneTheme::DEFAULT, None, &mut sink).unwrap();
+            let result = publisher
+                .publish(surface, 3, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
+                .unwrap();
+            assert_eq!(result.0, IpcStatus::Ok);
+            assert!(result.1 > 0);
+        }
+
+        let mut expected = std::boxed::Box::new(Display::new(1));
+        let expected_surface = display_surface(&mut expected);
+        apply_display_scene(
+            &mut expected,
+            &emit(expected_surface, 3, &tree, UiSceneTheme::DEFAULT).unwrap(),
+        );
+        assert_eq!(pixels(&mut expected), pixels(&mut actual));
     }
 
     #[test]
@@ -1454,50 +1574,191 @@ mod tests {
     }
 
     #[test]
+    fn non_cursor_publisher_rejects_display_cursor_shape() {
+        let mut blueprint = UiBlueprint::new();
+        blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 3, 14));
+        let surface = SurfaceHandle::new(1, 1, TEST_OWNER).unwrap();
+        let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        assert!(scene.as_slice().iter().any(|operation| {
+            operation.operation == GuiNodeOperation::Upsert
+                && operation.node_id == 1
+                && operation.command.kind == logos_abi::GuiDrawKind::FillRect
+                && operation.command.width == 3
+                && operation.command.height == 14
+        }));
+
+        let mut registry = GuiSurfaceRegistry::new();
+        registry_surface(&mut registry);
+        let mut sink = ready_registry_sink(&mut registry);
+        let mut publisher = UiScenePublisher::new();
+        assert_eq!(
+            publisher.publish(surface, 1, &tree, UiSceneTheme::DEFAULT, None, &mut sink),
+            Err(UiSceneError::InvalidCommand)
+        );
+        assert!(sink.seen.is_empty());
+        assert!(!publisher.is_pending());
+    }
+
+    fn app_username_handle(tree: &UiComponentTree, build: &UiBuild) -> logos_ui::UiNodeHandle {
+        let index = build.document.node_index_by_name(b"username").unwrap();
+        tree.tree().handle_at(usize::from(index)).unwrap()
+    }
+
+    fn set_app_username(tree: &mut UiComponentTree, build: &UiBuild) {
+        let handle = app_username_handle(tree, build);
+        tree.set_value(handle, UiText::from_bytes(b"alice").unwrap()).unwrap();
+    }
+
+    fn set_app_failure_title(tree: &mut UiComponentTree, build: &UiBuild) {
+        let index = build.document.node_index_by_name(b"title").unwrap();
+        let handle = tree.tree().handle_at(usize::from(index)).unwrap();
+        tree.set_text(handle, UiText::from_bytes(b"Sign-in failed").unwrap()).unwrap();
+    }
+
+    fn assert_initial_app_publication_at_every_index(build: &UiBuild) {
+        let surface = SurfaceHandle::new(1, 1, TEST_OWNER).unwrap();
+        let tree = app_tree(build);
+        let full = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        for fail_at in 0..full.len() {
+            let mut expected = std::boxed::Box::new(Display::new(1));
+            let mut actual = std::boxed::Box::new(Display::new(1));
+            let expected_surface = display_surface(&mut expected);
+            let actual_surface = display_surface(&mut actual);
+            assert_eq!(expected_surface, surface);
+            assert_eq!(actual_surface, surface);
+            apply_display_scene(&mut expected, &full);
+            let mut publisher = UiScenePublisher::new();
+            let mut sink = RegistrySink {
+                registry: actual.gui_mut(),
+                fail_at: Some(fail_at),
+                calls: 0,
+                failed: false,
+                seen: Vec::new(),
+            };
+            assert_eq!(
+                publisher
+                    .publish(surface, 1, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
+                    .unwrap(),
+                (IpcStatus::Full, fail_at)
+            );
+            sink.fail_at = None;
+            sink.calls = 0;
+            assert_eq!(
+                publisher
+                    .publish(surface, 1, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
+                    .unwrap(),
+                (IpcStatus::Ok, full.len())
+            );
+            drop(sink);
+            assert_eq!(pixels(&mut expected), pixels(&mut actual));
+        }
+    }
+
+    fn assert_app_transition_at_every_index(build: &UiBuild, frame: u32) {
+        let surface = SurfaceHandle::new(1, 1, TEST_OWNER).unwrap();
+        let mut measured_tree = app_tree(build);
+        let mut previous = emit(surface, 1, &measured_tree, UiSceneTheme::DEFAULT).unwrap();
+        if frame == 3 {
+            set_app_username(&mut measured_tree, build);
+            previous = emit(surface, 2, &measured_tree, UiSceneTheme::DEFAULT).unwrap();
+            set_app_failure_title(&mut measured_tree, build);
+        } else {
+            set_app_username(&mut measured_tree, build);
+        }
+        let current = emit(surface, frame, &measured_tree, UiSceneTheme::DEFAULT).unwrap();
+        let delta = current.diff_from(&previous).unwrap();
+        assert!(delta.len() > 1);
+
+        if frame == 2 {
+            let empty = emit(surface, 1, &app_tree(build), UiSceneTheme::DEFAULT).unwrap();
+            assert!(current.as_slice().iter().any(|operation| {
+                operation.operation == GuiNodeOperation::Upsert
+                    && operation.command.kind == logos_abi::GuiDrawKind::GlyphRun
+                    && !has_node(&empty, operation.node_id)
+            }));
+        }
+
+        for fail_at in 0..delta.len() {
+            let mut expected = std::boxed::Box::new(Display::new(1));
+            let mut actual = std::boxed::Box::new(Display::new(1));
+            let expected_surface = display_surface(&mut expected);
+            let actual_surface = display_surface(&mut actual);
+            let mut tree = app_tree(build);
+            let mut publisher = UiScenePublisher::new();
+            let initial = emit(surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+            apply_display_scene(&mut expected, &initial);
+            {
+                let mut sink = RegistrySink {
+                    registry: actual.gui_mut(),
+                    fail_at: None,
+                    calls: 0,
+                    failed: false,
+                    seen: Vec::new(),
+                };
+                publisher
+                    .publish(actual_surface, 1, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
+                    .unwrap();
+
+                if frame == 3 {
+                    set_app_username(&mut tree, build);
+                    let username = emit(surface, 2, &tree, UiSceneTheme::DEFAULT).unwrap();
+                    apply_display_scene(&mut expected, &username);
+                    publisher
+                        .publish(actual_surface, 2, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
+                        .unwrap();
+                    set_app_failure_title(&mut tree, build);
+                } else {
+                    set_app_username(&mut tree, build);
+                }
+
+                sink.fail_at = Some(fail_at);
+                sink.calls = 0;
+                assert_eq!(
+                    publisher
+                        .publish(
+                            actual_surface,
+                            frame,
+                            &tree,
+                            UiSceneTheme::DEFAULT,
+                            None,
+                            &mut sink
+                        )
+                        .unwrap(),
+                    (IpcStatus::Full, fail_at)
+                );
+                apply_display_scene(&mut expected, &current);
+                sink.fail_at = None;
+                sink.calls = 0;
+                assert_eq!(
+                    publisher
+                        .publish(
+                            actual_surface,
+                            frame,
+                            &tree,
+                            UiSceneTheme::DEFAULT,
+                            None,
+                            &mut sink
+                        )
+                        .unwrap()
+                        .0,
+                    IpcStatus::Ok
+                );
+            }
+            assert_eq!(expected_surface, surface);
+            assert_eq!(pixels(&mut expected), pixels(&mut actual));
+        }
+    }
+
+    #[test]
     fn login_and_claim_publication_match_one_shot_pixels() {
         for build in
             [logos_ui_compiler::compile_login_page(), logos_ui_compiler::compile_register_page()]
         {
-            let mut tree = app_tree(&build);
-            let mut expected = Display::new(1);
-            let mut actual = Display::new(1);
-            let expected_surface = display_surface(&mut expected);
-            let actual_surface = display_surface(&mut actual);
-            assert_eq!(expected_surface, actual_surface);
-            let mut publisher = UiScenePublisher::new();
-
-            let full = emit(expected_surface, 1, &tree, UiSceneTheme::DEFAULT).unwrap();
-            apply_display_scene(&mut expected, &full);
-            let mut sink = RegistrySink {
-                registry: actual.gui_mut(),
-                fail_at: None,
-                calls: 0,
-                failed: false,
-                seen: Vec::new(),
-            };
-            publisher
-                .publish(actual_surface, 1, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
-                .unwrap();
-            drop(sink);
-            assert_eq!(pixels(&mut expected), pixels(&mut actual));
-
-            let title = build.document.node_index_by_name(b"title").unwrap();
-            let handle = tree.tree().handle_at(usize::from(title)).unwrap();
-            tree.set_text(handle, UiText::from_bytes(b"Updated scene").unwrap()).unwrap();
-            let full = emit(expected_surface, 2, &tree, UiSceneTheme::DEFAULT).unwrap();
-            apply_display_scene(&mut expected, &full);
-            let mut sink = RegistrySink {
-                registry: actual.gui_mut(),
-                fail_at: None,
-                calls: 0,
-                failed: false,
-                seen: Vec::new(),
-            };
-            publisher
-                .publish(actual_surface, 2, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
-                .unwrap();
-            drop(sink);
-            assert_eq!(pixels(&mut expected), pixels(&mut actual));
+            assert_initial_app_publication_at_every_index(&build);
+            assert_app_transition_at_every_index(&build, 2);
+            assert_app_transition_at_every_index(&build, 3);
         }
     }
 }
