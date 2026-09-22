@@ -1547,8 +1547,18 @@ fn draw_app(
     surface: logos_atrium::Surface,
     atrium: &logos_atrium::Atrium,
     calculator: &logos_atrium::Calculator,
+    atrium_client: logos_abi::ServiceHandle,
     sequence: u32,
 ) -> bool {
+    if matches!(
+        surface.app,
+        logos_atrium::AppId::Calculator
+            | logos_atrium::AppId::Files
+            | logos_atrium::AppId::Settings
+    ) && !atrium.owns_surface(surface.reference, atrium_client)
+    {
+        return false;
+    }
     let title: &[u8] = match surface.app {
         logos_atrium::AppId::Calculator => b"Calculator",
         logos_atrium::AppId::Files => b"Files",
@@ -1941,13 +1951,14 @@ fn render(
     display: logos_abi::CapabilityHandle,
     atrium: &logos_atrium::Atrium,
     calculator: &logos_atrium::Calculator,
+    atrium_client: logos_abi::ServiceHandle,
     sequence: &mut u32,
 ) -> bool {
     if render_home_surface(display, atrium, sequence) {
         return true;
     }
     for surface in atrium.surfaces() {
-        if draw_app(display, surface, atrium, calculator, *sequence) {
+        if draw_app(display, surface, atrium, calculator, atrium_client, *sequence) {
             return true;
         }
     }
@@ -2131,7 +2142,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if pending_app_render {
-            pending_app_render = render(display, atrium, calculator, &mut sequence);
+            pending_app_render = render(display, atrium, calculator, atrium_client, &mut sequence);
             if pending_app_render {
                 common::heartbeat();
                 continue;
@@ -2205,12 +2216,12 @@ pub extern "C" fn _start() -> ! {
         }
         if let Some(batch) = pending_draw {
             let live = atrium.surface_by_reference(batch.surface).is_some_and(|surface| {
-                (surface.app == logos_atrium::AppId::System && surface.client == system_client)
-                    || program_surface_capabilities
-                        .iter()
-                        .flatten()
-                        .any(|caps| caps.client == surface.client)
-            });
+                surface.app == logos_atrium::AppId::System
+                    && atrium.owns_surface(batch.surface, system_client)
+            }) || program_surface_capabilities
+                .iter()
+                .flatten()
+                .any(|caps| atrium.owns_surface(batch.surface, caps.client));
             if !live {
                 pending_draw = None;
             } else {
@@ -2228,11 +2239,11 @@ pub extern "C" fn _start() -> ! {
         if let Some(message) = pending_render {
             let live = atrium.surface_by_reference(message.surface).is_some_and(|surface| {
                 surface.app == logos_atrium::AppId::Terminal
-                    || program_surface_capabilities
-                        .iter()
-                        .flatten()
-                        .any(|caps| caps.client == surface.client)
-            });
+                    && atrium.owns_surface(message.surface, terminal_client)
+            }) || program_surface_capabilities
+                .iter()
+                .flatten()
+                .any(|caps| atrium.owns_surface(message.surface, caps.client));
             if !live {
                 pending_render = None;
             } else {
@@ -2694,7 +2705,8 @@ pub extern "C" fn _start() -> ! {
                 if home_surface {
                     proof_line(b"LogOS vNext: Atrium home surface ready");
                 }
-                pending_app_render = render(display, atrium, calculator, &mut sequence);
+                pending_app_render =
+                    render(display, atrium, calculator, atrium_client, &mut sequence);
             }
             if authenticated
                 && atrium.phase() == logos_atrium::AtriumPhase::Home
@@ -2714,9 +2726,10 @@ pub extern "C" fn _start() -> ! {
             while common::ipc_receive_handle(terminal_render, &mut render) == IpcStatus::Ok {
                 let terminal_surface_is_live = render.surface.is_valid()
                     && matches!(render.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
-                    && atrium
-                        .surface_by_reference(render.surface)
-                        .is_some_and(|surface| surface.app == logos_atrium::AppId::Terminal);
+                    && atrium.surface_by_reference(render.surface).is_some_and(|surface| {
+                        surface.app == logos_atrium::AppId::Terminal
+                            && atrium.owns_surface(render.surface, terminal_client)
+                    });
                 if terminal_surface_is_live {
                     pending_render = Some(render);
                     break;
@@ -2729,7 +2742,7 @@ pub extern "C" fn _start() -> ! {
                 let live = op.is_valid()
                     && atrium.surface_by_reference(op.surface).is_some_and(|surface| {
                         surface.app == logos_atrium::AppId::System
-                            && surface.client == system_client
+                            && atrium.owns_surface(op.surface, system_client)
                     });
                 if live {
                     pending_draw = Some(op);
@@ -2742,10 +2755,7 @@ pub extern "C" fn _start() -> ! {
             for caps in program_surface_capabilities.iter().flatten().copied() {
                 let mut op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
                 while common::ipc_receive_handle(caps.draw, &mut op) == IpcStatus::Ok {
-                    let live = op.is_valid()
-                        && atrium
-                            .surface_by_reference(op.surface)
-                            .is_some_and(|surface| surface.client == caps.client);
+                    let live = op.is_valid() && atrium.owns_surface(op.surface, caps.client);
                     if live {
                         pending_draw = Some(op);
                         break;
@@ -2763,9 +2773,7 @@ pub extern "C" fn _start() -> ! {
                 while common::ipc_receive_handle(caps.render, &mut render) == IpcStatus::Ok {
                     let live =
                         matches!(render.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
-                            && atrium
-                                .surface_by_reference(render.surface)
-                                .is_some_and(|surface| surface.client == caps.client);
+                            && atrium.owns_surface(render.surface, caps.client);
                     if live {
                         pending_render = Some(render);
                         break;
@@ -2963,7 +2971,8 @@ pub extern "C" fn _start() -> ! {
                     &mut pending_terminal_update,
                     &mut last_terminal_bounds,
                 );
-                pending_app_render = render(display, atrium, calculator, &mut sequence);
+                pending_app_render =
+                    render(display, atrium, calculator, atrium_client, &mut sequence);
                 continue;
             } else if event.pointer_event().is_none() {
                 if let Some(surface) = atrium
@@ -3093,19 +3102,28 @@ pub extern "C" fn _start() -> ! {
                             }
                         } else if routed.is_valid() {
                             if surface.app == logos_atrium::AppId::Terminal {
-                                let _ = common::ipc_send_handle(terminal, &routed);
+                                if atrium.owns_surface(surface.reference, terminal_client) {
+                                    let _ = common::ipc_send_handle(terminal, &routed);
+                                }
                             } else if surface.app == logos_atrium::AppId::System {
-                                let _ = common::ipc_send_handle(system_surface_input, &routed);
+                                if atrium.owns_surface(surface.reference, system_client) {
+                                    let _ = common::ipc_send_handle(system_surface_input, &routed);
+                                }
                             } else if surface.app == logos_atrium::AppId::Calculator
+                                && atrium.owns_surface(surface.reference, atrium_client)
                                 && calculator.input(&local)
                             {
-                                pending_app_render =
-                                    render(display, atrium, calculator, &mut sequence);
-                            } else if let Some(caps) = program_surface_capabilities
-                                .iter()
-                                .flatten()
-                                .copied()
-                                .find(|caps| caps.client == surface.client)
+                                pending_app_render = render(
+                                    display,
+                                    atrium,
+                                    calculator,
+                                    atrium_client,
+                                    &mut sequence,
+                                );
+                            } else if let Some(caps) =
+                                program_surface_capabilities.iter().flatten().copied().find(
+                                    |caps| atrium.owns_surface(surface.reference, caps.client),
+                                )
                             {
                                 let _ = common::ipc_send_handle(caps.input, &routed);
                             }
@@ -3131,7 +3149,8 @@ pub extern "C" fn _start() -> ! {
                                 GuiRect::EMPTY,
                                 &mut next_request,
                             );
-                            pending_app_render = render(display, atrium, calculator, &mut sequence);
+                            pending_app_render =
+                                render(display, atrium, calculator, atrium_client, &mut sequence);
                         }
                         continue;
                     }
@@ -3224,21 +3243,25 @@ pub extern "C" fn _start() -> ! {
                     let _ = common::ipc_send_handle(shell, &command);
                 }
                 logos_atrium::AtriumAction::LauncherChanged => {
-                    pending_app_render = render(display, atrium, calculator, &mut sequence);
+                    pending_app_render =
+                        render(display, atrium, calculator, atrium_client, &mut sequence);
                 }
                 logos_atrium::AtriumAction::OpenCommandMenu
                 | logos_atrium::AtriumAction::CloseCommandMenu
                 | logos_atrium::AtriumAction::CloseSettingsMenu => {
                     let _ = atrium.apply_action(action);
-                    pending_app_render = render(display, atrium, calculator, &mut sequence);
+                    pending_app_render =
+                        render(display, atrium, calculator, atrium_client, &mut sequence);
                 }
                 logos_atrium::AtriumAction::Shutdown => {
                     let _ = common::power(logos_abi::POWER_SHUTDOWN);
-                    pending_app_render = render(display, atrium, calculator, &mut sequence);
+                    pending_app_render =
+                        render(display, atrium, calculator, atrium_client, &mut sequence);
                 }
                 logos_atrium::AtriumAction::Restart => {
                     let _ = common::power(logos_abi::POWER_REBOOT);
-                    pending_app_render = render(display, atrium, calculator, &mut sequence);
+                    pending_app_render =
+                        render(display, atrium, calculator, atrium_client, &mut sequence);
                 }
                 logos_atrium::AtriumAction::CloseFocused => {
                     let old = atrium.focused_surface();
@@ -3278,7 +3301,8 @@ pub extern "C" fn _start() -> ! {
                             &mut pending_terminal_update,
                             &mut last_terminal_bounds,
                         );
-                        pending_app_render = render(display, atrium, calculator, &mut sequence);
+                        pending_app_render =
+                            render(display, atrium, calculator, atrium_client, &mut sequence);
                     }
                 }
                 logos_atrium::AtriumAction::FocusNext
@@ -3311,7 +3335,8 @@ pub extern "C" fn _start() -> ! {
                                 );
                             }
                         }
-                        pending_app_render = render(display, atrium, calculator, &mut sequence);
+                        pending_app_render =
+                            render(display, atrium, calculator, atrium_client, &mut sequence);
                     }
                 }
                 logos_atrium::AtriumAction::Split(_) => {
@@ -3324,7 +3349,8 @@ pub extern "C" fn _start() -> ! {
                             &mut pending_terminal_update,
                             &mut last_terminal_bounds,
                         );
-                        pending_app_render = render(display, atrium, calculator, &mut sequence);
+                        pending_app_render =
+                            render(display, atrium, calculator, atrium_client, &mut sequence);
                     }
                 }
                 _ => {}
@@ -3333,23 +3359,29 @@ pub extern "C" fn _start() -> ! {
                 if let Some(surface) = atrium.focused_surface() {
                     if surface.app == logos_atrium::AppId::Terminal {
                         let routed = AtriumSurfaceInput::new(surface.reference, event);
-                        if routed.is_valid() {
+                        if routed.is_valid()
+                            && atrium.owns_surface(surface.reference, terminal_client)
+                        {
                             let _ = common::ipc_send_handle(terminal, &routed);
                         }
                     } else if surface.app == logos_atrium::AppId::System {
                         let routed = AtriumSurfaceInput::new(surface.reference, event);
-                        if routed.is_valid() {
+                        if routed.is_valid()
+                            && atrium.owns_surface(surface.reference, system_client)
+                        {
                             let _ = common::ipc_send_handle(system_surface_input, &routed);
                         }
                     } else if surface.app == logos_atrium::AppId::Calculator
+                        && atrium.owns_surface(surface.reference, atrium_client)
                         && calculator.input(&event)
                     {
-                        pending_app_render = render(display, atrium, calculator, &mut sequence);
+                        pending_app_render =
+                            render(display, atrium, calculator, atrium_client, &mut sequence);
                     } else if let Some(caps) = program_surface_capabilities
                         .iter()
                         .flatten()
                         .copied()
-                        .find(|caps| caps.client == surface.client)
+                        .find(|caps| atrium.owns_surface(surface.reference, caps.client))
                     {
                         let routed = AtriumSurfaceInput::new(surface.reference, event);
                         if routed.is_valid() {
@@ -3374,7 +3406,7 @@ pub extern "C" fn _start() -> ! {
             (&*core::ptr::addr_of!(COMMAND_MENU_TREE)).next_deadline(now_ticks).is_some()
         };
         if menu_motion_active {
-            pending_app_render = render(display, atrium, calculator, &mut sequence);
+            pending_app_render = render(display, atrium, calculator, atrium_client, &mut sequence);
         }
         if home_scene_pending() {
             let _ = flush_pending_home_scene(display);

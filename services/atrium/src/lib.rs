@@ -917,6 +917,10 @@ impl Atrium {
         self.surfaces.iter().flatten().copied().find(|surface| surface.reference == reference)
     }
 
+    pub fn owns_surface(&self, reference: SurfaceHandle, client: ServiceHandle) -> bool {
+        self.surface_by_reference(reference).is_some_and(|surface| surface.client == client)
+    }
+
     pub fn surface_at(&self, x: i32, y: i32) -> Option<Surface> {
         self.surfaces
             .iter()
@@ -2794,6 +2798,30 @@ mod tests {
         assert_eq!(atrium.surface_for_client(client(2), AppId::Calculator), None);
         let stale = SurfaceHandle { generation: reference.generation + 1, ..reference };
         assert_eq!(atrium.surface_by_reference(stale), None);
+    }
+
+    #[test]
+    fn ownership_distinguishes_atrium_and_program_calculator_surfaces() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let atrium_client = client(1);
+        let program_client = client(2);
+        let atrium_request = atrium.request_surface(AppId::Calculator, atrium_client).unwrap();
+        let atrium_surface = atrium.spawn_surface(atrium_request, surface(2)).unwrap();
+        let program_request = atrium.request_surface(AppId::Calculator, program_client).unwrap();
+        let program_surface = atrium.spawn_surface(program_request, surface(3)).unwrap();
+
+        assert!(atrium.owns_surface(atrium_surface.reference, atrium_client));
+        assert!(!atrium.owns_surface(atrium_surface.reference, program_client));
+        assert!(atrium.owns_surface(program_surface.reference, program_client));
+        assert!(!atrium.owns_surface(program_surface.reference, atrium_client));
+        assert!(!atrium.owns_surface(
+            SurfaceHandle {
+                generation: atrium_surface.reference.generation + 1,
+                ..atrium_surface.reference
+            },
+            atrium_client
+        ));
     }
 
     #[test]
