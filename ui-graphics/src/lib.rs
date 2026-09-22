@@ -214,7 +214,7 @@ impl UiScenePublisher {
             let mutations = make_delta_in_place(&self.baseline, &mut self.pending)?;
             self.pending_ready = mutations != 0;
             if !self.pending_ready {
-                self.baseline = self.pending;
+                self.store_full_baseline();
                 self.baseline_surface = surface;
                 self.baseline_cursor_signature = cursor_signature;
                 return Ok((IpcStatus::Ok, sent_before));
@@ -246,7 +246,7 @@ impl UiScenePublisher {
 
     fn complete(&mut self) -> Result<(), UiSceneError> {
         if self.pending.ops[0].operation == GuiNodeOperation::Clear {
-            self.baseline = self.pending;
+            self.store_full_baseline();
         } else {
             apply_delta(&mut self.baseline, &self.pending)?;
         }
@@ -256,6 +256,13 @@ impl UiScenePublisher {
         self.pending_ready = false;
         self.pending_index = 0;
         Ok(())
+    }
+
+    fn store_full_baseline(&mut self) {
+        self.baseline = self.pending;
+        if self.baseline.ops[self.baseline.len() - 1].operation == GuiNodeOperation::Commit {
+            self.baseline.len -= 1;
+        }
     }
 }
 
@@ -270,14 +277,17 @@ fn has_cursor_shape(scene: &UiSceneFrame) -> bool {
 }
 
 fn apply_delta(baseline: &mut UiSceneFrame, delta: &UiSceneFrame) -> Result<(), UiSceneError> {
-    if baseline.len() < 2 || delta.len() < 2 {
+    if baseline.is_empty() || delta.len() < 2 {
         return Err(UiSceneError::InvalidCommand);
     }
     let commit = delta.ops[delta.len() - 1];
+    if commit.operation != GuiNodeOperation::Commit {
+        return Err(UiSceneError::InvalidCommand);
+    }
     for operation in &delta.ops[..delta.len() - 1] {
         match operation.operation {
             GuiNodeOperation::Remove => {
-                if let Some(index) = baseline.ops[..baseline.len() - 1].iter().position(|old| {
+                if let Some(index) = baseline.ops[..baseline.len()].iter().position(|old| {
                     old.operation == GuiNodeOperation::Upsert && old.node_id == operation.node_id
                 }) {
                     let length = baseline.len();
@@ -286,7 +296,7 @@ fn apply_delta(baseline: &mut UiSceneFrame, delta: &UiSceneFrame) -> Result<(), 
                 }
             }
             GuiNodeOperation::Upsert => {
-                if let Some(index) = baseline.ops[..baseline.len() - 1].iter().position(|old| {
+                if let Some(index) = baseline.ops[..baseline.len()].iter().position(|old| {
                     old.operation == GuiNodeOperation::Upsert && old.node_id == operation.node_id
                 }) {
                     baseline.ops[index] = *operation;
@@ -294,9 +304,7 @@ fn apply_delta(baseline: &mut UiSceneFrame, delta: &UiSceneFrame) -> Result<(), 
                     if baseline.len() >= MAX_UI_SCENE_OPS {
                         return Err(UiSceneError::Capacity);
                     }
-                    let commit_index = baseline.len() - 1;
-                    baseline.ops[baseline.len()] = baseline.ops[commit_index];
-                    baseline.ops[commit_index] = *operation;
+                    baseline.ops[baseline.len()] = *operation;
                     baseline.len += 1;
                 }
             }
@@ -310,7 +318,6 @@ fn apply_delta(baseline: &mut UiSceneFrame, delta: &UiSceneFrame) -> Result<(), 
     for operation in &mut baseline.ops[..length] {
         operation.frame = commit.frame;
     }
-    baseline.ops[baseline.len() - 1] = commit;
     Ok(())
 }
 
@@ -433,7 +440,7 @@ fn make_delta_in_place(
     let surface = current.ops[0].surface;
     let frame = current.ops[0].frame;
     let mut write = 1;
-    for read in 1..original_len.saturating_sub(1) {
+    for read in 1..original_len {
         let operation = current.ops[read];
         if operation.operation == GuiNodeOperation::Upsert && changed_node(previous, &operation) {
             current.ops[write] = operation;
@@ -1416,6 +1423,60 @@ mod tests {
     }
 
     #[test]
+    fn delta_keeps_last_full_frame_node_in_baseline() {
+        let mut tree = sample_tree();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 200, 80));
+        set_bounds(&mut tree, 1, UiRect::new(8, 8, 120, 16));
+        set_bounds(&mut tree, 2, UiRect::new(8, 32, 120, 24));
+        let mut actual = std::boxed::Box::new(Display::new(1));
+        let mut expected = std::boxed::Box::new(Display::new(1));
+        let surface = display_surface(&mut actual);
+        assert_eq!(display_surface(&mut expected), surface);
+        let mut publisher = UiScenePublisher::new();
+
+        for (frame, mutation) in [
+            (1, 0), // Initial full scene; node 9 is the final Upsert.
+            (2, 1), // Change the label, leaving node 9 unchanged.
+            (3, 2), // Remove the button's text node 9.
+            (4, 3), // Re-add node 9 with new text.
+        ] {
+            let button = tree.tree().handle_at(2).unwrap();
+            if mutation == 1 {
+                let label = tree.tree().handle_at(1).unwrap();
+                tree.set_text(label, UiText::from_bytes(b"Changed").unwrap()).unwrap();
+            } else if mutation == 2 {
+                tree.set_text(button, UiText::EMPTY).unwrap();
+            } else if mutation == 3 {
+                tree.set_text(button, UiText::from_bytes(b"Again").unwrap()).unwrap();
+            }
+
+            let full = emit(surface, frame, &tree, UiSceneTheme::DEFAULT).unwrap();
+            apply_display_scene(&mut expected, &full);
+            let mut sink = RegistrySink {
+                registry: actual.gui_mut(),
+                fail_at: None,
+                calls: 0,
+                failed: false,
+                seen: Vec::new(),
+            };
+            publisher
+                .publish(surface, frame, &tree, UiSceneTheme::DEFAULT, None, &mut sink)
+                .unwrap();
+            if mutation == 2 {
+                assert!(sink.seen.iter().any(|operation| {
+                    operation.operation == GuiNodeOperation::Remove && operation.node_id == 9
+                }));
+            } else if mutation == 3 {
+                assert!(sink.seen.iter().any(|operation| {
+                    operation.operation == GuiNodeOperation::Upsert && operation.node_id == 9
+                }));
+            }
+            drop(sink);
+            assert_eq!(pixels(&mut expected), pixels(&mut actual));
+        }
+    }
+
+    #[test]
     fn publisher_diffs_swapped_node_ids_by_id_and_command() {
         let surface = SurfaceHandle::new(1, 1, TEST_OWNER).unwrap();
         let mut previous = UiSceneFrame::new();
@@ -1752,7 +1813,7 @@ mod tests {
     }
 
     #[test]
-    fn login_and_claim_publication_match_one_shot_pixels() {
+    fn login_and_claim_publication_matches_pixels_after_full_at_every_op_index() {
         for build in
             [logos_ui_compiler::compile_login_page(), logos_ui_compiler::compile_register_page()]
         {
