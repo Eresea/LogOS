@@ -13,7 +13,7 @@ use crate::{
     process::{
         AddressSpaceRoot, MappingFlags, ProcessError, ProcessHandle, UserLaunch, VirtualMapping,
     },
-    runtime_ipc::RuntimeIpcRegistry,
+    runtime_ipc::{PROGRAM_SURFACE_DRAW_MESSAGE_BYTES, RuntimeIpcRegistry},
     runtime_services::ServiceImageSource,
     service_images::SERVICE_IMAGES,
     service_ipc::IpcError,
@@ -6135,7 +6135,7 @@ impl ServiceRuntime {
                 client,
                 atrium,
                 logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
-                core::mem::size_of::<logos_abi::GuiSceneOp>(),
+                PROGRAM_SURFACE_DRAW_MESSAGE_BYTES,
                 PROGRAM_SURFACE_DRAW_QUEUE,
             ),
         ];

@@ -13,6 +13,10 @@ use logos_abi::{
     IPC_PAGE_BYTES, IpcRights, IpcStatus, ServiceHandle,
 };
 
+#[cfg(any(target_os = "uefi", test))]
+pub(crate) const PROGRAM_SURFACE_DRAW_MESSAGE_BYTES: usize =
+    core::mem::size_of::<logos_abi::GuiSceneOp>();
+
 struct Slot<T> {
     generation: u32,
     value: Option<T>,
@@ -987,7 +991,6 @@ mod tests {
     #[test]
     fn program_surface_draw_channel_carries_scene_operations() {
         let (producer, consumer) = services();
-        let message_bytes = core::mem::size_of::<logos_abi::GuiSceneOp>();
         let mut registry = RuntimeIpcRegistry::new();
         let mut events = RuntimeEventRegistry::new();
         let endpoint = registry
@@ -995,7 +998,7 @@ mod tests {
                 producer,
                 consumer,
                 logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
-                message_bytes,
+                PROGRAM_SURFACE_DRAW_MESSAGE_BYTES,
                 1,
                 1,
                 &mut events,
@@ -1003,13 +1006,18 @@ mod tests {
             .unwrap();
         let capability = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
 
-        assert_eq!(message_bytes, core::mem::size_of::<logos_abi::GuiSceneOp>());
-        assert!(message_bytes < core::mem::size_of::<logos_abi::GuiDrawBatch>());
+        assert_eq!(
+            PROGRAM_SURFACE_DRAW_MESSAGE_BYTES,
+            core::mem::size_of::<logos_abi::GuiSceneOp>()
+        );
+        assert!(
+            PROGRAM_SURFACE_DRAW_MESSAGE_BYTES < core::mem::size_of::<logos_abi::GuiDrawBatch>()
+        );
         assert_eq!(
             registry.send(
                 producer,
                 capability,
-                &[0; core::mem::size_of::<logos_abi::GuiSceneOp>()],
+                &[0; PROGRAM_SURFACE_DRAW_MESSAGE_BYTES],
                 &mut events,
             ),
             IpcStatus::Ok
