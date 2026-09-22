@@ -15,7 +15,9 @@ without receiving Display or framebuffer authority.
 Core assigns each running program a generation-safe synthetic `ServiceHandle`
 from the reserved program-client range. Core creates five private dynamic IPC
 channels between that client and Atrium: surface request, surface response,
-surface input, cell render, and GUI draw. Core maps only a read-only `ProgramBootstrapPage` and
+surface input, cell render, and GUI draw. The GUI draw channel carries one
+bounded `GuiSceneOp` per message; higher-level batches are split by the program
+client. Core maps only a read-only `ProgramBootstrapPage` and
 one private staging page into the program address space; the page contains the
 client identity and those five capabilities.
 
@@ -37,7 +39,7 @@ to the owning client.
 - Programs can participate in Atrium without direct Display or framebuffer access.
 - Program IPC remains bounded by the fixed program slots and per-channel queues.
 - The current surface payload supports keyboard/text and pointer input, bounded
-  cell renders, and bounded GUI draw batches; app discovery and richer program
+  cell renders, and bounded GUI scene operations; app discovery and richer program
   bootstrap APIs remain deferred.
 
 ## Proof obligations

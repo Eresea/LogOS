@@ -985,6 +985,47 @@ mod tests {
     }
 
     #[test]
+    fn program_surface_draw_channel_carries_scene_operations() {
+        let (producer, consumer) = services();
+        let message_bytes = core::mem::size_of::<logos_abi::GuiSceneOp>();
+        let mut registry = RuntimeIpcRegistry::new();
+        let mut events = RuntimeEventRegistry::new();
+        let endpoint = registry
+            .create_endpoint(
+                producer,
+                consumer,
+                logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
+                message_bytes,
+                1,
+                1,
+                &mut events,
+            )
+            .unwrap();
+        let capability = registry.grant(producer, endpoint, IpcRights::Send).unwrap();
+
+        assert_eq!(message_bytes, core::mem::size_of::<logos_abi::GuiSceneOp>());
+        assert!(message_bytes < core::mem::size_of::<logos_abi::GuiDrawBatch>());
+        assert_eq!(
+            registry.send(
+                producer,
+                capability,
+                &[0; core::mem::size_of::<logos_abi::GuiSceneOp>()],
+                &mut events,
+            ),
+            IpcStatus::Ok
+        );
+        assert_eq!(
+            registry.send(
+                producer,
+                capability,
+                &[0; core::mem::size_of::<logos_abi::GuiDrawBatch>()],
+                &mut events,
+            ),
+            IpcStatus::Malformed
+        );
+    }
+
+    #[test]
     fn all_abi_endpoint_payloads_fit_the_dynamic_registry() {
         let (producer, consumer) = services();
         let mut registry = RuntimeIpcRegistry::new();

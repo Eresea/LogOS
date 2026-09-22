@@ -6135,7 +6135,7 @@ impl ServiceRuntime {
                 client,
                 atrium,
                 logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
-                core::mem::size_of::<logos_abi::GuiDrawBatch>(),
+                core::mem::size_of::<logos_abi::GuiSceneOp>(),
                 PROGRAM_SURFACE_DRAW_QUEUE,
             ),
         ];
