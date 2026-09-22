@@ -4,6 +4,10 @@
 
 mod common;
 
+#[cfg(feature = "qemu-proof")]
+use core::fmt::Write as _;
+#[cfg(feature = "qemu-proof")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 use logos_abi::{
     DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, DISPLAY_PRESENT_BASE, FramebufferConfig,
     FramebufferFormat, FramebufferPresentState, GuiDrawCommand, GuiDrawKind, GuiRect, GuiSceneOp,
@@ -24,6 +28,57 @@ const READY_GUI: usize = 1 << 4;
 const READY_ATRIUM_GUI: usize = 1 << 5;
 const READY_LOCKSCREEN_GUI: usize = 1 << 6;
 const READY_ALL: usize = (1 << 7) - 1;
+#[cfg(feature = "qemu-proof")]
+const MAX_SCENE_REJECTION_DETAILS: usize = 8;
+#[cfg(feature = "qemu-proof")]
+static SCENE_REJECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "qemu-proof")]
+struct ProofLine {
+    bytes: [u8; 128],
+    length: usize,
+}
+
+#[cfg(feature = "qemu-proof")]
+impl core::fmt::Write for ProofLine {
+    fn write_str(&mut self, value: &str) -> core::fmt::Result {
+        let available = self.bytes.len().saturating_sub(self.length);
+        let length = value.len().min(available);
+        self.bytes[self.length..self.length + length].copy_from_slice(&value.as_bytes()[..length]);
+        self.length += length;
+        if length == value.len() { Ok(()) } else { Err(core::fmt::Error) }
+    }
+}
+
+fn apply_scene_op(display: &mut logos_display::Display, owner: u32, op: GuiSceneOp) {
+    #[cfg(feature = "qemu-proof")]
+    let surface = op.surface;
+    let Err(error) = display.gui_mut().apply_scene_op(owner, op) else { return };
+    #[cfg(feature = "qemu-proof")]
+    {
+        let total = SCENE_REJECTION_COUNT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            })
+            .unwrap_or(usize::MAX)
+            .saturating_add(1);
+        let mut line = ProofLine { bytes: [0; 128], length: 0 };
+        if total <= MAX_SCENE_REJECTION_DETAILS {
+            let _ = write!(
+                line,
+                "LogOS vNext: Display scene op rejected owner={owner} surface={}/{} err={error:?}",
+                surface.slot, surface.generation,
+            );
+        } else if total.is_power_of_two() {
+            let _ = write!(line, "LogOS vNext: Display scene op rejected total={total}");
+        }
+        if line.length > 0 {
+            common::proof_line(&line.bytes[..line.length]);
+        }
+    }
+    #[cfg(not(feature = "qemu-proof"))]
+    let _ = error;
+}
 
 struct FpsCounter {
     window_start: Option<u64>,
@@ -158,7 +213,7 @@ fn update_fps_surface(
         return;
     }
     *frame = frame.wrapping_add(1).max(1);
-    let _ = display.gui_mut().apply_scene_op(11, fps_command(surface, *frame, fps));
+    apply_scene_op(display, 11, fps_command(surface, *frame, fps));
 }
 
 fn create_fps_surface(display: &mut logos_display::Display) -> SurfaceHandle {
@@ -181,7 +236,8 @@ fn initialize_root_scene(
     if !surface.is_valid() {
         return;
     }
-    let _ = display.gui_mut().apply_scene_op(
+    apply_scene_op(
+        display,
         11,
         GuiSceneOp::upsert(
             surface,
@@ -413,7 +469,7 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         GuiSceneOp::remove(fps_surface, fps_scene_frame, FPS_NODE_ID)
                     };
-                    let _ = display.gui_mut().apply_scene_op(11, op);
+                    apply_scene_op(display, 11, op);
                 }
                 if result.is_ok() && cursor_request && response.surface.is_valid() {
                     display.register_cursor_surface(13, response.surface);
@@ -487,7 +543,7 @@ pub extern "C" fn _start() -> ! {
             let mut gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
             while common::ipc_receive_handle(gui_capability, &mut gui_op) == IpcStatus::Ok {
                 progressed = true;
-                let _ = display.gui_mut().apply_scene_op(11, gui_op);
+                apply_scene_op(display, 11, gui_op);
                 coordinator.request_gui();
                 gui_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 11).unwrap(), 1);
             }
@@ -504,7 +560,7 @@ pub extern "C" fn _start() -> ! {
                 if display.apply_cursor_scene_op(atrium_op) {
                     cursor_dirty = true;
                 } else {
-                    let _ = display.gui_mut().apply_scene_op(13, atrium_op);
+                    apply_scene_op(display, 13, atrium_op);
                     coordinator.request_gui();
                 }
                 atrium_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 13).unwrap(), 1);
@@ -526,7 +582,7 @@ pub extern "C" fn _start() -> ! {
                 if display.apply_cursor_scene_op(lockscreen_op) {
                     cursor_dirty = true;
                 } else {
-                    let _ = display.gui_mut().apply_scene_op(12, lockscreen_op);
+                    apply_scene_op(display, 12, lockscreen_op);
                     coordinator.request_gui();
                 }
                 lockscreen_op = GuiSceneOp::clear(SurfaceHandle::new(0, 1, 12).unwrap(), 1);
