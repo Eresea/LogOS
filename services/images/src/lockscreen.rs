@@ -79,6 +79,11 @@ static mut LOGIN_UI_READY: bool = false;
 static mut REGISTER_UI_READY: bool = false;
 static mut UI_TREE: UiComponentTree = UiComponentTree::new();
 static mut UI_TREE_MODE: u8 = u8::MAX;
+static mut PENDING_UI_SCENE: logos_ui_graphics::UiSceneFrame =
+    logos_ui_graphics::UiSceneFrame::new();
+static mut LAST_UI_SCENE: logos_ui_graphics::UiSceneFrame = logos_ui_graphics::UiSceneFrame::new();
+static mut LAST_UI_SURFACE: SurfaceHandle = SurfaceHandle::EMPTY;
+static mut LAST_UI_SCENE_READY: bool = false;
 
 const SPLASH_OPACITY: u16 = 56_000;
 const SPLASH_ANIMATION_INDEX: usize = 0;
@@ -126,6 +131,10 @@ fn draw_ui(
     _include_static: bool,
     start_index: usize,
 ) -> (IpcStatus, usize) {
+    let pending = unsafe { !(*core::ptr::addr_of!(PENDING_UI_SCENE)).is_empty() };
+    if start_index != 0 || pending {
+        return flush_pending_ui_scene(display, start_index);
+    }
     let build = ui_build(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
     let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
     let mode = u8::from(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
@@ -134,7 +143,10 @@ fn draw_ui(
         if tree.reset_from_document(&build.document).is_err() {
             return (IpcStatus::Malformed, 0);
         }
-        unsafe { UI_TREE_MODE = mode };
+        unsafe {
+            UI_TREE_MODE = mode;
+            *core::ptr::addr_of_mut!(LAST_UI_SCENE_READY) = false;
+        }
     }
     let Some(layout) = logos_shell::LoginLayout::from_build(build, CURSOR_BOUNDS) else {
         return (IpcStatus::Malformed, 0);
@@ -241,6 +253,29 @@ fn draw_ui(
         Ok(scene) => scene,
         Err(_) => return (IpcStatus::Malformed, 0),
     };
+    let delta = unsafe {
+        if *core::ptr::addr_of!(LAST_UI_SCENE_READY)
+            && *core::ptr::addr_of!(LAST_UI_SURFACE) == surface
+        {
+            scene.diff_from(&*core::ptr::addr_of!(LAST_UI_SCENE)).unwrap_or(scene)
+        } else {
+            scene
+        }
+    };
+    unsafe {
+        *core::ptr::addr_of_mut!(LAST_UI_SCENE) = scene;
+        *core::ptr::addr_of_mut!(LAST_UI_SURFACE) = surface;
+        *core::ptr::addr_of_mut!(LAST_UI_SCENE_READY) = true;
+        *core::ptr::addr_of_mut!(PENDING_UI_SCENE) = delta;
+    }
+    flush_pending_ui_scene(display, 0)
+}
+
+fn flush_pending_ui_scene(
+    display: logos_abi::CapabilityHandle,
+    start_index: usize,
+) -> (IpcStatus, usize) {
+    let scene = unsafe { *core::ptr::addr_of!(PENDING_UI_SCENE) };
     for (index, operation) in scene.as_slice().iter().enumerate().skip(start_index) {
         let status = common::ipc_send_handle(display, operation);
         if status != IpcStatus::Ok {
@@ -248,6 +283,12 @@ fn draw_ui(
         }
     }
     (IpcStatus::Ok, scene.len())
+}
+
+fn clear_pending_ui_scene() {
+    unsafe {
+        *core::ptr::addr_of_mut!(PENDING_UI_SCENE) = logos_ui_graphics::UiSceneFrame::new();
+    }
 }
 
 fn field_for_node(
@@ -566,6 +607,7 @@ pub extern "C" fn _start() -> ! {
                     pending_draw = None;
                     pending_draw_sequence = 0;
                     pending_draw_index = 0;
+                    clear_pending_ui_scene();
                     static_cached = true;
                     if input_redraw_pending {
                         proof_line(b"LogOS vNext: LockScreen input redraw submitted");
@@ -577,6 +619,10 @@ pub extern "C" fn _start() -> ! {
                     pending_draw = None;
                     pending_draw_sequence = 0;
                     pending_draw_index = 0;
+                    clear_pending_ui_scene();
+                    unsafe {
+                        *core::ptr::addr_of_mut!(LAST_UI_SCENE_READY) = false;
+                    }
                     static_cached = false;
                 }
             }
