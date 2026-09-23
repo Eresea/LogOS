@@ -7,48 +7,26 @@ mod common;
 use core::mem;
 
 use logos_abi::{
-    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GUI_DRAW_FLAG_MORE,
-    GuiDrawCommand, GuiSceneOp, IpcStatus, MAX_GUI_NODES, ManagerOperation, ManagerRequest,
-    ManagerResponse, ManagerState, SurfaceHandle,
+    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GuiSceneOp,
+    IpcStatus, ManagerOperation, ManagerRequest, ManagerResponse, ManagerState, SurfaceHandle,
 };
 use logos_atrium::{FULLSCREEN_SURFACE_BOUNDS, STATUS_BAR_BOUNDS, STATUS_BAR_CLOSE_BOUNDS};
+use logos_ui::{UiComponentTree, UiNodeHandle, UiNodeKind, UiRect, UiStyle, UiStyleList, UiText};
+use logos_ui_graphics::{UiScenePublisher, UiSceneSink, UiSceneTheme};
 
-const MAX_SYSTEM_SCENE_OPS: usize = MAX_GUI_NODES + 2;
+const SYSTEM_THEME: UiSceneTheme = UiSceneTheme {
+    surface: 0x101820,
+    panel: 0x182535,
+    input: 0x263548,
+    border: 0x334155,
+    accent: 0x9f3b3b,
+    focus: 0x4b82f2,
+    text: 0xffffff,
+    muted: 0x7890aa,
+};
 
-#[derive(Clone, Copy)]
-struct SystemScene {
-    ops: [GuiSceneOp; MAX_SYSTEM_SCENE_OPS],
-    len: u8,
-}
-
-impl SystemScene {
-    const EMPTY_OP: GuiSceneOp = GuiSceneOp::commit(SurfaceHandle::EMPTY, 1);
-
-    const fn new() -> Self {
-        Self { ops: [Self::EMPTY_OP; MAX_SYSTEM_SCENE_OPS], len: 0 }
-    }
-
-    const fn len(&self) -> usize {
-        self.len as usize
-    }
-
-    fn push(&mut self, mut op: GuiSceneOp) -> bool {
-        let index = self.len();
-        if index >= MAX_SYSTEM_SCENE_OPS {
-            return false;
-        }
-        op.flags = GUI_DRAW_FLAG_MORE;
-        self.ops[index] = op;
-        self.len += 1;
-        true
-    }
-
-    fn finish(&mut self) {
-        if self.len != 0 {
-            self.ops[self.len() - 1].flags = 0;
-        }
-    }
-}
+static mut UI_TREE: UiComponentTree = UiComponentTree::new();
+static mut UI_SCENE_PUBLISHER: UiScenePublisher = UiScenePublisher::new();
 
 const ATRIUM_REQUEST: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
@@ -71,7 +49,7 @@ const ATRIUM_INPUT: common::CapabilitySpec = common::capability_contract_named(
 const ATRIUM_DRAW: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
     b"atrium",
-    mem::size_of::<logos_abi::GuiSceneOp>(),
+    mem::size_of::<GuiSceneOp>(),
     logos_abi::IpcRights::Send,
 );
 
@@ -103,62 +81,120 @@ fn proof_line(message: &[u8]) {
 #[cfg(not(feature = "qemu-proof"))]
 fn proof_line(_message: &[u8]) {}
 
-#[allow(clippy::too_many_arguments)]
-fn push_text(
-    scene: &mut SystemScene,
-    surface: SurfaceHandle,
-    sequence: u32,
-    node_id: u32,
-    x: i32,
-    y: i32,
-    color: u32,
-    text: &[u8],
-) -> bool {
-    let Some(command) = GuiDrawCommand::glyph_run(x, y, color, text) else { return false };
-    scene.push(GuiSceneOp::upsert(surface, sequence, node_id, command))
+fn append_u16(buffer: &mut [u8], len: &mut usize, mut value: u16) {
+    let start = *len;
+    loop {
+        buffer[*len] = b'0' + (value % 10) as u8;
+        *len += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    buffer[start..*len].reverse();
 }
 
-fn build_status(surface: SurfaceHandle, sequence: u32) -> Option<SystemScene> {
-    let mut scene = SystemScene::new();
-    if !scene.push(GuiSceneOp::clear(surface, sequence))
-        || !scene.push(GuiSceneOp::upsert(
-            surface,
-            sequence,
-            1,
-            GuiDrawCommand::fill_rect(FULLSCREEN_SURFACE_BOUNDS, 0x101820),
-        ))
-        || !scene.push(GuiSceneOp::upsert(
-            surface,
-            sequence,
-            2,
-            GuiDrawCommand::fill_rect(STATUS_BAR_BOUNDS, 0x182535),
-        ))
-        || !push_text(&mut scene, surface, sequence, 3, 16, 10, 0xffffff, b"System")
-        || !scene.push(GuiSceneOp::upsert(
-            surface,
-            sequence,
-            4,
-            GuiDrawCommand::fill_rounded_rect(STATUS_BAR_CLOSE_BOUNDS, 0x9f3b3b, 6),
-        ))
-        || !push_text(
-            &mut scene,
-            surface,
-            sequence,
-            5,
-            STATUS_BAR_CLOSE_BOUNDS.x.saturating_add(16),
-            10,
-            0xffffff,
+fn report_surface(surface: SurfaceHandle) {
+    let mut message = [0u8; 64];
+    let mut len = 0;
+    let prefix = b"LogOS vNext: System surface=";
+    message[..prefix.len()].copy_from_slice(prefix);
+    len += prefix.len();
+    append_u16(&mut message, &mut len, surface.slot);
+    message[len] = b'/';
+    len += 1;
+    append_u16(&mut message, &mut len, surface.generation);
+    proof_line(&message[..len]);
+}
+
+struct AtriumSceneSink(logos_abi::CapabilityHandle);
+
+impl UiSceneSink for AtriumSceneSink {
+    fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus {
+        common::ipc_send_handle(self.0, operation)
+    }
+}
+
+fn insert_node(
+    tree: &mut UiComponentTree,
+    kind: UiNodeKind,
+    bounds: UiRect,
+    text: &[u8],
+    style: Option<UiStyle>,
+) -> bool {
+    let Ok(handle) = tree.insert(kind, UiNodeHandle::EMPTY, tree.tree().len() as u16) else {
+        return false;
+    };
+    if tree.tree_mut().set_bounds(handle, bounds).is_err() {
+        return false;
+    }
+    if !text.is_empty() {
+        let Some(text) = UiText::from_bytes(text) else { return false };
+        if tree.set_text(handle, text).is_err() {
+            return false;
+        }
+    }
+    if let Some(style) = style {
+        let mut styles = UiStyleList::EMPTY;
+        if !styles.push(style) || tree.set_styles(handle, styles).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+fn build_status(tree: &mut UiComponentTree) -> bool {
+    *tree = UiComponentTree::new();
+    if !insert_node(
+        tree,
+        UiNodeKind::Root,
+        UiRect::new(
+            FULLSCREEN_SURFACE_BOUNDS.x,
+            FULLSCREEN_SURFACE_BOUNDS.y,
+            FULLSCREEN_SURFACE_BOUNDS.width,
+            FULLSCREEN_SURFACE_BOUNDS.height,
+        ),
+        b"",
+        None,
+    ) || !insert_node(
+        tree,
+        UiNodeKind::Panel,
+        UiRect::new(
+            STATUS_BAR_BOUNDS.x,
+            STATUS_BAR_BOUNDS.y,
+            STATUS_BAR_BOUNDS.width,
+            STATUS_BAR_BOUNDS.height,
+        ),
+        b"",
+        None,
+    ) || !insert_node(tree, UiNodeKind::Label, UiRect::new(16, 0, 120, 32), b"System", None)
+        || !insert_node(
+            tree,
+            UiNodeKind::Button,
+            UiRect::new(
+                STATUS_BAR_CLOSE_BOUNDS.x,
+                STATUS_BAR_CLOSE_BOUNDS.y,
+                STATUS_BAR_CLOSE_BOUNDS.width,
+                STATUS_BAR_CLOSE_BOUNDS.height,
+            ),
             b"X",
+            Some(UiStyle::BackgroundAccent),
         )
-        || !push_text(&mut scene, surface, sequence, 6, 20, 48, 0x7890aa, b"Service manager status")
+        || !insert_node(
+            tree,
+            UiNodeKind::Label,
+            UiRect::new(20, 48, 360, 16),
+            b"Service manager status",
+            Some(UiStyle::TextMuted),
+        )
     {
-        return None;
+        return false;
     }
 
     let mut cursor = 0;
     let mut row = 0u32;
     loop {
-        let request_id = sequence.wrapping_add(row).max(1);
+        let request_id = row.saturating_add(1);
         let request =
             ManagerRequest { cursor, ..ManagerRequest::new(ManagerOperation::List, request_id) };
         let mut response = ManagerResponse::new(
@@ -174,26 +210,20 @@ fn build_status(surface: SurfaceHandle, sequence: u32) -> Option<SystemScene> {
         let record = response.record;
         let name_len = usize::from(record.name_len).min(record.name.len());
         let y = 76 + (row as i32).saturating_mul(16);
-        if !push_text(
-            &mut scene,
-            surface,
-            sequence,
-            7 + row * 2,
-            20,
-            y,
-            0xd9e5f5,
+        if !insert_node(
+            tree,
+            UiNodeKind::Label,
+            UiRect::new(20, y, 160, 16),
             &record.name[..name_len],
-        ) || !push_text(
-            &mut scene,
-            surface,
-            sequence,
-            8 + row * 2,
-            190,
-            y,
-            0x7ee787,
+            None,
+        ) || !insert_node(
+            tree,
+            UiNodeKind::Label,
+            UiRect::new(190, y, 120, 16),
             state_name(record.state),
+            Some(UiStyle::TextMuted),
         ) {
-            return None;
+            return false;
         }
         row += 1;
         if response.cursor == u64::MAX || response.cursor <= cursor || row >= 4 {
@@ -201,42 +231,29 @@ fn build_status(surface: SurfaceHandle, sequence: u32) -> Option<SystemScene> {
         }
         cursor = response.cursor;
     }
-    scene.finish();
-    Some(scene)
+    true
 }
 
-fn flush_scene(
-    draw: logos_abi::CapabilityHandle,
-    scene: &SystemScene,
-    index: &mut usize,
-) -> IpcStatus {
-    while *index < scene.len() {
-        match common::ipc_send_handle(draw, &scene.ops[*index]) {
-            IpcStatus::Ok => *index += 1,
-            IpcStatus::Full => return IpcStatus::Full,
-            status => {
-                *index = scene.len();
-                return status;
-            }
-        }
-    }
-    IpcStatus::Ok
-}
-
-fn queue_status(
+fn publish_status(
     draw: logos_abi::CapabilityHandle,
     surface: SurfaceHandle,
     sequence: u32,
-    pending: &mut SystemScene,
-    pending_index: &mut usize,
-) {
-    if *pending_index < pending.len() {
-        return;
+    tree: &UiComponentTree,
+) -> IpcStatus {
+    let mut sink = AtriumSceneSink(draw);
+    match unsafe {
+        (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).publish(
+            surface,
+            sequence,
+            tree,
+            SYSTEM_THEME,
+            None,
+            &mut sink,
+        )
+    } {
+        Ok((status, _)) => status,
+        Err(_) => IpcStatus::Malformed,
     }
-    let Some(scene) = build_status(surface, sequence) else { return };
-    *pending = scene;
-    *pending_index = 0;
-    let _ = flush_scene(draw, pending, pending_index);
 }
 
 #[unsafe(no_mangle)]
@@ -252,8 +269,6 @@ pub extern "C" fn _start() -> ! {
     let mut sequence = 0u32;
     let mut surface = SurfaceHandle::EMPTY;
     let mut request_pending = false;
-    let mut pending_scene = SystemScene::new();
-    let mut pending_scene_index = 0usize;
     let mut scene_reported = false;
     let mut heartbeat_ticks = 0u16;
     let mut response = AtriumSurfaceResponse::new(
@@ -267,16 +282,17 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
-        if pending_scene_index < pending_scene.len() {
-            let _ = flush_scene(draw_cap, &pending_scene, &mut pending_scene_index);
-            if pending_scene_index < pending_scene.len() {
+        if unsafe { (*core::ptr::addr_of!(UI_SCENE_PUBLISHER)).is_pending() } {
+            let tree = unsafe { &*core::ptr::addr_of!(UI_TREE) };
+            let status = publish_status(draw_cap, surface, sequence, tree);
+            if status == IpcStatus::Full {
                 common::heartbeat();
                 continue;
             }
-        }
-        if pending_scene.len() != 0 && !scene_reported {
-            proof_line(b"LogOS vNext: System scene built");
-            scene_reported = true;
+            if status == IpcStatus::Ok && !scene_reported {
+                proof_line(b"LogOS vNext: System scene built");
+                scene_reported = true;
+            }
         }
         if !surface.is_valid() && !request_pending {
             let request = AtriumSurfaceRequest::new(
@@ -297,36 +313,30 @@ pub extern "C" fn _start() -> ! {
             if response.status == logos_abi::GuiStatus::Ok && response.surface.is_valid() {
                 surface = response.surface;
                 sequence = sequence.wrapping_add(1).max(1);
-                queue_status(
-                    draw_cap,
-                    surface,
-                    sequence,
-                    &mut pending_scene,
-                    &mut pending_scene_index,
-                );
-                scene_reported = false;
+                unsafe { (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset() };
+                let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
+                if build_status(tree) {
+                    let _ = publish_status(draw_cap, surface, sequence, tree);
+                    scene_reported = false;
+                }
+                report_surface(surface);
             } else if response.is_revoke() || response.status == logos_abi::GuiStatus::NotFound {
                 surface = SurfaceHandle::EMPTY;
+                scene_reported = false;
+                unsafe { (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset() };
             }
         }
         while common::ipc_receive_handle(input_cap, &mut input) == IpcStatus::Ok {
-            if input.surface == surface
-                && input.is_valid()
-                && surface.is_valid()
-                && pending_scene_index == pending_scene.len()
-            {
+            if input.surface == surface && input.is_valid() && surface.is_valid() {
                 sequence = sequence.wrapping_add(1).max(1);
-                queue_status(
-                    draw_cap,
-                    surface,
-                    sequence,
-                    &mut pending_scene,
-                    &mut pending_scene_index,
-                );
+                let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
+                if build_status(tree) {
+                    let _ = publish_status(draw_cap, surface, sequence, tree);
+                }
             }
         }
 
-        if pending_scene_index < pending_scene.len() {
+        if unsafe { (*core::ptr::addr_of!(UI_SCENE_PUBLISHER)).is_pending() } {
             common::heartbeat();
             continue;
         }
