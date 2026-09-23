@@ -79,11 +79,8 @@ static mut LOGIN_UI_READY: bool = false;
 static mut REGISTER_UI_READY: bool = false;
 static mut UI_TREE: UiComponentTree = UiComponentTree::new();
 static mut UI_TREE_MODE: u8 = u8::MAX;
-static mut PENDING_UI_SCENE: logos_ui_graphics::UiSceneFrame =
-    logos_ui_graphics::UiSceneFrame::new();
-static mut LAST_UI_SCENE: logos_ui_graphics::UiSceneFrame = logos_ui_graphics::UiSceneFrame::new();
-static mut LAST_UI_SURFACE: SurfaceHandle = SurfaceHandle::EMPTY;
-static mut LAST_UI_SCENE_READY: bool = false;
+static mut UI_SCENE_PUBLISHER: logos_ui_graphics::UiScenePublisher =
+    logos_ui_graphics::UiScenePublisher::new();
 
 const SPLASH_OPACITY: u16 = 56_000;
 const SPLASH_ANIMATION_INDEX: usize = 0;
@@ -123,41 +120,68 @@ fn proof_line(message: &[u8]) {
 #[cfg(not(any(feature = "qemu-proof", feature = "input-debug")))]
 fn proof_line(_message: &[u8]) {}
 
+struct DisplaySceneSink(logos_abi::CapabilityHandle);
+
+impl logos_ui_graphics::UiSceneSink for DisplaySceneSink {
+    fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus {
+        common::ipc_send_handle(self.0, operation)
+    }
+}
+
+fn publish_ui_scene(
+    display: logos_abi::CapabilityHandle,
+    surface: SurfaceHandle,
+    sequence: u32,
+    tree: &UiComponentTree,
+) -> IpcStatus {
+    let mut sink = DisplaySceneSink(display);
+    match unsafe {
+        (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).publish(
+            surface,
+            sequence,
+            tree,
+            logos_ui_graphics::UiSceneTheme::DEFAULT,
+            None,
+            &mut sink,
+        )
+    } {
+        Ok((status, _)) => status,
+        Err(_) => IpcStatus::Malformed,
+    }
+}
+
 fn draw_ui(
     display: logos_abi::CapabilityHandle,
     surface: SurfaceHandle,
     lock: &logos_lockscreen::LockScreen,
     sequence: u32,
-    _include_static: bool,
-    start_index: usize,
-) -> (IpcStatus, usize) {
-    let pending = unsafe { !(*core::ptr::addr_of!(PENDING_UI_SCENE)).is_empty() };
-    if start_index != 0 || pending {
-        return flush_pending_ui_scene(display, start_index);
+) -> IpcStatus {
+    let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
+    if unsafe { (*core::ptr::addr_of!(UI_SCENE_PUBLISHER)).is_pending_for(surface, sequence) } {
+        return publish_ui_scene(display, surface, sequence, tree);
     }
     let build = ui_build(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
-    let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
     let mode = u8::from(lock.mode() == logos_lockscreen::LockScreenMode::Claim);
     let mount = tree.tree().is_empty() || unsafe { *core::ptr::addr_of!(UI_TREE_MODE) != mode };
     if mount {
         if tree.reset_from_document(&build.document).is_err() {
-            return (IpcStatus::Malformed, 0);
+            return IpcStatus::Malformed;
         }
         unsafe {
             UI_TREE_MODE = mode;
-            *core::ptr::addr_of_mut!(LAST_UI_SCENE_READY) = false;
+            (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset();
         }
     }
     let Some(layout) = logos_shell::LoginLayout::from_build(build, CURSOR_BOUNDS) else {
-        return (IpcStatus::Malformed, 0);
+        return IpcStatus::Malformed;
     };
 
     for index in 0..build.document.node_count() {
         let Ok(handle) = tree.tree().handle_at(index) else {
-            return (IpcStatus::Malformed, 0);
+            return IpcStatus::Malformed;
         };
         let Some(layout_node) = layout.node(index as u16) else {
-            return (IpcStatus::Malformed, 0);
+            return IpcStatus::Malformed;
         };
         let bounds = if index == 0 {
             logos_ui::UiRect::new(
@@ -175,7 +199,7 @@ fn draw_ui(
             )
         };
         if tree.tree_mut().set_bounds(handle, bounds).is_err() {
-            return (IpcStatus::Malformed, 0);
+            return IpcStatus::Malformed;
         }
         if tree
             .tree_mut()
@@ -185,7 +209,7 @@ fn draw_ui(
             )
             .is_err()
         {
-            return (IpcStatus::Malformed, 0);
+            return IpcStatus::Malformed;
         }
     }
 
@@ -195,7 +219,7 @@ fn draw_ui(
     }
     for index in 0..build.document.node_count() {
         if tree.apply_document_styles(&build.document, index as u16, &conditions).is_err() {
-            return (IpcStatus::Malformed, 0);
+            return IpcStatus::Malformed;
         }
     }
 
@@ -216,79 +240,35 @@ fn draw_ui(
             },
         )
     {
-        return (IpcStatus::Malformed, 0);
+        return IpcStatus::Malformed;
     }
 
     let (username, password) = lock.credentials();
     if !set_named_value(tree, build, b"username", username, false)
         || !set_named_value(tree, build, b"password", password, true)
     {
-        return (IpcStatus::Malformed, 0);
+        return IpcStatus::Malformed;
     }
     if lock.mode() == logos_lockscreen::LockScreenMode::Claim
         && !set_named_value(tree, build, b"confirmPassword", lock.confirmation(), true)
     {
-        return (IpcStatus::Malformed, 0);
+        return IpcStatus::Malformed;
     }
     let Some(submit_index) = build.document.node_index_by_name(b"submit") else {
-        return (IpcStatus::Malformed, 0);
+        return IpcStatus::Malformed;
     };
     let Ok(submit) = tree.tree().handle_at(usize::from(submit_index)) else {
-        return (IpcStatus::Malformed, 0);
+        return IpcStatus::Malformed;
     };
     if tree.set_disabled(submit, !lock.form().can_submit()).is_err() {
-        return (IpcStatus::Malformed, 0);
+        return IpcStatus::Malformed;
     }
     let now_ticks = common::current_ticks();
     if mount && tree.apply_document_animations(&build.document, now_ticks).is_err() {
-        return (IpcStatus::Malformed, 0);
+        return IpcStatus::Malformed;
     }
     let _ = tree.advance(now_ticks);
-    let scene = match logos_ui_graphics::emit(
-        surface,
-        sequence,
-        tree,
-        logos_ui_graphics::UiSceneTheme::DEFAULT,
-    ) {
-        Ok(scene) => scene,
-        Err(_) => return (IpcStatus::Malformed, 0),
-    };
-    let delta = unsafe {
-        if *core::ptr::addr_of!(LAST_UI_SCENE_READY)
-            && *core::ptr::addr_of!(LAST_UI_SURFACE) == surface
-        {
-            scene.diff_from(&*core::ptr::addr_of!(LAST_UI_SCENE)).unwrap_or(scene)
-        } else {
-            scene
-        }
-    };
-    unsafe {
-        *core::ptr::addr_of_mut!(LAST_UI_SCENE) = scene;
-        *core::ptr::addr_of_mut!(LAST_UI_SURFACE) = surface;
-        *core::ptr::addr_of_mut!(LAST_UI_SCENE_READY) = true;
-        *core::ptr::addr_of_mut!(PENDING_UI_SCENE) = delta;
-    }
-    flush_pending_ui_scene(display, 0)
-}
-
-fn flush_pending_ui_scene(
-    display: logos_abi::CapabilityHandle,
-    start_index: usize,
-) -> (IpcStatus, usize) {
-    let scene = unsafe { *core::ptr::addr_of!(PENDING_UI_SCENE) };
-    for (index, operation) in scene.as_slice().iter().enumerate().skip(start_index) {
-        let status = common::ipc_send_handle(display, operation);
-        if status != IpcStatus::Ok {
-            return (status, index);
-        }
-    }
-    (IpcStatus::Ok, scene.len())
-}
-
-fn clear_pending_ui_scene() {
-    unsafe {
-        *core::ptr::addr_of_mut!(PENDING_UI_SCENE) = logos_ui_graphics::UiSceneFrame::new();
-    }
+    publish_ui_scene(display, surface, sequence, tree)
 }
 
 fn field_for_node(
@@ -542,9 +522,8 @@ pub extern "C" fn _start() -> ! {
     );
     let mut cursor_sequence = 1u32;
     let mut pending_cursor_draw: Option<GuiSceneOp> = None;
-    let mut pending_draw: Option<bool> = None;
+    let mut pending_draw = false;
     let mut pending_draw_sequence = 0u32;
-    let mut pending_draw_index = 0usize;
     let mut input_redraw_pending = false;
     let mut pending_auth: Option<UserRequest> = None;
     let mut response =
@@ -588,26 +567,16 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        if let Some(include_static) = pending_draw {
+        if pending_draw {
             if pending_draw_sequence == 0 {
                 sequence = sequence.wrapping_add(1).max(1);
                 pending_draw_sequence = sequence;
             }
-            let (status, next_index) = draw_ui(
-                display,
-                surface,
-                lock,
-                pending_draw_sequence,
-                include_static,
-                pending_draw_index,
-            );
-            pending_draw_index = next_index;
+            let status = draw_ui(display, surface, lock, pending_draw_sequence);
             match status {
                 IpcStatus::Ok => {
-                    pending_draw = None;
+                    pending_draw = false;
                     pending_draw_sequence = 0;
-                    pending_draw_index = 0;
-                    clear_pending_ui_scene();
                     static_cached = true;
                     if input_redraw_pending {
                         proof_line(b"LogOS vNext: LockScreen input redraw submitted");
@@ -616,13 +585,9 @@ pub extern "C" fn _start() -> ! {
                 }
                 IpcStatus::Full => {}
                 _ => {
-                    pending_draw = None;
+                    pending_draw = false;
                     pending_draw_sequence = 0;
-                    pending_draw_index = 0;
-                    clear_pending_ui_scene();
-                    unsafe {
-                        *core::ptr::addr_of_mut!(LAST_UI_SCENE_READY) = false;
-                    }
+                    unsafe { (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset() };
                     static_cached = false;
                 }
             }
@@ -709,7 +674,9 @@ pub extern "C" fn _start() -> ! {
                 pending_surface = None;
                 pending_auth = None;
                 static_cached = false;
-                pending_draw_index = 0;
+                pending_draw = false;
+                pending_draw_sequence = 0;
+                unsafe { (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset() };
                 pending_splash_surface = None;
                 pending_splash_surface_sent = false;
                 pending_splash_draw = false;
@@ -778,8 +745,8 @@ pub extern "C" fn _start() -> ! {
             if surface_response.status == logos_abi::GuiStatus::Ok {
                 surface = surface_response.surface;
                 proof_line(b"LogOS vNext: LockScreen surface ready");
-                pending_draw = Some(true);
-                pending_draw_index = 0;
+                pending_draw = true;
+                pending_draw_sequence = 0;
             }
         }
         if let Some(request) = pending_auth {
@@ -792,7 +759,6 @@ pub extern "C" fn _start() -> ! {
         while common::ipc_receive_handle(shell_response, &mut response) == IpcStatus::Ok {
             let request = UserRequest::new(response.operation, response.request_id);
             if response.is_valid_for(request) {
-                let old_mode = lock.mode();
                 lock.apply_status(response.status);
                 if response.status == UserStatus::Unclaimed {
                     proof_line(b"LogOS vNext: LockScreen claim mode ready");
@@ -806,8 +772,8 @@ pub extern "C" fn _start() -> ! {
                     proof_line(b"LogOS vNext: LockScreen login PASS");
                 }
                 if surface.is_valid() {
-                    pending_draw = Some(!static_cached || old_mode != lock.mode());
-                    pending_draw_index = 0;
+                    pending_draw = true;
+                    pending_draw_sequence = 0;
                 }
             }
         }
@@ -882,12 +848,12 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if action != logos_lockscreen::LockScreenAction::Ignored && surface.is_valid() {
-                    pending_draw = Some(true);
-                    pending_draw_index = 0;
+                    pending_draw = true;
+                    pending_draw_sequence = 0;
                     input_redraw_pending = true;
                 }
             }
-            if input_received && input_redraw_pending && pending_draw.is_some() {
+            if input_received && input_redraw_pending && pending_draw {
                 common::heartbeat();
                 continue;
             }
@@ -902,13 +868,13 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        if visible && pending_draw.is_none() && surface.is_valid() {
+        if visible && !pending_draw && surface.is_valid() {
             let now_ticks = common::current_ticks();
             let motion_active =
                 unsafe { (&*core::ptr::addr_of!(UI_TREE)).next_deadline(now_ticks).is_some() };
             if motion_active {
-                pending_draw = Some(true);
-                pending_draw_index = 0;
+                pending_draw = true;
+                pending_draw_sequence = 0;
             }
         }
         if visible
