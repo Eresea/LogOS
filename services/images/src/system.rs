@@ -122,7 +122,13 @@ fn insert_node(
     text: &[u8],
     style: Option<UiStyle>,
 ) -> bool {
-    let Ok(handle) = tree.insert(kind, UiNodeHandle::EMPTY, tree.tree().len() as u16) else {
+    let parent = if tree.tree().is_empty() {
+        UiNodeHandle::EMPTY
+    } else {
+        let Ok(root) = tree.tree().handle_at(0) else { return false };
+        root
+    };
+    let Ok(handle) = tree.insert(kind, parent, tree.tree().len() as u16) else {
         return false;
     };
     if tree.tree_mut().set_bounds(handle, bounds).is_err() {
