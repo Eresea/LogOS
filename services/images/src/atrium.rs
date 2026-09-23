@@ -182,6 +182,37 @@ fn proof_line(message: &[u8]) {
 #[cfg(not(feature = "qemu-proof"))]
 fn proof_line(_message: &[u8]) {}
 
+#[cfg(feature = "qemu-proof")]
+fn proof_home_surface_ready(surface: SurfaceHandle) {
+    use core::fmt::Write as _;
+
+    struct ProofLine {
+        bytes: [u8; 96],
+        length: usize,
+    }
+
+    impl core::fmt::Write for ProofLine {
+        fn write_str(&mut self, value: &str) -> core::fmt::Result {
+            let length = value.len().min(self.bytes.len().saturating_sub(self.length));
+            self.bytes[self.length..self.length + length]
+                .copy_from_slice(&value.as_bytes()[..length]);
+            self.length += length;
+            if length == value.len() { Ok(()) } else { Err(core::fmt::Error) }
+        }
+    }
+
+    let mut line = ProofLine { bytes: [0; 96], length: 0 };
+    let _ = write!(
+        line,
+        "LogOS vNext: Atrium home surface ready surface={}/{}",
+        surface.slot, surface.generation,
+    );
+    common::proof_line(&line.bytes[..line.length]);
+}
+
+#[cfg(not(feature = "qemu-proof"))]
+fn proof_home_surface_ready(_surface: SurfaceHandle) {}
+
 fn push_surface_text(
     batch: &mut GuiDrawBatch,
     bounds: GuiRect,
@@ -2166,7 +2197,7 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 if home_surface {
-                    proof_line(b"LogOS vNext: Atrium home surface ready");
+                    proof_home_surface_ready(response.surface);
                 }
                 pending_app_render =
                     render(display, atrium, calculator, atrium_client, &mut sequence);
