@@ -777,10 +777,14 @@ try {
         if (-not (Wait-ProofMarker 'LogOS vNext: Atrium home surface ready' $TimeoutSeconds)) {
             throw 'Home surface did not become ready after explicit login.'
         }
-        Start-Sleep -Seconds 2
         $homeFrame = Join-Path $repoRoot "target\qemu-home-$PID.ppm"
-        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $homeFrame } } | Out-Null
-        if (-not (Framebuffer-HasHomePanel $homeFrame) -or -not (Framebuffer-HasHomeSelectedCard $homeFrame)) {
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        do {
+            Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $homeFrame } } | Out-Null
+            $homeReady = (Framebuffer-HasHomePanel $homeFrame) -and (Framebuffer-HasHomeSelectedCard $homeFrame)
+            if (-not $homeReady) { Start-Sleep -Milliseconds 250 }
+        } until ($homeReady -or [DateTime]::UtcNow -ge $deadline)
+        if (-not $homeReady) {
             throw 'Post-login home surface did not publish its popover pixels.'
         }
         if ($SystemProof) {
