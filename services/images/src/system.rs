@@ -144,7 +144,6 @@ fn insert_node(
 }
 
 fn build_status(tree: &mut UiComponentTree) -> bool {
-    *tree = UiComponentTree::new();
     if !insert_node(
         tree,
         UiNodeKind::Root,
@@ -191,10 +190,28 @@ fn build_status(tree: &mut UiComponentTree) -> bool {
         return false;
     }
 
+    for row in 0..4 {
+        let y = 76 + row * 16;
+        if !insert_node(tree, UiNodeKind::Label, UiRect::new(20, y, 160, 16), b"", None)
+            || !insert_node(tree, UiNodeKind::Label, UiRect::new(190, y, 120, 16), b"", None)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn set_label_text(tree: &mut UiComponentTree, index: usize, bytes: &[u8]) -> bool {
+    let Ok(handle) = tree.tree().handle_at(index) else { return false };
+    let Some(text) = UiText::from_bytes(bytes) else { return false };
+    tree.set_text(handle, text).is_ok()
+}
+
+fn refresh_status(tree: &mut UiComponentTree, sequence: u32) -> bool {
     let mut cursor = 0;
     let mut row = 0u32;
     loop {
-        let request_id = row.saturating_add(1);
+        let request_id = sequence.wrapping_add(row).max(1);
         let request =
             ManagerRequest { cursor, ..ManagerRequest::new(ManagerOperation::List, request_id) };
         let mut response = ManagerResponse::new(
@@ -209,20 +226,9 @@ fn build_status(tree: &mut UiComponentTree) -> bool {
         }
         let record = response.record;
         let name_len = usize::from(record.name_len).min(record.name.len());
-        let y = 76 + (row as i32).saturating_mul(16);
-        if !insert_node(
-            tree,
-            UiNodeKind::Label,
-            UiRect::new(20, y, 160, 16),
-            &record.name[..name_len],
-            None,
-        ) || !insert_node(
-            tree,
-            UiNodeKind::Label,
-            UiRect::new(190, y, 120, 16),
-            state_name(record.state),
-            Some(UiStyle::TextMuted),
-        ) {
+        if !set_label_text(tree, 5 + row as usize * 2, &record.name[..name_len])
+            || !set_label_text(tree, 6 + row as usize * 2, state_name(record.state))
+        {
             return false;
         }
         row += 1;
@@ -230,6 +236,13 @@ fn build_status(tree: &mut UiComponentTree) -> bool {
             break;
         }
         cursor = response.cursor;
+    }
+    for empty_row in row..4 {
+        if !set_label_text(tree, 5 + empty_row as usize * 2, b"")
+            || !set_label_text(tree, 6 + empty_row as usize * 2, b"")
+        {
+            return false;
+        }
     }
     true
 }
@@ -264,6 +277,10 @@ pub extern "C" fn _start() -> ! {
         common::capability_handle(ATRIUM_RESPONSE).unwrap_or_else(|_| common::idle());
     let input_cap = common::capability_handle(ATRIUM_INPUT).unwrap_or_else(|_| common::idle());
     let draw_cap = common::capability_handle(ATRIUM_DRAW).unwrap_or_else(|_| common::idle());
+    let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
+    if !build_status(tree) {
+        common::idle();
+    }
 
     let mut next_request = 1u32;
     let mut sequence = 0u32;
@@ -315,7 +332,7 @@ pub extern "C" fn _start() -> ! {
                 sequence = sequence.wrapping_add(1).max(1);
                 unsafe { (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset() };
                 let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
-                if build_status(tree) {
+                if refresh_status(tree, sequence) {
                     let _ = publish_status(draw_cap, surface, sequence, tree);
                     scene_reported = false;
                 }
@@ -330,7 +347,7 @@ pub extern "C" fn _start() -> ! {
             if input.surface == surface && input.is_valid() && surface.is_valid() {
                 sequence = sequence.wrapping_add(1).max(1);
                 let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
-                if build_status(tree) {
+                if refresh_status(tree, sequence) {
                     let _ = publish_status(draw_cap, surface, sequence, tree);
                 }
             }
