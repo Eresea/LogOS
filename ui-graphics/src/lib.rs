@@ -7,7 +7,8 @@ use logos_abi::{
     GUI_DRAW_FLAG_MORE, GuiDrawCommand, GuiNodeOperation, GuiRect, GuiSceneOp, GuiTransform,
     IpcStatus, MAX_GUI_NODES, SurfaceHandle,
 };
-use logos_ui::{UiComponentTree, UiIcon, UiNode, UiNodeKind, UiRect, UiStyle};
+pub use logos_ui::{UiBlueprint, UiComponentTree, UiNodeKind, UiRect, UiText};
+use logos_ui::{UiIcon, UiNode, UiStyle};
 
 pub const MAX_UI_SCENE_OPS: usize = MAX_GUI_NODES + 2;
 pub const MAX_UI_SCENE_UPSERTS: usize = MAX_GUI_NODES;

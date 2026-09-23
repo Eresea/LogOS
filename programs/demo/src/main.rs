@@ -6,7 +6,13 @@ use logos_abi::{AtriumApp, SurfaceHandle};
 #[cfg(target_os = "none")]
 use logos_program::{ProgramClient, SurfaceEvent};
 #[cfg(target_os = "none")]
-use logos_ui::{UiBlueprint, UiComponentTree, UiNodeKind, UiRect, UiText};
+use logos_ui::{UiBlueprint, UiNodeKind, UiRect, UiText};
+#[cfg(target_os = "none")]
+use logos_ui_graphics::UiComponentTree;
+
+#[cfg(target_os = "none")]
+static mut UI_SCENE_PUBLISHER: logos_ui_graphics::UiScenePublisher =
+    logos_ui_graphics::UiScenePublisher::new();
 
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
@@ -16,11 +22,28 @@ pub extern "C" fn _start() -> ! {
         Err(_) => idle(),
     };
     let _ = client.request_surface(AtriumApp::Calculator);
+    let mut frame = 0u32;
+    let mut scene_pending = false;
     loop {
         let _ = client.retry_surface_request();
-        if let Ok(Some(SurfaceEvent::Created(surface))) = client.poll_surface() {
-            if let Some(scene) = demo_scene(surface) {
-                let _ = client.send_scene(scene.as_slice());
+        match client.poll_surface() {
+            Ok(Some(SurfaceEvent::Created(_))) => {
+                frame = frame.wrapping_add(1).max(1);
+                scene_pending = true;
+            }
+            Ok(Some(SurfaceEvent::Revoked(_))) => unsafe {
+                (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset();
+                scene_pending = false;
+                let _ = client.request_surface(AtriumApp::Calculator);
+            },
+            Ok(None) | Err(_) => {}
+        }
+        if scene_pending && client.has_surface() {
+            if let Some(tree) = demo_tree() {
+                let publisher = unsafe { &mut *core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER) };
+                if client.send_scene(publisher, frame, &tree).is_ok() {
+                    scene_pending = false;
+                }
             }
         }
         let mut input = logos_abi::AtriumSurfaceInput::new(
@@ -37,7 +60,7 @@ pub extern "C" fn _start() -> ! {
 }
 
 #[cfg(target_os = "none")]
-fn demo_scene(surface: SurfaceHandle) -> Option<logos_ui_graphics::UiSceneFrame> {
+fn demo_tree() -> Option<UiComponentTree> {
     let mut blueprint = UiBlueprint::new();
     let root = blueprint.push_root(UiNodeKind::Root, 1).ok()?;
     let panel = blueprint.push_child(UiNodeKind::Panel, root, 2).ok()?;
@@ -51,7 +74,7 @@ fn demo_scene(surface: SurfaceHandle) -> Option<logos_ui_graphics::UiSceneFrame>
     tree.tree_mut().set_bounds(root_handle, viewport).ok()?;
     tree.tree_mut().set_bounds(panel_handle, UiRect::new(16, 16, 288, 188)).ok()?;
     tree.tree_mut().set_bounds(label_handle, UiRect::new(32, 40, 180, 24)).ok()?;
-    logos_ui_graphics::emit(surface, 1, &tree, logos_ui_graphics::UiSceneTheme::DEFAULT).ok()
+    Some(tree)
 }
 
 #[cfg(target_os = "none")]
