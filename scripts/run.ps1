@@ -392,15 +392,21 @@ function Framebuffer-HasHomePanel {
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [IO.File]::ReadAllBytes($Path)
     $layout = Get-PpmLayout $bytes
-    # This point is inside the home popover, away from text, the cursor, and
-    # the rounded shadow. It must not remain the root background.
-    $x = 500
-    $y = 140
-    if ($x -lt 0 -or $y -lt 0 -or $x -ge $layout.Width -or $y -ge $layout.Height) {
+    if ($layout.Width -le 500 -or $layout.Height -le 700) {
         return $false
     }
-    $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
-    return $bytes[$index] -eq 24 -and $bytes[$index + 1] -eq 37 -and $bytes[$index + 2] -eq 53
+    # Below the Home popover, this desktop pixel differs from LockScreen fill.
+    $desktop = $layout.Offset + ((700 * $layout.Width + 200) * 3)
+    # x=30 is inside the 60-pixel rail, away from its controls.
+    $rail = $layout.Offset + ((400 * $layout.Width + 30) * 3)
+    # x=70 is just outside the rail and should show the desktop background.
+    $besideRail = $layout.Offset + ((400 * $layout.Width + 70) * 3)
+    # This point stays inside the Home popover, away from text and its shadow.
+    $popover = $layout.Offset + ((140 * $layout.Width + 500) * 3)
+    return $bytes[$desktop] -eq 16 -and $bytes[$desktop + 1] -eq 24 -and $bytes[$desktop + 2] -eq 32 -and
+        $bytes[$rail] -eq 24 -and $bytes[$rail + 1] -eq 37 -and $bytes[$rail + 2] -eq 53 -and
+        $bytes[$besideRail] -eq 16 -and $bytes[$besideRail + 1] -eq 24 -and $bytes[$besideRail + 2] -eq 32 -and
+        $bytes[$popover] -eq 24 -and $bytes[$popover + 1] -eq 37 -and $bytes[$popover + 2] -eq 53
 }
 
 function Framebuffer-HasHomeSelectedCard {
