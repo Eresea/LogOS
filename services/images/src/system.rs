@@ -332,9 +332,13 @@ pub extern "C" fn _start() -> ! {
                 sequence = sequence.wrapping_add(1).max(1);
                 unsafe { (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset() };
                 let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
+                scene_reported = false;
                 if refresh_status(tree, sequence) {
-                    let _ = publish_status(draw_cap, surface, sequence, tree);
-                    scene_reported = false;
+                    let status = publish_status(draw_cap, surface, sequence, tree);
+                    if status == IpcStatus::Ok && !scene_reported {
+                        proof_line(b"LogOS vNext: System scene built");
+                        scene_reported = true;
+                    }
                 }
                 report_surface(surface);
             } else if response.is_revoke() || response.status == logos_abi::GuiStatus::NotFound {
