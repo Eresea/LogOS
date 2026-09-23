@@ -168,7 +168,7 @@ fn system_layout(surface: GuiRect) -> SystemLayout {
     let content_width = surface.width.saturating_sub((SYSTEM_CONTENT_PADDING * 2) as u32);
     let name_width = content_width / 2;
     let state_width = content_width.saturating_sub(name_width);
-    let close_local = logos_atrium::system_surface_close_bounds(surface);
+    let close_local = logos_atrium::surface_close_bounds(surface);
     let mut rows = [(UiRect::new(0, 0, 0, 0), UiRect::new(0, 0, 0, 0)); SYSTEM_ROW_COUNT];
     for (index, row) in rows.iter_mut().enumerate() {
         let y = surface.y.saturating_add(76 + index as i32 * 16);
@@ -411,10 +411,11 @@ mod tests {
         let layout = system_layout(bounds);
         assert_eq!(layout.surface.x, bounds.x);
         assert_eq!(layout.status_bar.x, bounds.x);
-        assert!(
-            layout.close.x + layout.close.width as i32
-                <= logos_abi::DEFAULT_SCREEN_WIDTH as i32 - 80
-        );
+        let shared_close = logos_atrium::surface_close_bounds(bounds);
+        assert_eq!(layout.close.x, bounds.x + shared_close.x);
+        assert_eq!(layout.close.y, bounds.y + shared_close.y);
+        assert_eq!(layout.close.width, shared_close.width);
+        assert_eq!(layout.close.height, shared_close.height);
 
         let mut tree = UiComponentTree::new();
         assert!(build_status(&mut tree, bounds));

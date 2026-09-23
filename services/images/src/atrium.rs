@@ -2450,11 +2450,7 @@ pub extern "C" fn _start() -> ! {
                     }
                     let local_x = i32::from(pointer.x).saturating_sub(surface.bounds.x);
                     let local_y = i32::from(pointer.y).saturating_sub(surface.bounds.y);
-                    let close_bounds = if surface.app == logos_atrium::AppId::System {
-                        logos_atrium::system_surface_close_bounds(surface.bounds)
-                    } else {
-                        logos_atrium::surface_close_bounds(surface.bounds)
-                    };
+                    let close_bounds = logos_atrium::surface_close_bounds(surface.bounds);
                     let close_clicked = pointer.state == PointerState::Down
                         && close_bounds.contains(local_x, local_y);
                     let local = InputMessage::pointer(

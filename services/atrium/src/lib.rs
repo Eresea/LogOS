@@ -163,17 +163,6 @@ pub const fn surface_close_bounds(surface: GuiRect) -> GuiRect {
     )
 }
 
-pub const fn system_surface_close_bounds(surface: GuiRect) -> GuiRect {
-    let width = 32;
-    let right_inset = STATUS_BAR_CLOSE_BOUNDS.width;
-    GuiRect::new(
-        surface.width.saturating_sub(right_inset + width) as i32,
-        0,
-        width,
-        STATUS_BAR_CLOSE_BOUNDS.height,
-    )
-}
-
 pub const fn command_menu_item_bounds(index: usize) -> GuiRect {
     GuiRect::new(
         COMMAND_MENU_ITEM_LEFT,
@@ -2767,9 +2756,6 @@ mod tests {
         assert!(STATUS_BAR_BOUNDS.contains(320, 16));
         assert!(STATUS_BAR_CLOSE_BOUNDS.contains(1240, 16));
         assert!(!STATUS_BAR_CLOSE_BOUNDS.contains(599, 16));
-        let system_close = system_surface_close_bounds(DESKTOP_SURFACE_BOUNDS);
-        assert_eq!(system_close, GuiRect::new(1108, 0, 32, 32));
-        assert_eq!(DESKTOP_SURFACE_BOUNDS.x + system_close.x + system_close.width as i32, 1200);
     }
 
     #[test]
