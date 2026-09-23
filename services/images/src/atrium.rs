@@ -1848,6 +1848,9 @@ pub extern "C" fn _start() -> ! {
                         surface.reference,
                     );
                     if response_was_empty {
+                        if let Some(response) = pending_client_response.as_mut() {
+                            response.bounds = surface.bounds;
+                        }
                         pending_client_response_capability = system_surface_response;
                     }
                 }
@@ -2135,6 +2138,14 @@ pub extern "C" fn _start() -> ! {
                                     response.bounds = surface.bounds;
                                 }
                                 last_terminal_bounds = surface.bounds;
+                            } else if client_request.app() == Some(AtriumApp::System) {
+                                if let Some(response) =
+                                    pending_client_response.as_mut().filter(|response| {
+                                        response.request_id == client_request.request_id
+                                    })
+                                {
+                                    response.bounds = surface.bounds;
+                                }
                             }
                         }
                         true
@@ -2439,9 +2450,9 @@ pub extern "C" fn _start() -> ! {
                     }
                     let local_x = i32::from(pointer.x).saturating_sub(surface.bounds.x);
                     let local_y = i32::from(pointer.y).saturating_sub(surface.bounds.y);
+                    let close_bounds = logos_atrium::surface_close_bounds(surface.bounds);
                     let close_clicked = pointer.state == PointerState::Down
-                        && logos_atrium::surface_close_bounds(surface.bounds)
-                            .contains(local_x, local_y);
+                        && close_bounds.contains(local_x, local_y);
                     let local = InputMessage::pointer(
                         local_x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
                         local_y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,

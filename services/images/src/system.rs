@@ -7,10 +7,10 @@ mod common;
 use core::mem;
 
 use logos_abi::{
-    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GuiSceneOp,
-    IpcStatus, ManagerOperation, ManagerRequest, ManagerResponse, ManagerState, SurfaceHandle,
+    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GuiRect,
+    GuiSceneOp, IpcStatus, ManagerOperation, ManagerRequest, ManagerResponse, ManagerState,
+    SurfaceHandle,
 };
-use logos_atrium::{FULLSCREEN_SURFACE_BOUNDS, STATUS_BAR_BOUNDS, STATUS_BAR_CLOSE_BOUNDS};
 use logos_ui::{UiComponentTree, UiNodeHandle, UiNodeKind, UiRect, UiStyle, UiStyleList, UiText};
 use logos_ui_graphics::{UiScenePublisher, UiSceneSink, UiSceneTheme};
 
@@ -27,6 +27,21 @@ const SYSTEM_THEME: UiSceneTheme = UiSceneTheme {
 
 static mut UI_TREE: UiComponentTree = UiComponentTree::new();
 static mut UI_SCENE_PUBLISHER: UiScenePublisher = UiScenePublisher::new();
+
+const SYSTEM_CONTENT_PADDING: i32 = 16;
+const SYSTEM_GLYPH_INSET: i32 = 12;
+const SYSTEM_STATE_COLUMN_OFFSET: u32 = 180;
+const SYSTEM_ROW_COUNT: usize = 4;
+
+#[derive(Clone, Copy)]
+struct SystemLayout {
+    surface: UiRect,
+    status_bar: UiRect,
+    title: UiRect,
+    close: UiRect,
+    status: UiRect,
+    rows: [(UiRect, UiRect); SYSTEM_ROW_COUNT],
+}
 
 const ATRIUM_REQUEST: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
@@ -149,46 +164,53 @@ fn insert_node(
     true
 }
 
-fn build_status(tree: &mut UiComponentTree) -> bool {
-    if !insert_node(
-        tree,
-        UiNodeKind::Root,
-        UiRect::new(
-            FULLSCREEN_SURFACE_BOUNDS.x,
-            FULLSCREEN_SURFACE_BOUNDS.y,
-            FULLSCREEN_SURFACE_BOUNDS.width,
-            FULLSCREEN_SURFACE_BOUNDS.height,
+fn system_layout(surface: GuiRect) -> SystemLayout {
+    let text_left = surface.x.saturating_add(SYSTEM_CONTENT_PADDING - SYSTEM_GLYPH_INSET);
+    let content_width = surface.width.saturating_sub((SYSTEM_CONTENT_PADDING * 2) as u32);
+    let name_width = content_width.min(SYSTEM_STATE_COLUMN_OFFSET);
+    let state_width = content_width.saturating_sub(name_width);
+    let close_local = logos_atrium::surface_close_bounds(surface);
+    let mut rows = [(UiRect::new(0, 0, 0, 0), UiRect::new(0, 0, 0, 0)); SYSTEM_ROW_COUNT];
+    for (index, row) in rows.iter_mut().enumerate() {
+        let y = surface.y.saturating_add(76 + index as i32 * 16);
+        *row = (
+            UiRect::new(text_left, y, name_width, 16),
+            UiRect::new(text_left.saturating_add(name_width as i32), y, state_width, 16),
+        );
+    }
+
+    SystemLayout {
+        surface: UiRect::new(surface.x, surface.y, surface.width, surface.height),
+        status_bar: UiRect::new(surface.x, surface.y, surface.width, surface.height.min(32)),
+        title: UiRect::new(text_left, surface.y, name_width, 32),
+        close: UiRect::new(
+            surface.x.saturating_add(close_local.x),
+            surface.y.saturating_add(close_local.y),
+            close_local.width,
+            close_local.height,
         ),
-        b"",
-        None,
-    ) || !insert_node(
-        tree,
-        UiNodeKind::Panel,
-        UiRect::new(
-            STATUS_BAR_BOUNDS.x,
-            STATUS_BAR_BOUNDS.y,
-            STATUS_BAR_BOUNDS.width,
-            STATUS_BAR_BOUNDS.height,
-        ),
-        b"",
-        None,
-    ) || !insert_node(tree, UiNodeKind::Label, UiRect::new(16, 0, 120, 32), b"System", None)
+        status: UiRect::new(text_left, surface.y.saturating_add(48), content_width, 16),
+        rows,
+    }
+}
+
+fn build_status(tree: &mut UiComponentTree, surface: GuiRect) -> bool {
+    *tree = UiComponentTree::new();
+    let layout = system_layout(surface);
+    if !insert_node(tree, UiNodeKind::Root, layout.surface, b"", None)
+        || !insert_node(tree, UiNodeKind::Panel, layout.status_bar, b"", None)
+        || !insert_node(tree, UiNodeKind::Label, layout.title, b"System", None)
         || !insert_node(
             tree,
             UiNodeKind::Button,
-            UiRect::new(
-                STATUS_BAR_CLOSE_BOUNDS.x,
-                STATUS_BAR_CLOSE_BOUNDS.y,
-                STATUS_BAR_CLOSE_BOUNDS.width,
-                STATUS_BAR_CLOSE_BOUNDS.height,
-            ),
+            layout.close,
             b"X",
             Some(UiStyle::BackgroundAccent),
         )
         || !insert_node(
             tree,
             UiNodeKind::Label,
-            UiRect::new(20, 48, 360, 16),
+            layout.status,
             b"Service manager status",
             Some(UiStyle::TextMuted),
         )
@@ -196,10 +218,9 @@ fn build_status(tree: &mut UiComponentTree) -> bool {
         return false;
     }
 
-    for row in 0..4 {
-        let y = 76 + row * 16;
-        if !insert_node(tree, UiNodeKind::Label, UiRect::new(20, y, 160, 16), b"", None)
-            || !insert_node(tree, UiNodeKind::Label, UiRect::new(190, y, 120, 16), b"", None)
+    for (name, state) in layout.rows {
+        if !insert_node(tree, UiNodeKind::Label, name, b"", None)
+            || !insert_node(tree, UiNodeKind::Label, state, b"", None)
         {
             return false;
         }
@@ -275,6 +296,7 @@ fn publish_status(
     }
 }
 
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
@@ -283,11 +305,6 @@ pub extern "C" fn _start() -> ! {
         common::capability_handle(ATRIUM_RESPONSE).unwrap_or_else(|_| common::idle());
     let input_cap = common::capability_handle(ATRIUM_INPUT).unwrap_or_else(|_| common::idle());
     let draw_cap = common::capability_handle(ATRIUM_DRAW).unwrap_or_else(|_| common::idle());
-    let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
-    if !build_status(tree) {
-        common::idle();
-    }
-
     let mut next_request = 1u32;
     let mut sequence = 0u32;
     let mut surface = SurfaceHandle::EMPTY;
@@ -333,13 +350,16 @@ pub extern "C" fn _start() -> ! {
                 continue;
             }
             request_pending = false;
-            if response.status == logos_abi::GuiStatus::Ok && response.surface.is_valid() {
+            if response.status == logos_abi::GuiStatus::Ok
+                && response.surface.is_valid()
+                && !response.bounds.is_empty()
+            {
                 surface = response.surface;
                 sequence = sequence.wrapping_add(1).max(1);
                 unsafe { (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).reset() };
                 let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
                 scene_reported = false;
-                if refresh_status(tree, sequence) {
+                if build_status(tree, response.bounds) && refresh_status(tree, sequence) {
                     let status = publish_status(draw_cap, surface, sequence, tree);
                     if status == IpcStatus::Ok && !scene_reported {
                         proof_line(b"LogOS vNext: System scene built");
@@ -380,3 +400,47 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(not(target_os = "none"))]
 fn main() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logos_abi::{GuiDrawKind, GuiNodeOperation};
+
+    #[test]
+    fn layout_keeps_all_text_inside_atrium_surface_padding() {
+        let bounds = logos_atrium::DESKTOP_SURFACE_BOUNDS;
+        let layout = system_layout(bounds);
+        assert_eq!(layout.surface.x, bounds.x);
+        assert_eq!(layout.status_bar.x, bounds.x);
+        let shared_close = logos_atrium::surface_close_bounds(bounds);
+        assert_eq!(layout.close.x, bounds.x + shared_close.x);
+        assert_eq!(layout.close.y, bounds.y + shared_close.y);
+        assert_eq!(layout.close.width, shared_close.width);
+        assert_eq!(layout.close.height, shared_close.height);
+        let (name_column, state_column) = layout.rows[0];
+        assert!((170..=190).contains(&state_column.x.saturating_sub(name_column.x)));
+
+        let mut tree = UiComponentTree::new();
+        assert!(build_status(&mut tree, bounds));
+        for (row, name) in
+            [b"Input".as_slice(), b"Display", b"Terminal", b"Session"].into_iter().enumerate()
+        {
+            assert!(set_label_text(&mut tree, 5 + row * 2, name));
+            assert!(set_label_text(&mut tree, 6 + row * 2, b"running"));
+        }
+
+        let surface = SurfaceHandle::new(1, 1, 13).unwrap();
+        let scene = logos_ui_graphics::emit(surface, 1, &tree, SYSTEM_THEME).unwrap();
+        let minimum_text_x = bounds.x + SYSTEM_CONTENT_PADDING;
+        let mut text_count = 0;
+        for operation in scene.as_slice() {
+            if operation.operation == GuiNodeOperation::Upsert
+                && operation.command.kind == GuiDrawKind::GlyphRun
+            {
+                assert!(operation.command.x >= minimum_text_x);
+                text_count += 1;
+            }
+        }
+        assert_eq!(text_count, 3 + SYSTEM_ROW_COUNT * 2);
+    }
+}

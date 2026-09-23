@@ -118,5 +118,5 @@ bench = false
 [[bin]]
 name = "logos-system"
 path = "src/system.rs"
-test = false
+test = true
 bench = false
