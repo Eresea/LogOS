@@ -1454,6 +1454,14 @@ pub(crate) fn fault_service_page(
     }
 }
 
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn service_for_process(
+    process: crate::process::ProcessHandle,
+) -> Option<logos_abi::ServiceId> {
+    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).service_for_process(process) }
+}
+
 pub(crate) fn page_fault_address() -> usize {
     let mut address = 0;
     unsafe {

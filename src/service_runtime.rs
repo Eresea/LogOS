@@ -5419,6 +5419,11 @@ impl ServiceRuntime {
         })
     }
 
+    #[cfg(feature = "qemu-proof")]
+    pub(crate) fn service_for_process(&self, process: ProcessHandle) -> Option<ServiceId> {
+        self.service_slot_for_process(process).and_then(ServiceId::from_index)
+    }
+
     fn program_slot_for_process(&self, process: ProcessHandle) -> Option<usize> {
         self.programs.iter().enumerate().find_map(|(slot, program)| {
             (program.process == Some(process) && program.client.is_valid()).then_some(slot)

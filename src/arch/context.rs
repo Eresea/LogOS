@@ -32,7 +32,11 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         match crate::user_mode::faulted(handle, vector, fault_address) {
             crate::user_mode::FaultDisposition::Retry => false,
             crate::user_mode::FaultDisposition::Contained => true,
-            crate::user_mode::FaultDisposition::Fatal => fatal(b"LogOS vNext: kernel fault"),
+            crate::user_mode::FaultDisposition::Fatal(branch) => {
+                #[cfg(feature = "qemu-proof")]
+                log_kernel_fault(fx_context, handle, vector, fault_address, branch);
+                fatal(b"LogOS vNext: kernel fault")
+            }
         }
     } else {
         false
@@ -135,6 +139,53 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         crate::proof::observe_ring3_cpu(cpu, next_root, crate::arch::current_cr3());
     }
     SCHEDULER.saved_context(next).unwrap_or_else(|| fatal(b"LogOS vNext: no context"))
+}
+
+#[cfg(feature = "qemu-proof")]
+fn log_kernel_fault(
+    fx_context: usize,
+    handle: crate::TaskHandle,
+    vector: usize,
+    fault_address: usize,
+    branch: crate::user_mode::FatalFaultBranch,
+) {
+    use core::fmt::Write;
+
+    struct Line {
+        bytes: [u8; 192],
+        len: usize,
+    }
+    impl Write for Line {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
+            let target = self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+            target.copy_from_slice(text.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+
+    let gpr =
+        unsafe { core::ptr::read_unaligned((fx_context + FX_CONTEXT_POINTER) as *const usize) };
+    let rip = unsafe { core::ptr::read_unaligned((gpr + VECTOR_OFFSET + 8) as *const usize) };
+    let service = crate::user_mode::fault_service(handle);
+    let mut line = Line { bytes: [0; 192], len: 0 };
+    let result = if vector == 14 {
+        write!(
+            &mut line,
+            "LogOS vNext: kernel fault vector={vector} rip={rip:#x} cr2={fault_address:#x} task={:#x} service={service:?} branch={branch:?}",
+            handle.raw(),
+        )
+    } else {
+        write!(
+            &mut line,
+            "LogOS vNext: kernel fault vector={vector} rip={rip:#x} task={:#x} service={service:?} branch={branch:?}",
+            handle.raw(),
+        )
+    };
+    if result.is_ok() {
+        debug_line(&line.bytes[..line.len]);
+    }
 }
 
 fn local_tick(cpu: usize) {
