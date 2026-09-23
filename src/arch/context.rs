@@ -32,9 +32,9 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         match crate::user_mode::faulted(handle, vector, fault_address) {
             crate::user_mode::FaultDisposition::Retry => false,
             crate::user_mode::FaultDisposition::Contained => true,
-            crate::user_mode::FaultDisposition::Fatal(branch) => {
+            crate::user_mode::FaultDisposition::Fatal(_branch) => {
                 #[cfg(feature = "qemu-proof")]
-                log_kernel_fault(fx_context, handle, vector, fault_address, branch);
+                log_kernel_fault(fx_context, handle, vector, fault_address, _branch);
                 fatal(b"LogOS vNext: kernel fault")
             }
         }
