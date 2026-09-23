@@ -283,7 +283,7 @@ function Send-QmpKey {
 }
 
 function Send-QmpPointerMotion {
-    param([hashtable]$Qmp, [int]$X, [int]$Y)
+    param([hashtable]$Qmp, [int]$X, [int]$Y, [int]$DelayMilliseconds = 150)
     Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{
         execute = 'input-send-event'
         arguments = @{
@@ -294,7 +294,16 @@ function Send-QmpPointerMotion {
             )
         }
     } | Out-Null
-    Start-Sleep -Milliseconds 150
+    if ($DelayMilliseconds -gt 0) { Start-Sleep -Milliseconds $DelayMilliseconds }
+}
+
+function Send-QmpPointerWalk {
+    param([hashtable]$Qmp, [int]$DeltaY)
+    while ($DeltaY -ne 0) {
+        $step = [Math]::Sign($DeltaY) * [Math]::Min([Math]::Abs($DeltaY), 2)
+        Send-QmpPointerMotion -Qmp $Qmp -X 0 -Y $step -DelayMilliseconds 20
+        $DeltaY -= $step
+    }
 }
 
 function Send-QmpPointerButton {
@@ -694,33 +703,33 @@ try {
         # Exercise the rendered register controls with the mouse: username,
         # password, confirmation, then the submit target.
         $pointerTargetCount = Get-ProofMarkerCount 'LogOS vNext: LockScreen pointer target accepted'
-        # The claim controls are centered in the 1280x800 viewport. Start at
-        # the decoder's centered pointer position and walk the rendered rows.
-        Send-QmpPointerMotion $qmp 0 -100
-        Send-QmpPointerMotion $qmp 0 -100
-        Send-QmpPointerMotion $qmp 0 -100
-        Send-QmpPointerMotion $qmp 0 -12
+        # LoginLayout places the claim fields at y=168, 224, 280, and 336.
+        # Walk from the decoder's y=400 center to the username at y=188, then
+        # advance through the remaining rows. Steps of at most 2 use the
+        # decoder's unaccelerated 224/256 base gain; 243 then 64 raw counts
+        # move -212 then 55/56 pixels, keeping each click within its field.
+        Send-QmpPointerWalk $qmp -243
         Send-QmpPointerButton $qmp $true
         Send-QmpPointerButton $qmp $false
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' $pointerTargetCount $TimeoutSeconds)) {
             throw 'Register username click was not delivered.'
         }
         Send-QmpText $qmp 'admin'
-        Send-QmpPointerMotion $qmp 0 60
+        Send-QmpPointerWalk $qmp 64
         Send-QmpPointerButton $qmp $true
         Send-QmpPointerButton $qmp $false
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' ($pointerTargetCount + 1) $TimeoutSeconds)) {
             throw 'Register password click was not delivered.'
         }
         Send-QmpText $qmp 'password'
-        Send-QmpPointerMotion $qmp 0 60
+        Send-QmpPointerWalk $qmp 64
         Send-QmpPointerButton $qmp $true
         Send-QmpPointerButton $qmp $false
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' ($pointerTargetCount + 2) $TimeoutSeconds)) {
             throw 'Register confirmation click was not delivered.'
         }
         Send-QmpText $qmp 'password'
-        Send-QmpPointerMotion $qmp 0 60
+        Send-QmpPointerWalk $qmp 64
         Send-QmpPointerButton $qmp $true
         Send-QmpPointerButton $qmp $false
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen pointer target accepted' ($pointerTargetCount + 3) $TimeoutSeconds)) {
