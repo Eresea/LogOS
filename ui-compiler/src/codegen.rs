@@ -361,6 +361,7 @@ fn write_style<W: fmt::Write>(output: &mut W, style: UiStyle) -> Result<(), UiCo
         UiStyle::RoundedFull => write!(output, "logos_ui::UiStyle::RoundedFull"),
         UiStyle::BackgroundAccent => write!(output, "logos_ui::UiStyle::BackgroundAccent"),
         UiStyle::TextMuted => write!(output, "logos_ui::UiStyle::TextMuted"),
+        UiStyle::TextSuccess => write!(output, "logos_ui::UiStyle::TextSuccess"),
         UiStyle::Text4xl => write!(output, "logos_ui::UiStyle::Text4xl"),
         UiStyle::FontLight => write!(output, "logos_ui::UiStyle::FontLight"),
         UiStyle::Opacity50 => write!(output, "logos_ui::UiStyle::Opacity50"),

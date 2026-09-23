@@ -256,6 +256,7 @@ pub enum UiStyle {
     RoundedFull,
     BackgroundAccent,
     TextMuted,
+    TextSuccess,
     Text4xl,
     FontLight,
     Opacity50,

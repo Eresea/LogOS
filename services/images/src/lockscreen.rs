@@ -99,6 +99,7 @@ const SPLASH_THEME: logos_ui_graphics::UiSceneTheme = logos_ui_graphics::UiScene
     focus: 0xf2a33a,
     text: 0xffffff,
     muted: 0xb8c7da,
+    success: 0x7ee787,
 };
 
 fn initialize_ui_build(claim: bool) {

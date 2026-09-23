@@ -25,6 +25,7 @@ pub struct UiSceneTheme {
     pub focus: u32,
     pub text: u32,
     pub muted: u32,
+    pub success: u32,
 }
 
 impl UiSceneTheme {
@@ -37,6 +38,7 @@ impl UiSceneTheme {
         focus: 0x4b82f2,
         text: 0xffffff,
         muted: 0xb8c7da,
+        success: 0x7ee787,
     };
 }
 
@@ -868,7 +870,13 @@ fn control_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
 }
 
 fn text_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
-    if node.styles.contains(UiStyle::TextMuted) { theme.muted } else { theme.text }
+    if node.styles.contains(UiStyle::TextSuccess) {
+        theme.success
+    } else if node.styles.contains(UiStyle::TextMuted) {
+        theme.muted
+    } else {
+        theme.text
+    }
 }
 
 fn text_scale(node: &UiNode) -> usize {
@@ -1229,6 +1237,32 @@ mod tests {
         assert_eq!(text.command.auxiliary, logos_abi::GUI_TEXT_FLAG_DOUBLE);
         assert_eq!(text.command.x, 20);
         assert_eq!(text.command.y, 16);
+    }
+
+    #[test]
+    fn success_text_glyphs_use_theme_success_color() {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let label = blueprint.push_child(UiNodeKind::Label, root, 2).unwrap();
+        blueprint.set_text(label, UiText::from_bytes(b"Running").unwrap()).unwrap();
+        let mut styles = UiStyleList::EMPTY;
+        assert!(styles.push(UiStyle::TextSuccess));
+        blueprint.set_styles(label, styles).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 100, 40));
+        set_bounds(&mut tree, 1, UiRect::new(8, 8, 80, 20));
+
+        let theme = UiSceneTheme { success: 0x123456, ..UiSceneTheme::DEFAULT };
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let scene = emit(surface, 1, &tree, theme).unwrap();
+        let text = scene
+            .as_slice()
+            .iter()
+            .find(|operation| operation.command.kind == logos_abi::GuiDrawKind::GlyphRun)
+            .unwrap();
+
+        assert_eq!(UiSceneTheme::DEFAULT.success, 0x7ee787);
+        assert_eq!(text.command.color_rgb(), theme.success);
     }
 
     #[test]
