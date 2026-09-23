@@ -30,6 +30,7 @@ static mut UI_SCENE_PUBLISHER: UiScenePublisher = UiScenePublisher::new();
 
 const SYSTEM_CONTENT_PADDING: i32 = 16;
 const SYSTEM_GLYPH_INSET: i32 = 12;
+const SYSTEM_STATE_COLUMN_OFFSET: u32 = 180;
 const SYSTEM_ROW_COUNT: usize = 4;
 
 #[derive(Clone, Copy)]
@@ -166,7 +167,7 @@ fn insert_node(
 fn system_layout(surface: GuiRect) -> SystemLayout {
     let text_left = surface.x.saturating_add(SYSTEM_CONTENT_PADDING - SYSTEM_GLYPH_INSET);
     let content_width = surface.width.saturating_sub((SYSTEM_CONTENT_PADDING * 2) as u32);
-    let name_width = content_width / 2;
+    let name_width = content_width.min(SYSTEM_STATE_COLUMN_OFFSET);
     let state_width = content_width.saturating_sub(name_width);
     let close_local = logos_atrium::surface_close_bounds(surface);
     let mut rows = [(UiRect::new(0, 0, 0, 0), UiRect::new(0, 0, 0, 0)); SYSTEM_ROW_COUNT];
@@ -416,6 +417,8 @@ mod tests {
         assert_eq!(layout.close.y, bounds.y + shared_close.y);
         assert_eq!(layout.close.width, shared_close.width);
         assert_eq!(layout.close.height, shared_close.height);
+        let (name_column, state_column) = layout.rows[0];
+        assert!((170..=190).contains(&state_column.x.saturating_sub(name_column.x)));
 
         let mut tree = UiComponentTree::new();
         assert!(build_status(&mut tree, bounds));
