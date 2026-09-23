@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 use core::{mem, ptr};
 
 use logos_abi::{
@@ -8,6 +11,7 @@ use logos_abi::{
     IPC_SYSCALL_RECEIVE, IPC_SYSCALL_SEND, IpcStatus, MAX_RENDER_CELLS, MessageKind,
     PROGRAM_BOOTSTRAP_BASE, ProgramBootstrapPage, RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
+use logos_ui_graphics::{UiComponentTree, UiScenePublisher, UiSceneSink, UiSceneTheme};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProgramClientError {
@@ -197,31 +201,32 @@ impl ProgramClient {
         Ok(())
     }
 
-    pub fn send_scene(&mut self, operations: &[GuiSceneOp]) -> Result<(), ProgramClientError> {
-        if operations.is_empty() || operations.len() > logos_abi::MAX_GUI_NODES + 1 {
-            return Err(ProgramClientError::InvalidPayload);
-        }
-        let first = operations[0];
-        self.require_surface(first.surface)?;
-        if first.operation != logos_abi::GuiNodeOperation::Clear
-            || first.flags & GUI_DRAW_FLAG_MORE == 0
-            || operations[operations.len() - 1].flags & GUI_DRAW_FLAG_MORE != 0
-        {
-            return Err(ProgramClientError::InvalidPayload);
-        }
-        for operation in operations {
-            if !operation.is_valid()
-                || operation.surface != first.surface
-                || operation.frame != first.frame
-            {
-                return Err(ProgramClientError::InvalidPayload);
+    pub fn send_scene(
+        &mut self,
+        publisher: &mut UiScenePublisher,
+        frame: u32,
+        tree: &UiComponentTree,
+    ) -> Result<(), ProgramClientError> {
+        let mut sink = ProgramSceneSink(self.surface_draw);
+        self.send_scene_with_sink(publisher, frame, tree, &mut sink)
+    }
+
+    fn send_scene_with_sink<S: UiSceneSink>(
+        &mut self,
+        publisher: &mut UiScenePublisher,
+        frame: u32,
+        tree: &UiComponentTree,
+        sink: &mut S,
+    ) -> Result<(), ProgramClientError> {
+        self.require_surface(self.surface)?;
+        match publisher.publish(self.surface, frame, tree, UiSceneTheme::DEFAULT, None, sink) {
+            Ok((IpcStatus::Ok, _)) => {
+                self.draw_frame = frame;
+                Ok(())
             }
+            Ok((status, _)) => Err(ProgramClientError::Ipc(status)),
+            Err(_) => Err(ProgramClientError::InvalidPayload),
         }
-        for operation in operations {
-            send(self.surface_draw, operation)?;
-        }
-        self.draw_frame = first.frame;
-        Ok(())
     }
 
     pub fn send_render(&self, message: RenderMessage) -> Result<(), ProgramClientError> {
@@ -265,6 +270,18 @@ impl ProgramClient {
                 self.request_sent = false;
                 Err(error)
             }
+        }
+    }
+}
+
+struct ProgramSceneSink(logos_abi::CapabilityHandle);
+
+impl UiSceneSink for ProgramSceneSink {
+    fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus {
+        match send(self.0, operation) {
+            Ok(()) => IpcStatus::Ok,
+            Err(ProgramClientError::Ipc(status)) => status,
+            Err(_) => IpcStatus::Malformed,
         }
     }
 }
@@ -330,6 +347,50 @@ fn ipc_syscall(number: usize, capability: u64, length: usize) -> IpcStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use logos_ui_graphics::{UiBlueprint, UiNodeKind, UiRect, UiText};
+    use std::vec::Vec;
+
+    struct TestSink {
+        operations: Vec<GuiSceneOp>,
+        full_at: Option<usize>,
+        calls: usize,
+    }
+
+    impl UiSceneSink for TestSink {
+        fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus {
+            let call = self.calls;
+            self.calls += 1;
+            if self.full_at == Some(call) {
+                self.full_at = None;
+                return IpcStatus::Full;
+            }
+            self.operations.push(*operation);
+            IpcStatus::Ok
+        }
+    }
+
+    fn tree() -> UiComponentTree {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let label = blueprint.push_child(UiNodeKind::Label, root, 2).unwrap();
+        blueprint.set_text(label, UiText::from_bytes(b"First").unwrap()).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        let root = tree.tree().handle_at(usize::from(root)).unwrap();
+        let label = tree.tree().handle_at(usize::from(label)).unwrap();
+        tree.tree_mut().set_bounds(root, UiRect::new(0, 0, 100, 30)).unwrap();
+        tree.tree_mut().set_bounds(label, UiRect::new(4, 4, 80, 20)).unwrap();
+        tree
+    }
+
+    fn client() -> ProgramClient {
+        let mut client = ProgramClient::from_bootstrap(bootstrap()).unwrap();
+        client.surface = SurfaceHandle::new(2, 1, 13).unwrap();
+        client
+    }
+
+    fn sink(full_at: Option<usize>) -> TestSink {
+        TestSink { operations: Vec::new(), full_at, calls: 0 }
+    }
 
     fn bootstrap() -> ProgramBootstrapPage {
         let cap = |index| logos_abi::CapabilityHandle::new(index, 1).unwrap();
@@ -386,16 +447,99 @@ mod tests {
     }
 
     #[test]
-    fn retained_scene_requires_one_atomic_frame_for_the_admitted_surface() {
+    fn retained_scene_validation_rejects_cursor_shape_for_program_surfaces() {
         let mut client = ProgramClient::from_bootstrap(bootstrap()).unwrap();
         let surface = SurfaceHandle::new(2, 1, 13).unwrap();
         client.surface = surface;
-        let mut clear = GuiSceneOp::clear(surface, 1);
-        clear.flags = GUI_DRAW_FLAG_MORE;
-        let wrong_surface = GuiSceneOp::commit(SurfaceHandle::new(3, 1, 13).unwrap(), 1);
+        let mut blueprint = UiBlueprint::new();
+        blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        let root = tree.tree().handle_at(0).unwrap();
+        tree.tree_mut().set_bounds(root, UiRect::new(0, 0, 3, 14)).unwrap();
+        let mut publisher = UiScenePublisher::new();
+        let mut sink = sink(None);
+
         assert_eq!(
-            client.send_scene(&[clear, wrong_surface]),
+            client.send_scene_with_sink(&mut publisher, 1, &tree, &mut sink),
             Err(ProgramClientError::InvalidPayload)
         );
+        assert!(sink.operations.is_empty());
+    }
+
+    #[test]
+    fn send_scene_resumes_a_full_frame_without_resending_sent_operations() {
+        let mut client = client();
+        let mut publisher = UiScenePublisher::new();
+        let tree = tree();
+        let expected =
+            logos_ui_graphics::emit(client.surface(), 1, &tree, UiSceneTheme::DEFAULT).unwrap();
+        let mut sink = sink(Some(2));
+
+        assert_eq!(
+            client.send_scene_with_sink(&mut publisher, 1, &tree, &mut sink),
+            Err(ProgramClientError::Ipc(IpcStatus::Full))
+        );
+        assert!(publisher.is_pending());
+        assert_eq!(client.send_scene_with_sink(&mut publisher, 1, &tree, &mut sink), Ok(()));
+        assert!(!publisher.is_pending());
+        assert_eq!(sink.operations, expected.as_slice());
+    }
+
+    #[test]
+    fn send_scene_publishes_deltas_and_coalesces_after_full() {
+        let mut client = client();
+        let mut publisher = UiScenePublisher::new();
+        let mut tree = tree();
+        let mut sink = sink(None);
+        client.send_scene_with_sink(&mut publisher, 1, &tree, &mut sink).unwrap();
+        sink.operations.clear();
+        sink.calls = 0;
+
+        let label = tree.tree().handle_at(1).unwrap();
+        tree.set_text(label, UiText::from_bytes(b"Intermediate").unwrap()).unwrap();
+        sink.full_at = Some(1);
+        assert_eq!(
+            client.send_scene_with_sink(&mut publisher, 2, &tree, &mut sink),
+            Err(ProgramClientError::Ipc(IpcStatus::Full))
+        );
+        tree.set_text(label, UiText::from_bytes(b"Latest").unwrap()).unwrap();
+        sink.calls = 0;
+        client.send_scene_with_sink(&mut publisher, 3, &tree, &mut sink).unwrap();
+
+        let frame_two_commit = sink
+            .operations
+            .iter()
+            .position(|op| op.operation == logos_abi::GuiNodeOperation::Commit && op.frame == 2)
+            .unwrap();
+        let frame_three = sink.operations.iter().position(|op| op.frame == 3).unwrap();
+        assert!(frame_two_commit < frame_three);
+        assert!(
+            !sink
+                .operations
+                .iter()
+                .any(|op| op.frame == 3 && op.operation == logos_abi::GuiNodeOperation::Clear)
+        );
+        assert!(sink.operations.iter().any(|op| {
+            op.frame == 3 && &op.command.text[..usize::from(op.command.text_len)] == b"Latest"
+        }));
+    }
+
+    #[test]
+    fn send_scene_rebinds_with_a_full_frame() {
+        let mut client = client();
+        let mut publisher = UiScenePublisher::new();
+        let tree = tree();
+        let mut sink = sink(None);
+        client.send_scene_with_sink(&mut publisher, 1, &tree, &mut sink).unwrap();
+        let first_surface = client.surface();
+        client.surface =
+            SurfaceHandle::new(first_surface.slot, first_surface.generation + 1, 13).unwrap();
+        sink.operations.clear();
+        sink.calls = 0;
+
+        client.send_scene_with_sink(&mut publisher, 2, &tree, &mut sink).unwrap();
+
+        assert_eq!(sink.operations[0].operation, logos_abi::GuiNodeOperation::Clear);
+        assert!(sink.operations.iter().all(|op| op.surface == client.surface()));
     }
 }
