@@ -14,13 +14,13 @@ mod register_ui {
 
 use logos_abi::{
     GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSceneOp, GuiSurfaceOperation,
-    GuiSurfaceRequest, GuiSurfaceResponse, GuiTransform, InputMessage, IpcStatus, KeyCode,
-    KeyState, SurfaceHandle, UserOperation, UserRequest, UserResponse, UserStatus,
+    GuiSurfaceRequest, GuiSurfaceResponse, InputMessage, IpcStatus, KeyCode, KeyState,
+    SurfaceHandle, UserOperation, UserRequest, UserResponse, UserStatus,
 };
 use logos_ui::{
     UiAnimationFill, UiAnimationPreset, UiAnimationSpec, UiAnimator, UiComponentTree,
-    UiComputedStyle, UiEasing, UiExpression, UiIcon, UiKeyframe, UiNodeHandle, UiNodeKind,
-    UiRect, UiStyle, UiStyleList, UiStyleConditions, UiText,
+    UiComputedStyle, UiEasing, UiExpression, UiIcon, UiKeyframe, UiNodeHandle, UiNodeKind, UiRect,
+    UiStyle, UiStyleConditions, UiStyleList, UiText,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -599,9 +599,8 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        let splash_publisher_pending = unsafe {
-            (*core::ptr::addr_of!(SPLASH_SCENE_PUBLISHER)).is_pending()
-        };
+        let splash_publisher_pending =
+            unsafe { (*core::ptr::addr_of!(SPLASH_SCENE_PUBLISHER)).is_pending() };
         if splash_frame_due || (splash_publisher_pending && pending_splash_destroy.is_none()) {
             sequence = sequence.wrapping_add(1).max(1);
             if splash_frame_due {
