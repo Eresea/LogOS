@@ -136,6 +136,7 @@ if ($networkEnabled) {
 }
 if ($Proof) {
     Remove-Item $log -Force -ErrorAction SilentlyContinue
+    $atriumAdmissionCount = 0 # The proof log was cleared above.
     $qemuArgs += @('-no-reboot', '-debugcon', "file:qemu-proof-$Cpus.log", '-global', 'isa-debugcon.iobase=0xe9', '-qmp', "tcp:127.0.0.1:$QmpPort,server=on,wait=off")
 } else {
     if ($InputTrace) {
@@ -596,7 +597,6 @@ try {
         return
     }
     if (-not $LockScreenProof) {
-        $atriumAdmissionCount = Get-ProofMarkerCount 'LogOS vNext: Atrium and LockScreen tasks admitted'
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium and LockScreen tasks admitted' $atriumAdmissionCount $TimeoutSeconds)) {
             throw 'Atrium/LockScreen restart admission was not observed.'
         }
@@ -750,11 +750,11 @@ try {
         $loginMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen login PASS'
         $usernameValueMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen username value changed'
         $passwordValueMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen password value changed'
+        $usernameRedrawMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen input redraw submitted'
         Send-QmpText $qmp 'admin'
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen username value changed' $usernameValueMarker $TimeoutSeconds)) {
             throw 'Keyboard input did not change the LockScreen username value.'
         }
-        $usernameRedrawMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen input redraw submitted'
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen input redraw submitted' $usernameRedrawMarker $TimeoutSeconds)) {
             throw 'Keyboard username input did not redraw the LockScreen.'
         }
@@ -765,11 +765,11 @@ try {
             throw 'Keyboard username input did not change the rendered LockScreen.'
         }
         Send-QmpKey $qmp 'tab'
+        $passwordRedrawMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen input redraw submitted'
         Send-QmpText $qmp 'password'
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen password value changed' $passwordValueMarker $TimeoutSeconds)) {
             throw 'Keyboard input did not change the LockScreen password value.'
         }
-        $passwordRedrawMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen input redraw submitted'
         if (-not (Wait-ProofMarkerAfter 'LogOS vNext: LockScreen input redraw submitted' $passwordRedrawMarker $TimeoutSeconds)) {
             throw 'Keyboard password input did not redraw the LockScreen.'
         }
