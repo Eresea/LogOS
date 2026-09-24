@@ -23,6 +23,7 @@ const SYSTEM_THEME: UiSceneTheme = UiSceneTheme {
     focus: 0x4b82f2,
     text: 0xffffff,
     muted: 0x7890aa,
+    success: 0x7ee787,
 };
 
 static mut UI_TREE: UiComponentTree = UiComponentTree::new();
@@ -220,7 +221,7 @@ fn build_status(tree: &mut UiComponentTree, surface: GuiRect) -> bool {
 
     for (name, state) in layout.rows {
         if !insert_node(tree, UiNodeKind::Label, name, b"", None)
-            || !insert_node(tree, UiNodeKind::Label, state, b"", None)
+            || !insert_node(tree, UiNodeKind::Label, state, b"", Some(UiStyle::TextSuccess))
         {
             return false;
         }

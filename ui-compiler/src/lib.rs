@@ -1651,6 +1651,7 @@ fn style_token(token: &[u8]) -> Option<UiStyle> {
         b"rounded-full" => Some(UiStyle::RoundedFull),
         b"bg-accent" => Some(UiStyle::BackgroundAccent),
         b"text-muted" => Some(UiStyle::TextMuted),
+        b"text-success" => Some(UiStyle::TextSuccess),
         b"text-4xl" => Some(UiStyle::Text4xl),
         b"font-light" => Some(UiStyle::FontLight),
         b"opacity-50" => Some(UiStyle::Opacity50),
@@ -1857,6 +1858,17 @@ mod tests {
             build.diagnostics.get(2),
             Some(UiDiagnostic { kind: UiDiagnosticKind::UnknownBinding, .. })
         ));
+    }
+
+    #[test]
+    fn success_text_style_survives_template_codegen() {
+        let build = compile(r#"<ui.text {text-success}>Ready</ui.text>"#);
+        assert!(build.is_valid(), "diagnostics: {:?}", build.diagnostics);
+        assert!(build.document.node(0).unwrap().styles.contains(UiStyle::TextSuccess));
+
+        let mut generated = String::new();
+        write_rust(&build, &mut generated).unwrap();
+        assert!(generated.contains("logos_ui::UiStyle::TextSuccess"));
     }
 
     #[test]
