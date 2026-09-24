@@ -304,6 +304,19 @@ impl UiComponentTree {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.tree.clear();
+        self.components.fill(UiComponentSlot::EMPTY);
+        self.focused = UiNodeHandle::EMPTY;
+        self.hovered = UiNodeHandle::EMPTY;
+        self.pressed = UiNodeHandle::EMPTY;
+        self.route_states.fill(UiRouteState::EMPTY);
+        for index in 0..MAX_UI_COMPONENTS {
+            self.animator.clear(index);
+        }
+        self.clock_ticks = 0;
+    }
+
     pub fn reset_from_document(
         &mut self,
         document: &crate::UiDocument,
@@ -1388,6 +1401,19 @@ mod tests {
         assert_eq!(replacement.slot, input.slot);
         assert_ne!(replacement.generation, input.generation);
         assert_eq!(host.value(input), Err(UiComponentTreeError::Stale));
+    }
+
+    #[test]
+    fn clear_invalidates_handles_and_reuses_slots_with_new_generations() {
+        let mut host = UiComponentTree::new();
+        let root = host.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 1).unwrap();
+        host.clear();
+
+        assert!(host.tree().is_empty());
+        assert!(host.tree().node(root).is_err());
+        let replacement = host.insert(UiNodeKind::Root, UiNodeHandle::EMPTY, 2).unwrap();
+        assert_eq!(replacement.slot, root.slot);
+        assert_ne!(replacement.generation, root.generation);
     }
 
     #[test]
