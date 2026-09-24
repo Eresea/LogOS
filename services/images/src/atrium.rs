@@ -151,22 +151,12 @@ static mut SETTINGS_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentTree:
 static mut SETTINGS_ROUTER: logos_ui::UiEventRouter = logos_ui::UiEventRouter::new();
 static mut SETTINGS_MOUNT: logos_ui::UiRouteMount = logos_ui::UiRouteMount::EMPTY;
 static mut SETTINGS_ROUTE: u8 = u8::MAX;
-static mut PENDING_HOME_SCENE: logos_ui_graphics::UiSceneFrame =
-    logos_ui_graphics::UiSceneFrame::new();
-static mut PENDING_HOME_SCENE_INDEX: usize = 0;
-static mut LAST_HOME_SCENE: logos_ui_graphics::UiSceneFrame =
-    logos_ui_graphics::UiSceneFrame::new();
-static mut LAST_HOME_SURFACE: SurfaceHandle = SurfaceHandle::EMPTY;
-static mut LAST_HOME_SCENE_READY: bool = false;
+static mut HOME_SCENE_PUBLISHER: logos_ui_graphics::UiScenePublisher =
+    logos_ui_graphics::UiScenePublisher::new();
+static mut HOME_SCENE_REPORTED: bool = false;
+static mut HOME_SCENE_SEQUENCE: u32 = 0;
 const SETTINGS_SELECT_NODE_BASE: u32 = 200;
 const SETTINGS_POPOVER_NODE_BASE: u32 = 204;
-
-fn home_scene_pending() -> bool {
-    unsafe {
-        *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX)
-            < (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len()
-    }
-}
 
 fn push_text(batch: &mut GuiDrawBatch, x: i32, y: i32, color: u32, text: &[u8]) {
     if let Some(command) = GuiDrawCommand::glyph_run(x, y, color, text) {
@@ -521,70 +511,47 @@ fn draw_settings_tree(
         .any(|operation| common::ipc_send_handle(display, operation) == IpcStatus::Full)
 }
 
-fn draw_home(
+struct HomeSceneSink(logos_abi::CapabilityHandle);
+
+impl logos_ui_graphics::UiSceneSink for HomeSceneSink {
+    fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus {
+        common::ipc_send_handle(self.0, operation)
+    }
+}
+
+fn publish_home_scene(
     display: logos_abi::CapabilityHandle,
     surface: SurfaceHandle,
     atrium: &logos_atrium::Atrium,
     sequence: u32,
-) {
+) -> IpcStatus {
+    let pending =
+        unsafe { (*core::ptr::addr_of!(HOME_SCENE_PUBLISHER)).is_pending_for(surface, sequence) };
     let tree = unsafe { &mut *core::ptr::addr_of_mut!(COMMAND_MENU_TREE) };
-    if !logos_atrium::build_home_scene(tree, atrium, common::current_ticks()) {
-        return;
+    if !pending && !logos_atrium::build_home_scene(tree, atrium, common::current_ticks()) {
+        return IpcStatus::Malformed;
     }
-    let scene = match logos_ui_graphics::emit(
-        surface,
-        sequence,
-        tree,
-        logos_ui_graphics::UiSceneTheme::DEFAULT,
-    ) {
-        Ok(scene) => scene,
-        Err(_) => return,
-    };
-    let delta = unsafe {
-        if *core::ptr::addr_of!(LAST_HOME_SCENE_READY)
-            && *core::ptr::addr_of!(LAST_HOME_SURFACE) == surface
-        {
-            scene.diff_from(&*core::ptr::addr_of!(LAST_HOME_SCENE)).unwrap_or(scene)
-        } else {
-            scene
-        }
-    };
-    unsafe {
-        *core::ptr::addr_of_mut!(LAST_HOME_SCENE) = scene;
-        *core::ptr::addr_of_mut!(LAST_HOME_SURFACE) = surface;
-        *core::ptr::addr_of_mut!(LAST_HOME_SCENE_READY) = true;
-        *core::ptr::addr_of_mut!(PENDING_HOME_SCENE) = delta;
-        *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = 0;
+    let mut sink = HomeSceneSink(display);
+    match unsafe {
+        (*core::ptr::addr_of_mut!(HOME_SCENE_PUBLISHER)).publish(
+            surface,
+            sequence,
+            tree,
+            logos_ui_graphics::UiSceneTheme::DEFAULT,
+            None,
+            &mut sink,
+        )
+    } {
+        Ok((status, _)) => status,
+        Err(_) => IpcStatus::Malformed,
     }
-    let _ = flush_pending_home_scene(display);
 }
 
-fn flush_pending_home_scene(display: logos_abi::CapabilityHandle) -> IpcStatus {
-    let mut index = unsafe { *core::ptr::addr_of!(PENDING_HOME_SCENE_INDEX) };
-    let len = unsafe { (*core::ptr::addr_of!(PENDING_HOME_SCENE)).len() };
-    while index < len {
-        let Some(operation) =
-            (unsafe { *core::ptr::addr_of!(PENDING_HOME_SCENE) }).as_slice().get(index).copied()
-        else {
-            break;
-        };
-        match common::ipc_send_handle(display, &operation) {
-            IpcStatus::Ok => index += 1,
-            IpcStatus::Full => {
-                unsafe { *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = index };
-                return IpcStatus::Full;
-            }
-            status => {
-                unsafe {
-                    *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = len;
-                    *core::ptr::addr_of_mut!(LAST_HOME_SCENE_READY) = false;
-                }
-                return status;
-            }
-        }
+fn reset_home_scene_publisher() {
+    unsafe {
+        (*core::ptr::addr_of_mut!(HOME_SCENE_PUBLISHER)).reset();
+        *core::ptr::addr_of_mut!(HOME_SCENE_REPORTED) = false;
     }
-    unsafe { *core::ptr::addr_of_mut!(PENDING_HOME_SCENE_INDEX) = len };
-    IpcStatus::Ok
 }
 
 fn send_settings_menu_node(
@@ -1367,29 +1334,40 @@ fn hide_surfaces(
     }
     atrium.lock();
     atrium.clear_surfaces();
-    unsafe {
-        *core::ptr::addr_of_mut!(LAST_HOME_SCENE_READY) = false;
-        *core::ptr::addr_of_mut!(LAST_HOME_SURFACE) = SurfaceHandle::EMPTY;
-    }
+    reset_home_scene_publisher();
 }
 
 fn render_home_surface(
     display: logos_abi::CapabilityHandle,
     atrium: &logos_atrium::Atrium,
-    sequence: &mut u32,
 ) -> bool {
-    if home_scene_pending() {
-        let status = flush_pending_home_scene(display);
-        if home_scene_pending() {
-            return status == IpcStatus::Full;
-        }
-    }
     let Some(home) = atrium.home_surface().is_valid().then_some(atrium.home_surface()) else {
         return false;
     };
-    *sequence = sequence.wrapping_add(1).max(1);
-    draw_home(display, home, atrium, *sequence);
-    home_scene_pending()
+    let (frame, resuming) = unsafe {
+        let sequence = &mut *core::ptr::addr_of_mut!(HOME_SCENE_SEQUENCE);
+        let resuming = (*core::ptr::addr_of!(HOME_SCENE_PUBLISHER)).is_pending_for(home, *sequence);
+        if !resuming {
+            *sequence = sequence.wrapping_add(1).max(1);
+        }
+        (*sequence, resuming)
+    };
+    match publish_home_scene(display, home, atrium, frame) {
+        IpcStatus::Ok => {
+            unsafe {
+                if !*core::ptr::addr_of!(HOME_SCENE_REPORTED) {
+                    proof_line(b"LogOS vNext: Atrium home scene built");
+                    *core::ptr::addr_of_mut!(HOME_SCENE_REPORTED) = true;
+                }
+            }
+            resuming
+        }
+        IpcStatus::Full => true,
+        _ => {
+            reset_home_scene_publisher();
+            false
+        }
+    }
 }
 
 fn render_settings_surface(
@@ -1448,7 +1426,7 @@ fn render(
     atrium_client: logos_abi::ServiceHandle,
     sequence: &mut u32,
 ) -> bool {
-    if render_home_surface(display, atrium, sequence) {
+    if render_home_surface(display, atrium) {
         return true;
     }
     for surface in atrium.surfaces() {
@@ -2174,6 +2152,7 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
             } else if atrium.set_home_surface(response.surface).is_ok() {
+                reset_home_scene_publisher();
                 true
             } else {
                 send_surface_command(
@@ -2401,12 +2380,12 @@ pub extern "C" fn _start() -> ! {
                 event = InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0);
             } else if atrium.command_menu_open() && event.pointer_event().is_some() {
                 if command_menu_hover_changed {
-                    pending_app_render = render_home_surface(display, atrium, &mut sequence);
+                    pending_app_render = render_home_surface(display, atrium);
                 }
                 continue;
             } else if settings_menu_pointer {
                 if settings_menu_changed {
-                    pending_app_render = render_home_surface(display, atrium, &mut sequence);
+                    pending_app_render = render_home_surface(display, atrium);
                 }
                 if sidebar_action.is_none() {
                     continue;
@@ -2859,8 +2838,8 @@ pub extern "C" fn _start() -> ! {
         if menu_motion_active {
             pending_app_render = render(display, atrium, calculator, atrium_client, &mut sequence);
         }
-        if home_scene_pending() {
-            let _ = flush_pending_home_scene(display);
+        if unsafe { (*core::ptr::addr_of!(HOME_SCENE_PUBLISHER)).is_pending() } {
+            pending_app_render = render_home_surface(display, atrium);
         }
         let mut wait_capabilities = [logos_abi::CapabilityHandle::EMPTY; 24];
         let mut wait_count = 0;
