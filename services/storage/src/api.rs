@@ -994,7 +994,9 @@ fn map_block_error(error: logos_storage::BlockError) -> StorageApiStatus {
         logos_storage::BlockError::Unauthorized => StorageApiStatus::PermissionDenied,
         logos_storage::BlockError::Stale => StorageApiStatus::Stale,
         logos_storage::BlockError::InvalidRequest => StorageApiStatus::Invalid,
-        logos_storage::BlockError::Io => StorageApiStatus::Io,
+        logos_storage::BlockError::Io | logos_storage::BlockError::ResponseTimeout => {
+            StorageApiStatus::Io
+        }
     }
 }
 

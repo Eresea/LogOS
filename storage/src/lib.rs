@@ -118,6 +118,7 @@ impl Default for Block {
 pub enum BlockError {
     OutOfBounds,
     Io,
+    ResponseTimeout,
     ReadOnly,
     Unauthorized,
     Stale,
