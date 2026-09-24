@@ -35,7 +35,7 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
             crate::user_mode::FaultDisposition::Fatal(_branch) => {
                 #[cfg(feature = "qemu-proof")]
                 log_kernel_fault(fx_context, handle, vector, fault_address, _branch);
-                fatal(b"LogOS vNext: kernel fault")
+                fatal(b"LogOS vNext: fatal task fault")
             }
         }
     } else {
@@ -152,7 +152,7 @@ fn log_kernel_fault(
     use core::fmt::Write;
 
     struct Line {
-        bytes: [u8; 192],
+        bytes: [u8; 256],
         len: usize,
     }
     impl Write for Line {
@@ -167,24 +167,48 @@ fn log_kernel_fault(
 
     let gpr =
         unsafe { core::ptr::read_unaligned((fx_context + FX_CONTEXT_POINTER) as *const usize) };
-    let rip = unsafe { core::ptr::read_unaligned((gpr + VECTOR_OFFSET + 8) as *const usize) };
+    let has_error_code = matches!(vector, 13 | 14);
+    let exception_data_offset = if has_error_code { 8 } else { 0 };
+    let rip = unsafe {
+        core::ptr::read_unaligned((gpr + VECTOR_OFFSET + 8 + exception_data_offset) as *const usize)
+    };
+    let cs = unsafe {
+        core::ptr::read_unaligned(
+            (gpr + VECTOR_OFFSET + 16 + exception_data_offset) as *const usize,
+        )
+    };
+    let error_code = has_error_code
+        .then(|| unsafe { core::ptr::read_unaligned((gpr + VECTOR_OFFSET + 8) as *const usize) });
     let service = crate::user_mode::fault_service(handle);
-    let mut line = Line { bytes: [0; 192], len: 0 };
+    let mut line = Line { bytes: [0; 256], len: 0 };
     let result = if vector == 14 {
+        let error_code = error_code.unwrap_or(0);
         write!(
             &mut line,
-            "LogOS vNext: kernel fault vector={vector} rip={rip:#x} cr2={fault_address:#x} task={:#x} service={service:?} branch={branch:?}",
+            "LogOS vNext: fatal task fault vector={vector} error={error_code:#x} rip={rip:#x} cs={cs:#x} cr2={fault_address:#x} task={:#x} branch={branch:?}",
+            handle.raw(),
+        )
+    } else if let Some(error_code) = error_code {
+        write!(
+            &mut line,
+            "LogOS vNext: fatal task fault vector={vector} error={error_code:#x} rip={rip:#x} cs={cs:#x} task={:#x} branch={branch:?}",
             handle.raw(),
         )
     } else {
         write!(
             &mut line,
-            "LogOS vNext: kernel fault vector={vector} rip={rip:#x} task={:#x} service={service:?} branch={branch:?}",
+            "LogOS vNext: fatal task fault vector={vector} rip={rip:#x} cs={cs:#x} task={:#x} branch={branch:?}",
             handle.raw(),
         )
     };
     if result.is_ok() {
-        debug_line(&line.bytes[..line.len]);
+        let service_result = match service {
+            Some(service) => write!(&mut line, " service={service:?}"),
+            None => line.write_str(" service=?"),
+        };
+        if service_result.is_ok() {
+            debug_line(&line.bytes[..line.len]);
+        }
     }
 }
 
@@ -418,16 +442,12 @@ global_asm!(
     "jmp context_common",
     ".global user_gp_fault_error",
     "user_gp_fault_error:",
-    // The CPU error code is discarded; using a GPR here would corrupt the
-    // interrupted user register before the common context save runs.
-    "add rsp, 8",
+    // Keep the CPU error code after the vector so the fault logger can report it.
     "push 13",
     "jmp context_common",
     ".global user_pf_fault_error",
     "user_pf_fault_error:",
-    // The CPU error code is discarded; using a GPR here would corrupt the
-    // interrupted user register before the common context save runs.
-    "add rsp, 8",
+    // Keep the CPU error code after the vector so the fault logger can report it.
     "push 14",
     "jmp context_common",
     "context_common:",
@@ -485,7 +505,15 @@ global_asm!(
     "pop rdx",
     "pop rcx",
     "pop rax",
+    "cmp qword ptr [rsp], 13",
+    "je 1f",
+    "cmp qword ptr [rsp], 14",
+    "je 1f",
     "add rsp, 8",
+    "jmp 2f",
+    "1:",
+    "add rsp, 16",
+    "2:",
     "iretq",
     scheduler_stack_top = const
         core::mem::offset_of!(CpuLocal, scheduler_stack) + crate::SCHEDULER_STACK_SIZE,

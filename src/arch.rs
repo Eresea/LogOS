@@ -217,6 +217,22 @@ impl ServiceRuntimeGuard {
         Self { held: true, interrupts_enabled }
     }
 
+    #[cfg(feature = "qemu-proof")]
+    fn try_acquire() -> Option<Self> {
+        let interrupts_enabled = interrupts_enabled();
+        disable_interrupts();
+        if SERVICE_RUNTIME_LOCK
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            if interrupts_enabled {
+                enable_interrupts();
+            }
+            return None;
+        }
+        Some(Self { held: true, interrupts_enabled })
+    }
+
     pub(crate) fn pause(&mut self) {
         if self.held {
             SERVICE_RUNTIME_LOCK.store(false, Ordering::Release);
@@ -1458,7 +1474,7 @@ pub(crate) fn fault_service_page(
 pub(crate) fn service_for_process(
     process: crate::process::ProcessHandle,
 ) -> Option<logos_abi::ServiceId> {
-    let _runtime_guard = ServiceRuntimeGuard::acquire();
+    let _runtime_guard = ServiceRuntimeGuard::try_acquire()?;
     unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).service_for_process(process) }
 }
 

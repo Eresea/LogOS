@@ -491,9 +491,9 @@ mod tests {
     }
 
     #[test]
-    fn block_store_waits_for_a_delayed_response() {
+    fn block_store_waits_until_the_last_allowed_response_poll() {
         let mut kernel = TestKernel::new(capability());
-        kernel.empty_receives = 2;
+        kernel.empty_receives = RESPONSE_POLL_LIMIT - 1;
         let mut store = IpcBlockStore::new(kernel, capability(), 4).unwrap();
         let mut output = Block::zero();
         assert_eq!(store.read_block(BlockIndex::new(1), &mut output), Ok(()));

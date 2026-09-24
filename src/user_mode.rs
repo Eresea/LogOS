@@ -57,8 +57,8 @@ const fn proof_code_page() -> [u8; PAGE_SIZE] {
     let mut page = [0x90; PAGE_SIZE];
     page[0] = 0xcd;
     page[1] = SWITCH_VECTOR;
-    page[2] = 0x0f;
-    page[3] = 0x0b;
+    // CPL3 cannot disable interrupts; CLI raises #GP and exercises its error-code frame.
+    page[2] = 0xfa;
     page
 }
 
