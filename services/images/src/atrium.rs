@@ -551,7 +551,6 @@ fn reset_home_scene_publisher() {
     unsafe {
         (*core::ptr::addr_of_mut!(HOME_SCENE_PUBLISHER)).reset();
         *core::ptr::addr_of_mut!(HOME_SCENE_REPORTED) = false;
-        *core::ptr::addr_of_mut!(HOME_SCENE_SEQUENCE) = 0;
     }
 }
 
@@ -1345,12 +1344,13 @@ fn render_home_surface(
     let Some(home) = atrium.home_surface().is_valid().then_some(atrium.home_surface()) else {
         return false;
     };
-    let frame = unsafe {
+    let (frame, resuming) = unsafe {
         let sequence = &mut *core::ptr::addr_of_mut!(HOME_SCENE_SEQUENCE);
-        if !(*core::ptr::addr_of!(HOME_SCENE_PUBLISHER)).is_pending_for(home, *sequence) {
+        let resuming = (*core::ptr::addr_of!(HOME_SCENE_PUBLISHER)).is_pending_for(home, *sequence);
+        if !resuming {
             *sequence = sequence.wrapping_add(1).max(1);
         }
-        *sequence
+        (*sequence, resuming)
     };
     match publish_home_scene(display, home, atrium, frame) {
         IpcStatus::Ok => {
@@ -1360,7 +1360,7 @@ fn render_home_surface(
                     *core::ptr::addr_of_mut!(HOME_SCENE_REPORTED) = true;
                 }
             }
-            false
+            resuming
         }
         IpcStatus::Full => true,
         _ => {
@@ -2839,7 +2839,7 @@ pub extern "C" fn _start() -> ! {
             pending_app_render = render(display, atrium, calculator, atrium_client, &mut sequence);
         }
         if unsafe { (*core::ptr::addr_of!(HOME_SCENE_PUBLISHER)).is_pending() } {
-            let _ = render_home_surface(display, atrium);
+            pending_app_render = render_home_surface(display, atrium);
         }
         let mut wait_capabilities = [logos_abi::CapabilityHandle::EMPTY; 24];
         let mut wait_count = 0;
