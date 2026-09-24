@@ -15,8 +15,12 @@ use logos_abi::{
     RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
 use logos_display::FrameCoordinator;
-const FPS_SURFACE_BOUNDS: GuiRect =
-    GuiRect::new(logos_abi::DEFAULT_SCREEN_WIDTH as i32 - 80, 8, 72, 24);
+const FPS_SURFACE_BOUNDS: GuiRect = GuiRect::new(
+    logos_abi::DEFAULT_SCREEN_WIDTH as i32 - 80,
+    logos_abi::DEFAULT_SCREEN_HEIGHT as i32 - 32,
+    72,
+    24,
+);
 const FPS_NODE_ID: u32 = u32::MAX - 1;
 const FPS_Z_ORDER: i16 = i16::MAX;
 const FPS_WINDOW_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
@@ -692,3 +696,54 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 
 #[cfg(not(target_os = "none"))]
 fn main() {}
+
+#[cfg(test)]
+mod tests {
+    use super::FPS_SURFACE_BOUNDS;
+    use logos_abi::{GuiRect, ServiceHandle, SurfaceHandle};
+    use logos_atrium::{AppId, Atrium, surface_close_bounds};
+
+    fn intersects(left: GuiRect, right: GuiRect) -> bool {
+        left.x < right.x.saturating_add(right.width as i32)
+            && right.x < left.x.saturating_add(left.width as i32)
+            && left.y < right.y.saturating_add(right.height as i32)
+            && right.y < left.y.saturating_add(left.height as i32)
+    }
+
+    fn assert_close_uncovered(surface: GuiRect) {
+        let local = surface_close_bounds(surface);
+        let close = GuiRect::new(
+            surface.x.saturating_add(local.x),
+            surface.y.saturating_add(local.y),
+            local.width,
+            local.height,
+        );
+        assert!(!intersects(FPS_SURFACE_BOUNDS, close), "FPS overlaps {close:?}");
+    }
+
+    #[test]
+    fn fps_bounds_clear_fullscreen_and_tiled_close_buttons() {
+        assert_close_uncovered(Atrium::initial_surface_bounds(AppId::System));
+
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        atrium
+            .spawn_surface(
+                atrium
+                    .request_surface(AppId::Calculator, ServiceHandle::new(1, 1).unwrap())
+                    .unwrap(),
+                SurfaceHandle::new(1, 1, 13).unwrap(),
+            )
+            .unwrap();
+        atrium
+            .spawn_surface(
+                atrium.request_surface(AppId::Terminal, ServiceHandle::new(2, 1).unwrap()).unwrap(),
+                SurfaceHandle::new(2, 1, 13).unwrap(),
+            )
+            .unwrap();
+
+        for surface in atrium.surfaces() {
+            assert_close_uncovered(surface.bounds);
+        }
+    }
+}

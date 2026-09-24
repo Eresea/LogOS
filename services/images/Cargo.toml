@@ -46,7 +46,7 @@ bench = false
 [[bin]]
 name = "logos-display"
 path = "src/display.rs"
-test = false
+test = true
 bench = false
 
 [[bin]]
