@@ -303,6 +303,7 @@ fn build_settings_tree(
 ) -> bool {
     if tree.tree().is_empty() {
         let blueprint = unsafe { &mut *core::ptr::addr_of_mut!(SETTINGS_BLUEPRINT) };
+        *blueprint = logos_ui::UiBlueprint::new();
         let Some(root) = blueprint.push_root(logos_ui::UiNodeKind::Root, 1).ok() else {
             return false;
         };
@@ -456,6 +457,7 @@ fn build_settings_tree(
     }
 
     let page = atrium.settings_page();
+    let overview = page == logos_atrium::SettingsPage::Overview;
     let route = settings_route(page);
     if unsafe { *core::ptr::addr_of!(SETTINGS_ROUTE) } != route {
         let Some(document) = settings_route_document(page) else { return false };
@@ -486,7 +488,6 @@ fn build_settings_tree(
         select_open = atrium.mouse_select_open();
         layout = atrium.mouse_select_popover(GuiRect::new(0, 0, bounds.width, bounds.height));
     }
-    let overview = page == logos_atrium::SettingsPage::Overview;
     let select = logos_atrium::SETTINGS_SELECT_BOUNDS;
     let select_bounds = if overview {
         GuiRect::EMPTY
@@ -531,7 +532,7 @@ fn build_settings_tree(
         .map(|option| {
             GuiRect::new(bounds.x + option.x, bounds.y + option.y, option.width, option.height)
         })
-        .unwrap_or(popover_bounds);
+        .unwrap_or(GuiRect::EMPTY);
     for index in 0..4 {
         let visible = select_open
             && index >= usize::from(layout.first_option)
@@ -590,12 +591,19 @@ fn build_settings_tree(
         if tree.set_text(handle, value).is_err() {
             return false;
         }
-        let mut styles = logos_ui::UiStyleList::EMPTY;
-        if hovered_option == Some(index as u8) && !styles.push(logos_ui::UiStyle::BackgroundAccent)
-        {
+        if tree.set_styles(handle, logos_ui::UiStyleList::EMPTY).is_err() {
             return false;
         }
-        if tree.set_styles(handle, styles).is_err() {
+    }
+    let mut option_hover_styles = logos_ui::UiStyleList::EMPTY;
+    if !option_hover_styles.push(logos_ui::UiStyle::RoundedLarge)
+        || (hovered_option.is_some()
+            && !option_hover_styles.push(logos_ui::UiStyle::BackgroundAccent))
+    {
+        return false;
+    }
+    if let Ok(handle) = tree.tree().handle_at(18) {
+        if tree.set_styles(handle, option_hover_styles).is_err() {
             return false;
         }
     }
@@ -630,12 +638,20 @@ fn build_settings_tree(
         bounds.width.saturating_sub(280),
         bounds.height.saturating_sub(76),
     );
-    let overview = page == logos_atrium::SettingsPage::Overview;
     let route_bounds = if overview { GuiRect::EMPTY } else { frame_bounds };
+    let sidebar_bounds = if overview { sidebar_bounds } else { GuiRect::EMPTY };
     if !set_settings_tree_bounds(tree, 0, bounds)
         || !set_settings_tree_bounds(tree, 1, sidebar_bounds)
         || !set_settings_tree_bounds(tree, 2, route_bounds)
-        || !set_settings_tree_bounds(tree, 6, GuiRect::new(bounds.x + 28, bounds.y + 72, 180, 28))
+        || !set_settings_tree_bounds(
+            tree,
+            6,
+            if overview {
+                GuiRect::new(bounds.x + 28, bounds.y + 72, 180, 28)
+            } else {
+                GuiRect::EMPTY
+            },
+        )
     {
         return false;
     }
@@ -643,7 +659,11 @@ fn build_settings_tree(
     if !set_settings_tree_bounds(
         tree,
         3,
-        GuiRect::new(bounds.x + search.x, bounds.y + search.y, search.width, search.height),
+        if overview {
+            GuiRect::new(bounds.x + search.x, bounds.y + search.y, search.width, search.height)
+        } else {
+            GuiRect::EMPTY
+        },
     ) {
         return false;
     }
@@ -658,7 +678,7 @@ fn build_settings_tree(
     let mut visible_index = 0;
     for (index, page) in logos_atrium::SETTINGS_CARD_PAGES.into_iter().enumerate() {
         let card = logos_atrium::settings_card_bounds(visible_index);
-        let card_bounds = if atrium.settings_card_visible(page) {
+        let card_bounds = if overview && atrium.settings_card_visible(page) {
             visible_index += 1;
             GuiRect::new(bounds.x + card.x, bounds.y + card.y, card.width, card.height)
         } else {
@@ -2796,19 +2816,135 @@ fn main() {}
 mod settings_scene_tests {
     use super::*;
 
+    #[derive(Default)]
+    struct CollectingSceneSink {
+        operations: std::vec::Vec<GuiSceneOp>,
+    }
+
+    impl logos_ui_graphics::UiSceneSink for CollectingSceneSink {
+        fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus {
+            self.operations.push(*operation);
+            IpcStatus::Ok
+        }
+    }
+
+    fn publish_settings(
+        tree: &mut logos_ui::UiComponentTree,
+        atrium: &logos_atrium::Atrium,
+        publisher: &mut logos_ui_graphics::UiScenePublisher,
+        sink: &mut CollectingSceneSink,
+        surface: SurfaceHandle,
+        frame: u32,
+    ) -> usize {
+        assert!(build_settings_tree(tree, logos_atrium::FULLSCREEN_SURFACE_BOUNDS, atrium));
+        let (status, sent) = publisher
+            .publish(surface, frame, tree, APP_SCENE_THEME, None, sink)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "frame {frame}, page {:?}, nodes {}: {error:?}",
+                    atrium.settings_page(),
+                    tree.tree().len()
+                )
+            });
+        assert_eq!(status, IpcStatus::Ok);
+        assert!(sent <= logos_ui_graphics::MAX_UI_SCENE_OPS);
+        sent
+    }
+
+    fn click_settings(atrium: &mut logos_atrium::Atrium, x: i32, y: i32) {
+        let input = InputMessage::pointer(x as i16, y as i16, 1, PointerState::Down).unwrap();
+        assert!(atrium.settings_input(&input));
+    }
+
+    fn hover_settings(atrium: &mut logos_atrium::Atrium, x: i32, y: i32) {
+        let input = InputMessage::pointer(x as i16, y as i16, 0, PointerState::Move).unwrap();
+        assert!(atrium.settings_input(&input));
+    }
+
     #[test]
-    fn composed_settings_scene_has_one_clear() {
+    fn composed_settings_scenes_fit_publisher_on_all_pages_and_hover() {
         let mut tree = logos_ui::UiComponentTree::new();
-        let atrium = logos_atrium::Atrium::new();
-        let bounds = logos_atrium::FULLSCREEN_SURFACE_BOUNDS;
+        let mut atrium = logos_atrium::Atrium::new();
         let surface = logos_abi::SurfaceHandle::new(0, 1, 1).unwrap();
-        assert!(build_settings_tree(&mut tree, bounds, &atrium));
-        let scene =
-            logos_ui_graphics::emit(surface, 1, &tree, logos_ui_graphics::UiSceneTheme::DEFAULT)
-                .unwrap();
+        let mut publisher = logos_ui_graphics::UiScenePublisher::new();
+        let mut sink = CollectingSceneSink::default();
+
+        unsafe {
+            let blueprint = &mut *core::ptr::addr_of_mut!(SETTINGS_BLUEPRINT);
+            assert!(blueprint.push_root(logos_ui::UiNodeKind::Root, u16::MAX).is_ok());
+        }
+        publish_settings(&mut tree, &atrium, &mut publisher, &mut sink, surface, 1);
+        let scene = logos_ui_graphics::emit(surface, 1, &tree, APP_SCENE_THEME).unwrap();
+        assert!(scene.as_slice().iter().any(|operation| {
+            operation.node_id == 1 && operation.command.kind == logos_abi::GuiDrawKind::FillRect
+        }));
+        click_settings(&mut atrium, 48, 180);
+        assert!(publish_settings(&mut tree, &atrium, &mut publisher, &mut sink, surface, 2) > 0);
+        click_settings(&mut atrium, 300, 200);
+        assert!(atrium.keyboard_select_open());
+        let start = sink.operations.len();
+        assert!(publish_settings(&mut tree, &atrium, &mut publisher, &mut sink, surface, 3) > 0);
+        assert!(
+            sink.operations[start..]
+                .iter()
+                .all(|operation| operation.operation != logos_abi::GuiNodeOperation::Clear)
+        );
+
+        let layout = atrium.keyboard_select_popover(logos_atrium::FULLSCREEN_SURFACE_BOUNDS);
+        let option = layout.option_bounds(0);
+        hover_settings(&mut atrium, option.x + 1, option.y + 1);
+        assert_eq!(atrium.keyboard_select_hovered_option(), Some(0));
+        assert!(build_settings_tree(&mut tree, logos_atrium::FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert!(
+            tree.tree()
+                .has_style(tree.tree().handle_at(18).unwrap(), logos_ui::UiStyle::BackgroundAccent)
+                .unwrap()
+        );
+        assert!(
+            !tree
+                .tree()
+                .has_style(tree.tree().handle_at(19).unwrap(), logos_ui::UiStyle::BackgroundAccent)
+                .unwrap()
+        );
+        let start = sink.operations.len();
+        assert!(publish_settings(&mut tree, &atrium, &mut publisher, &mut sink, surface, 4) > 0);
+        assert!(
+            sink.operations[start..]
+                .iter()
+                .all(|operation| operation.operation != logos_abi::GuiNodeOperation::Clear)
+        );
+
+        click_settings(&mut atrium, 300, 100);
+        click_settings(&mut atrium, 48, 280);
+        assert!(publish_settings(&mut tree, &atrium, &mut publisher, &mut sink, surface, 5) > 0);
+        click_settings(&mut atrium, 300, 200);
+        assert!(publish_settings(&mut tree, &atrium, &mut publisher, &mut sink, surface, 6) > 0);
+
+        let layout = atrium.mouse_select_popover(logos_atrium::FULLSCREEN_SURFACE_BOUNDS);
+        let option = layout.option_bounds(0);
+        hover_settings(&mut atrium, option.x + 1, option.y + 1);
+        assert_eq!(atrium.mouse_select_hovered_option(), Some(0));
+        assert!(build_settings_tree(&mut tree, logos_atrium::FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert!(
+            tree.tree()
+                .has_style(tree.tree().handle_at(18).unwrap(), logos_ui::UiStyle::BackgroundAccent)
+                .unwrap()
+        );
+        assert!(
+            !tree
+                .tree()
+                .has_style(tree.tree().handle_at(19).unwrap(), logos_ui::UiStyle::BackgroundAccent)
+                .unwrap()
+        );
+        let start = sink.operations.len();
+        assert!(publish_settings(&mut tree, &atrium, &mut publisher, &mut sink, surface, 7) > 0);
+        assert!(
+            sink.operations[start..]
+                .iter()
+                .all(|operation| operation.operation != logos_abi::GuiNodeOperation::Clear)
+        );
         assert_eq!(
-            scene
-                .as_slice()
+            sink.operations
                 .iter()
                 .filter(|operation| operation.operation == logos_abi::GuiNodeOperation::Clear)
                 .count(),
