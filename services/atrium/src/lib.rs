@@ -727,25 +727,22 @@ impl Atrium {
             return match self.settings_page {
                 SettingsPage::Overview => card_changed,
                 SettingsPage::Keyboard => {
-                    if self.keyboard_select_open() {
+                    let select_changed = if self.keyboard_select_open() {
                         let layout = self.keyboard_select_popover(FULLSCREEN_SURFACE_BOUNDS);
-                        card_changed
-                            || self.keyboard_select.set_option_hovered(layout.option_at(x, y))
+                        self.keyboard_select.set_option_hovered(layout.option_at(x, y))
                     } else {
-                        card_changed
-                            || self
-                                .keyboard_select
-                                .set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
-                    }
+                        self.keyboard_select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
+                    };
+                    card_changed || select_changed
                 }
                 SettingsPage::Mouse => {
-                    if self.mouse_select_open() {
+                    let select_changed = if self.mouse_select_open() {
                         let layout = self.mouse_select_popover(FULLSCREEN_SURFACE_BOUNDS);
-                        card_changed || self.mouse_select.set_option_hovered(layout.option_at(x, y))
+                        self.mouse_select.set_option_hovered(layout.option_at(x, y))
                     } else {
-                        card_changed
-                            || self.mouse_select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
-                    }
+                        self.mouse_select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
+                    };
+                    card_changed || select_changed
                 }
             };
         }
