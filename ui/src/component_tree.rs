@@ -273,22 +273,9 @@ impl UiComponentTree {
     }
 
     pub fn from_blueprint(blueprint: &crate::UiBlueprint) -> Result<Self, UiComponentTreeError> {
-        let tree = UiTree::from_blueprint(blueprint).map_err(map_tree_error)?;
-        let mut components = [UiComponentSlot::EMPTY; MAX_UI_COMPONENTS];
-        for (index, component) in components.iter_mut().enumerate().take(blueprint.len()) {
-            let spec = blueprint.spec(index).ok_or(UiComponentTreeError::Stale)?;
-            *component = UiComponentSlot::from_kind(spec.kind);
-        }
-        Ok(Self {
-            tree,
-            components,
-            focused: UiNodeHandle::EMPTY,
-            hovered: UiNodeHandle::EMPTY,
-            pressed: UiNodeHandle::EMPTY,
-            route_states: [UiRouteState::EMPTY; MAX_UI_COMPONENTS],
-            animator: UiAnimator::new(),
-            clock_ticks: 0,
-        })
+        let mut host = Self::new();
+        host.reset_from_blueprint(blueprint)?;
+        Ok(host)
     }
 
     pub const fn new() -> Self {
@@ -334,6 +321,25 @@ impl UiComponentTree {
         self.hovered = UiNodeHandle::EMPTY;
         self.pressed = UiNodeHandle::EMPTY;
         self.route_states = [UiRouteState::EMPTY; MAX_UI_COMPONENTS];
+        self.animator = UiAnimator::new();
+        self.clock_ticks = 0;
+        Ok(())
+    }
+
+    pub fn reset_from_blueprint(
+        &mut self,
+        blueprint: &crate::UiBlueprint,
+    ) -> Result<(), UiComponentTreeError> {
+        self.tree = UiTree::from_blueprint(blueprint).map_err(map_tree_error)?;
+        self.components.fill(UiComponentSlot::EMPTY);
+        for index in 0..blueprint.len() {
+            let spec = blueprint.spec(index).ok_or(UiComponentTreeError::Stale)?;
+            self.components[index] = UiComponentSlot::from_kind(spec.kind);
+        }
+        self.focused = UiNodeHandle::EMPTY;
+        self.hovered = UiNodeHandle::EMPTY;
+        self.pressed = UiNodeHandle::EMPTY;
+        self.route_states.fill(UiRouteState::EMPTY);
         self.animator = UiAnimator::new();
         self.clock_ticks = 0;
         Ok(())

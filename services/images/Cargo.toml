@@ -112,7 +112,7 @@ bench = false
 [[bin]]
 name = "logos-atrium"
 path = "src/atrium.rs"
-test = false
+test = true
 bench = false
 
 [[bin]]
