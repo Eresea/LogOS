@@ -396,6 +396,35 @@ fn storage_startup_marker(marker: &[u8]) {
 #[cfg(not(feature = "qemu-proof"))]
 fn storage_startup_marker(_marker: &[u8]) {}
 
+#[cfg(feature = "qemu-proof")]
+fn storage_startup_provisioned_error(error: NamespaceError) {
+    use core::fmt::Write;
+
+    struct Line {
+        bytes: [u8; 160],
+        len: usize,
+    }
+    impl Write for Line {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
+            let target = self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+            target.copy_from_slice(text.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+
+    let mut line = Line { bytes: [0; 160], len: 0 };
+    if core::fmt::write(
+        &mut line,
+        format_args!("LogOS vNext: storage startup provisioned error={error:?}"),
+    )
+    .is_ok()
+    {
+        common::proof_line(&line.bytes[..line.len]);
+    }
+}
+
 fn package_status(error: NamespaceError) -> PackageStatus {
     match error {
         NamespaceError::Unsupported
@@ -792,6 +821,8 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
             };
             DurableNamespaceV5::format_v5_provisioned(store).unwrap_or_else(|error| {
                 storage_startup_marker(b"LogOS vNext: storage startup provisioned FAIL");
+                #[cfg(feature = "qemu-proof")]
+                storage_startup_provisioned_error(error);
                 serve_storage_error(storage_error_status(error))
             })
         }

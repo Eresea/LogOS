@@ -347,7 +347,8 @@ fn map_ipc_status(status: IpcStatus) -> Result<(), BlockError> {
         IpcStatus::Ok => Ok(()),
         IpcStatus::Unauthorized => Err(BlockError::Unauthorized),
         IpcStatus::Stale | IpcStatus::Disconnected => Err(BlockError::Stale),
-        IpcStatus::Full | IpcStatus::Empty => Err(BlockError::Io),
+        IpcStatus::Full => Err(BlockError::Io),
+        IpcStatus::Empty => Err(BlockError::ResponseTimeout),
         IpcStatus::Malformed => Err(BlockError::InvalidRequest),
     }
 }
@@ -490,12 +491,24 @@ mod tests {
     }
 
     #[test]
-    fn block_store_waits_for_a_delayed_response() {
+    fn block_store_waits_until_the_last_allowed_response_poll() {
         let mut kernel = TestKernel::new(capability());
-        kernel.empty_receives = 2;
+        kernel.empty_receives = RESPONSE_POLL_LIMIT - 1;
         let mut store = IpcBlockStore::new(kernel, capability(), 4).unwrap();
         let mut output = Block::zero();
         assert_eq!(store.read_block(BlockIndex::new(1), &mut output), Ok(()));
+    }
+
+    #[test]
+    fn block_store_reports_an_exhausted_response_wait_separately_from_io() {
+        let mut kernel = TestKernel::new(capability());
+        kernel.empty_receives = RESPONSE_POLL_LIMIT;
+        let mut store = IpcBlockStore::new(kernel, capability(), 4).unwrap();
+        let mut output = Block::zero();
+        assert_eq!(
+            store.read_block(BlockIndex::new(1), &mut output),
+            Err(BlockError::ResponseTimeout)
+        );
     }
 
     #[test]

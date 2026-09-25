@@ -217,6 +217,22 @@ impl ServiceRuntimeGuard {
         Self { held: true, interrupts_enabled }
     }
 
+    #[cfg(feature = "qemu-proof")]
+    fn try_acquire() -> Option<Self> {
+        let interrupts_enabled = interrupts_enabled();
+        disable_interrupts();
+        if SERVICE_RUNTIME_LOCK
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            if interrupts_enabled {
+                enable_interrupts();
+            }
+            return None;
+        }
+        Some(Self { held: true, interrupts_enabled })
+    }
+
     pub(crate) fn pause(&mut self) {
         if self.held {
             SERVICE_RUNTIME_LOCK.store(false, Ordering::Release);
@@ -1454,6 +1470,14 @@ pub(crate) fn fault_service_page(
     }
 }
 
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn service_for_process(
+    process: crate::process::ProcessHandle,
+) -> Option<logos_abi::ServiceId> {
+    let _runtime_guard = ServiceRuntimeGuard::try_acquire()?;
+    unsafe { (&*core::ptr::addr_of!(SERVICE_RUNTIME)).service_for_process(process) }
+}
+
 pub(crate) fn page_fault_address() -> usize {
     let mut address = 0;
     unsafe {
@@ -1717,6 +1741,7 @@ fn install_idt(cpu: usize) {
             KERNEL_CODE_SELECTOR,
             0x8e,
         );
+        // Fault vectors sharing context_common: only #GP and #PF push error codes.
         idt[6] =
             IdtEntry::new(user_fault_no_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[13] =

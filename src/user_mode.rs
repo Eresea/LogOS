@@ -57,8 +57,8 @@ const fn proof_code_page() -> [u8; PAGE_SIZE] {
     let mut page = [0x90; PAGE_SIZE];
     page[0] = 0xcd;
     page[1] = SWITCH_VECTOR;
-    page[2] = 0x0f;
-    page[3] = 0x0b;
+    // CPL3 cannot disable interrupts; CLI raises #GP and exercises its error-code frame.
+    page[2] = 0xfa;
     page
 }
 
@@ -104,16 +104,25 @@ pub(crate) fn reserve_frames(pool: &mut crate::frame_pool::FramePool) {
 pub(crate) enum FaultDisposition {
     Retry,
     Contained,
-    Fatal,
+    Fatal(FatalFaultBranch),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FatalFaultBranch {
+    UnsupportedVector,
+    MissingServiceLaunch,
+    ServicePageFault,
+    ServiceProcessFault,
+    ProofProcessFault,
 }
 
 pub(crate) fn faulted(handle: TaskHandle, vector: usize, fault_address: usize) -> FaultDisposition {
     if !matches!(vector, 6 | 13 | 14) {
-        return FaultDisposition::Fatal;
+        return FaultDisposition::Fatal(FatalFaultBranch::UnsupportedVector);
     }
     if handle.raw() != USER_TASK_RAW.load(Ordering::Acquire) {
         let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return FaultDisposition::Fatal;
+            return FaultDisposition::Fatal(FatalFaultBranch::MissingServiceLaunch);
         };
         if vector == 14 {
             return match crate::arch::fault_service_page(launch.process(), fault_address) {
@@ -121,16 +130,29 @@ pub(crate) fn faulted(handle: TaskHandle, vector: usize, fault_address: usize) -
                 crate::service_runtime::ServiceFaultOutcome::Contained => {
                     FaultDisposition::Contained
                 }
-                crate::service_runtime::ServiceFaultOutcome::Fatal => FaultDisposition::Fatal,
+                crate::service_runtime::ServiceFaultOutcome::Fatal => {
+                    FaultDisposition::Fatal(FatalFaultBranch::ServicePageFault)
+                }
             };
         }
         return if crate::arch::fault_service_process(launch.process(), vector as u8) {
             FaultDisposition::Contained
         } else {
-            FaultDisposition::Fatal
+            FaultDisposition::Fatal(FatalFaultBranch::ServiceProcessFault)
         };
     }
-    if mark_fault(vector) { FaultDisposition::Contained } else { FaultDisposition::Fatal }
+    if mark_fault(vector) {
+        FaultDisposition::Contained
+    } else {
+        FaultDisposition::Fatal(FatalFaultBranch::ProofProcessFault)
+    }
+}
+
+#[cfg(feature = "qemu-proof")]
+pub(crate) fn fault_service(handle: TaskHandle) -> Option<logos_abi::ServiceId> {
+    SCHEDULER
+        .user_launch(handle)
+        .and_then(|launch| crate::arch::service_for_process(launch.process()))
 }
 
 pub(crate) fn syscall_faulted(handle: TaskHandle) -> bool {
