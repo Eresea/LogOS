@@ -1741,6 +1741,7 @@ fn install_idt(cpu: usize) {
             KERNEL_CODE_SELECTOR,
             0x8e,
         );
+        // Fault vectors sharing context_common: only #GP and #PF push error codes.
         idt[6] =
             IdtEntry::new(user_fault_no_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
         idt[13] =
