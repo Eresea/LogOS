@@ -155,6 +155,20 @@ static mut HOME_SCENE_PUBLISHER: logos_ui_graphics::UiScenePublisher =
     logos_ui_graphics::UiScenePublisher::new();
 static mut HOME_SCENE_REPORTED: bool = false;
 static mut HOME_SCENE_SEQUENCE: u32 = 0;
+static mut APP_SCENE_PUBLISHERS: [logos_ui_graphics::UiScenePublisher;
+    logos_atrium::MAX_ATRIUM_SURFACES] =
+    [logos_ui_graphics::UiScenePublisher::new(); logos_atrium::MAX_ATRIUM_SURFACES];
+static mut APP_SCENE_SURFACES: [SurfaceHandle; logos_atrium::MAX_ATRIUM_SURFACES] =
+    [SurfaceHandle::EMPTY; logos_atrium::MAX_ATRIUM_SURFACES];
+static mut APP_SCENE_SEQUENCES: [u32; logos_atrium::MAX_ATRIUM_SURFACES] =
+    [0; logos_atrium::MAX_ATRIUM_SURFACES];
+static mut APP_SCENE_REPORTED: [bool; logos_atrium::MAX_ATRIUM_SURFACES] =
+    [false; logos_atrium::MAX_ATRIUM_SURFACES];
+static mut APP_SCENE_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentTree::new();
+const APP_SCENE_THEME: logos_ui_graphics::UiSceneTheme = logos_ui_graphics::UiSceneTheme {
+    accent: 0x9f3b3b,
+    ..logos_ui_graphics::UiSceneTheme::DEFAULT
+};
 const SETTINGS_SELECT_NODE_BASE: u32 = 200;
 const SETTINGS_POPOVER_NODE_BASE: u32 = 204;
 
@@ -202,6 +216,43 @@ fn proof_home_surface_ready(surface: SurfaceHandle) {
 
 #[cfg(not(feature = "qemu-proof"))]
 fn proof_home_surface_ready(_surface: SurfaceHandle) {}
+
+#[cfg(feature = "qemu-proof")]
+fn proof_app_scene_published(app: logos_atrium::AppId, surface: SurfaceHandle) {
+    use core::fmt::Write as _;
+
+    struct ProofLine {
+        bytes: [u8; 112],
+        length: usize,
+    }
+
+    impl core::fmt::Write for ProofLine {
+        fn write_str(&mut self, value: &str) -> core::fmt::Result {
+            let length = value.len().min(self.bytes.len().saturating_sub(self.length));
+            self.bytes[self.length..self.length + length]
+                .copy_from_slice(&value.as_bytes()[..length]);
+            self.length += length;
+            if length == value.len() { Ok(()) } else { Err(core::fmt::Error) }
+        }
+    }
+
+    let title = match app {
+        logos_atrium::AppId::Calculator => "Calculator",
+        logos_atrium::AppId::Files => "Files",
+        logos_atrium::AppId::Terminal => "Terminal",
+        _ => return,
+    };
+    let mut line = ProofLine { bytes: [0; 112], length: 0 };
+    let _ = write!(
+        line,
+        "LogOS vNext: Atrium app={title} scene published surface={}/{}",
+        surface.slot, surface.generation,
+    );
+    common::proof_line(&line.bytes[..line.length]);
+}
+
+#[cfg(not(feature = "qemu-proof"))]
+fn proof_app_scene_published(_app: logos_atrium::AppId, _surface: SurfaceHandle) {}
 
 fn push_surface_text(
     batch: &mut GuiDrawBatch,
@@ -519,6 +570,14 @@ impl logos_ui_graphics::UiSceneSink for HomeSceneSink {
     }
 }
 
+struct AppSceneSink(logos_abi::CapabilityHandle);
+
+impl logos_ui_graphics::UiSceneSink for AppSceneSink {
+    fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus {
+        common::ipc_send_handle(self.0, operation)
+    }
+}
+
 fn publish_home_scene(
     display: logos_abi::CapabilityHandle,
     surface: SurfaceHandle,
@@ -671,54 +730,307 @@ fn render_settings_card_hover(
     false
 }
 
-fn draw_calculator_ui(
+fn add_app_scene_node(
+    tree: &mut logos_ui::UiComponentTree,
+    parent: logos_ui::UiNodeHandle,
+    kind: logos_ui::UiNodeKind,
+    bounds: GuiRect,
+    text: &[u8],
+    styles: logos_ui::UiStyleList,
+) -> Option<logos_ui::UiNodeHandle> {
+    let handle = tree.insert(kind, parent, tree.tree().len() as u16).ok()?;
+    tree.tree_mut()
+        .set_bounds(handle, logos_ui::UiRect::new(bounds.x, bounds.y, bounds.width, bounds.height))
+        .ok()?;
+    if !text.is_empty() {
+        tree.set_text(handle, logos_ui::UiText::from_bytes(text)?).ok()?;
+    }
+    tree.set_styles(handle, styles).ok()?;
+    Some(handle)
+}
+
+fn build_app_scene_tree(
+    surface: logos_atrium::Surface,
+    calculator: &logos_atrium::Calculator,
+) -> bool {
+    let title = match surface.app {
+        logos_atrium::AppId::Calculator => b"Calculator".as_slice(),
+        logos_atrium::AppId::Files => b"Files".as_slice(),
+        logos_atrium::AppId::Terminal => b"Terminal".as_slice(),
+        _ => return false,
+    };
+    let tree = unsafe { &mut *core::ptr::addr_of_mut!(APP_SCENE_TREE) };
+    tree.clear();
+    let bounds = surface.bounds;
+    let Some(root) = add_app_scene_node(
+        tree,
+        logos_ui::UiNodeHandle::EMPTY,
+        logos_ui::UiNodeKind::Root,
+        bounds,
+        b"",
+        logos_ui::UiStyleList::EMPTY,
+    ) else {
+        return false;
+    };
+    let mut close_styles = logos_ui::UiStyleList::EMPTY;
+    if !close_styles.push(logos_ui::UiStyle::BackgroundAccent)
+        || !close_styles.push(logos_ui::UiStyle::RoundedLarge)
+    {
+        return false;
+    }
+    let close = logos_atrium::surface_close_bounds(bounds);
+    if add_app_scene_node(
+        tree,
+        root,
+        logos_ui::UiNodeKind::Panel,
+        GuiRect::new(bounds.x, bounds.y, bounds.width, logos_atrium::STATUS_BAR_BOUNDS.height),
+        b"",
+        logos_ui::UiStyleList::EMPTY,
+    )
+    .is_none()
+        || add_app_scene_node(
+            tree,
+            root,
+            logos_ui::UiNodeKind::Label,
+            GuiRect::new(bounds.x.saturating_add(16), bounds.y.saturating_add(10), 180, 20),
+            title,
+            logos_ui::UiStyleList::EMPTY,
+        )
+        .is_none()
+        || add_app_scene_node(
+            tree,
+            root,
+            logos_ui::UiNodeKind::Panel,
+            GuiRect::new(
+                bounds.x.saturating_add(close.x),
+                bounds.y.saturating_add(close.y),
+                close.width,
+                close.height,
+            ),
+            b"",
+            close_styles,
+        )
+        .is_none()
+        || add_app_scene_node(
+            tree,
+            root,
+            logos_ui::UiNodeKind::Label,
+            GuiRect::new(
+                bounds.x.saturating_add(close.x).saturating_add(16),
+                bounds.y.saturating_add(10),
+                20,
+                20,
+            ),
+            b"X",
+            logos_ui::UiStyleList::EMPTY,
+        )
+        .is_none()
+    {
+        return false;
+    }
+
+    let mut rounded = logos_ui::UiStyleList::EMPTY;
+    let _ = rounded.push(logos_ui::UiStyle::RoundedLarge);
+    match surface.app {
+        logos_atrium::AppId::Calculator => {
+            let panel_bounds = GuiRect::new(
+                bounds.x.saturating_add(12),
+                bounds.y.saturating_add(40),
+                bounds.width.saturating_sub(24),
+                bounds.height.saturating_sub(52),
+            );
+            let display_bounds =
+                GuiRect::new(bounds.x.saturating_add(20), bounds.y.saturating_add(52), 260, 40);
+            if add_app_scene_node(
+                tree,
+                root,
+                logos_ui::UiNodeKind::Panel,
+                panel_bounds,
+                b"",
+                rounded,
+            )
+            .is_none()
+                || add_app_scene_node(
+                    tree,
+                    root,
+                    logos_ui::UiNodeKind::Button,
+                    display_bounds,
+                    b"",
+                    rounded,
+                )
+                .is_none()
+                || add_app_scene_node(
+                    tree,
+                    root,
+                    logos_ui::UiNodeKind::Label,
+                    GuiRect::new(bounds.x.saturating_add(32), bounds.y.saturating_add(64), 240, 20),
+                    calculator.display(),
+                    logos_ui::UiStyleList::EMPTY,
+                )
+                .is_none()
+            {
+                return false;
+            }
+            let rows: [&[u8]; 4] = [
+                b"[ 7 ]   [ 8 ]   [ 9 ]   [ / ]",
+                b"[ 4 ]   [ 5 ]   [ 6 ]   [ * ]",
+                b"[ 1 ]   [ 2 ]   [ 3 ]   [ - ]",
+                b"[ 0 ]   [ . ]   [ = ]   [ + ]",
+            ];
+            for (row, labels) in rows.into_iter().enumerate() {
+                if add_app_scene_node(
+                    tree,
+                    root,
+                    logos_ui::UiNodeKind::Label,
+                    GuiRect::new(
+                        bounds.x.saturating_add(20),
+                        bounds
+                            .y
+                            .saturating_add(logos_atrium::CALCULATOR_BUTTON_TOP + row as i32 * 28),
+                        bounds.width.saturating_sub(40),
+                        20,
+                    ),
+                    labels,
+                    logos_ui::UiStyleList::EMPTY,
+                )
+                .is_none()
+                {
+                    return false;
+                }
+            }
+        }
+        logos_atrium::AppId::Files => {
+            let mut muted = logos_ui::UiStyleList::EMPTY;
+            let _ = muted.push(logos_ui::UiStyle::TextMuted);
+            if add_app_scene_node(
+                tree,
+                root,
+                logos_ui::UiNodeKind::Button,
+                GuiRect::new(bounds.x.saturating_add(20), bounds.y.saturating_add(52), 260, 48),
+                b"",
+                rounded,
+            )
+            .is_none()
+                || add_app_scene_node(
+                    tree,
+                    root,
+                    logos_ui::UiNodeKind::Label,
+                    GuiRect::new(
+                        bounds.x.saturating_add(32),
+                        bounds.y.saturating_add(82),
+                        bounds.width.saturating_sub(64),
+                        20,
+                    ),
+                    b"No files found",
+                    logos_ui::UiStyleList::EMPTY,
+                )
+                .is_none()
+                || add_app_scene_node(
+                    tree,
+                    root,
+                    logos_ui::UiNodeKind::Label,
+                    GuiRect::new(
+                        bounds.x.saturating_add(24),
+                        bounds.y.saturating_add(132),
+                        bounds.width.saturating_sub(48),
+                        20,
+                    ),
+                    b"Storage browser is not available yet",
+                    muted,
+                )
+                .is_none()
+            {
+                return false;
+            }
+        }
+        logos_atrium::AppId::Terminal => {}
+        _ => return false,
+    }
+    true
+}
+
+fn app_scene_slot(surface: SurfaceHandle) -> Option<usize> {
+    let slot = usize::from(surface.slot);
+    (surface.is_valid() && slot < logos_atrium::MAX_ATRIUM_SURFACES).then_some(slot)
+}
+
+fn bind_app_scene_publisher(surface: logos_atrium::Surface) {
+    if !matches!(
+        surface.app,
+        logos_atrium::AppId::Calculator
+            | logos_atrium::AppId::Files
+            | logos_atrium::AppId::Terminal
+    ) {
+        return;
+    }
+    let Some(slot) = app_scene_slot(surface.reference) else { return };
+    unsafe {
+        let publishers = &mut *core::ptr::addr_of_mut!(APP_SCENE_PUBLISHERS);
+        let surfaces = &mut *core::ptr::addr_of_mut!(APP_SCENE_SURFACES);
+        let sequences = &mut *core::ptr::addr_of_mut!(APP_SCENE_SEQUENCES);
+        let reported = &mut *core::ptr::addr_of_mut!(APP_SCENE_REPORTED);
+        if surfaces[slot] != surface.reference {
+            publishers[slot].reset();
+            surfaces[slot] = surface.reference;
+            sequences[slot] = 0;
+            reported[slot] = false;
+        }
+    }
+}
+
+fn unbind_app_scene_publisher(surface: SurfaceHandle) {
+    let Some(slot) = app_scene_slot(surface) else { return };
+    unsafe {
+        let publishers = &mut *core::ptr::addr_of_mut!(APP_SCENE_PUBLISHERS);
+        let surfaces = &mut *core::ptr::addr_of_mut!(APP_SCENE_SURFACES);
+        let sequences = &mut *core::ptr::addr_of_mut!(APP_SCENE_SEQUENCES);
+        let reported = &mut *core::ptr::addr_of_mut!(APP_SCENE_REPORTED);
+        if surfaces[slot] == surface {
+            publishers[slot].reset();
+            surfaces[slot] = SurfaceHandle::EMPTY;
+            sequences[slot] = 0;
+            reported[slot] = false;
+        }
+    }
+}
+
+fn render_app_scene(
     display: logos_abi::CapabilityHandle,
     surface: logos_atrium::Surface,
     calculator: &logos_atrium::Calculator,
-    sequence: u32,
 ) -> bool {
-    let bounds = surface.bounds;
-    let panel_bounds = GuiRect::new(
-        bounds.x.saturating_add(12),
-        bounds.y.saturating_add(40),
-        bounds.width.saturating_sub(24),
-        bounds.height.saturating_sub(52),
-    );
-    let mut base = GuiDrawBatch::new(surface.reference, sequence, bounds);
-    base.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-    let _ = base.push(GuiDrawCommand::fill_rounded_rect(panel_bounds, 0x182535, 16));
-    let display_bounds =
-        GuiRect::new(bounds.x.saturating_add(20), bounds.y.saturating_add(52), 260, 40);
-    let _ = base.push(GuiDrawCommand::fill_rounded_rect(display_bounds, 0x263548, 8));
-    push_surface_text(&mut base, bounds, 32, 64, 0xffffff, calculator.display());
-    if common::ipc_send_scene_batch(display, &base, 6) == IpcStatus::Full {
-        return true;
-    }
-
-    let rows: [&[u8]; 4] = [
-        b"[ 7 ]   [ 8 ]   [ 9 ]   [ / ]",
-        b"[ 4 ]   [ 5 ]   [ 6 ]   [ * ]",
-        b"[ 1 ]   [ 2 ]   [ 3 ]   [ - ]",
-        b"[ 0 ]   [ . ]   [ = ]   [ + ]",
-    ];
-    for (row, labels) in rows.into_iter().enumerate() {
-        let mut keypad = GuiDrawBatch::new(surface.reference, sequence, bounds);
-        if row < 3 {
-            keypad.flags = logos_abi::GUI_DRAW_FLAG_MORE;
+    let Some(slot) = app_scene_slot(surface.reference) else { return false };
+    let (frame, resuming) = unsafe {
+        let publishers = &mut *core::ptr::addr_of_mut!(APP_SCENE_PUBLISHERS);
+        let surfaces = &*core::ptr::addr_of!(APP_SCENE_SURFACES);
+        let sequences = &mut *core::ptr::addr_of_mut!(APP_SCENE_SEQUENCES);
+        if surfaces[slot] != surface.reference {
+            return false;
         }
-        push_surface_text(
-            &mut keypad,
-            bounds,
-            20,
-            logos_atrium::CALCULATOR_BUTTON_TOP + row as i32 * 28,
-            0xffffff,
-            labels,
-        );
-        if common::ipc_send_scene_batch(display, &keypad, 9 + row as u32) == IpcStatus::Full {
-            return true;
+        let resuming = publishers[slot].is_pending_for(surface.reference, sequences[slot]);
+        if !resuming {
+            sequences[slot] = sequences[slot].wrapping_add(1).max(1);
         }
+        (sequences[slot], resuming)
+    };
+    if !build_app_scene_tree(surface, calculator) {
+        return false;
     }
-    false
+    let tree = unsafe { &*core::ptr::addr_of!(APP_SCENE_TREE) };
+    let publisher = unsafe { &mut (*core::ptr::addr_of_mut!(APP_SCENE_PUBLISHERS))[slot] };
+    let mut sink = AppSceneSink(display);
+    match publisher.publish(surface.reference, frame, tree, APP_SCENE_THEME, None, &mut sink) {
+        Ok((IpcStatus::Ok, _)) => {
+            let reported = unsafe { &mut (*core::ptr::addr_of_mut!(APP_SCENE_REPORTED))[slot] };
+            if !*reported {
+                *reported = true;
+                proof_app_scene_published(surface.app, surface.reference);
+            }
+            resuming
+        }
+        Ok((IpcStatus::Full, _)) => true,
+        Ok(_) | Err(_) => false,
+    }
 }
 
 fn draw_settings_ui(
@@ -1037,55 +1349,9 @@ fn draw_app(
         logos_atrium::AppId::Settings => b"Settings",
     };
     match surface.app {
-        logos_atrium::AppId::Calculator => {
-            if draw_surface_chrome(display, surface, sequence, title, true, true) {
-                true
-            } else {
-                draw_calculator_ui(display, surface, calculator, sequence)
-            }
-        }
-        logos_atrium::AppId::Files => {
-            if draw_surface_chrome(display, surface, sequence, title, true, true) {
-                return true;
-            }
-            let mut panel = GuiDrawBatch::new(surface.reference, sequence, surface.bounds);
-            panel.flags = logos_abi::GUI_DRAW_FLAG_MORE;
-            let _ = panel.push(GuiDrawCommand::fill_rect(
-                GuiRect::new(
-                    surface.bounds.x.saturating_add(20),
-                    surface.bounds.y.saturating_add(52),
-                    260,
-                    48,
-                ),
-                0x263548,
-            ));
-            if common::ipc_send_scene_batch(display, &panel, 6) == IpcStatus::Full {
-                return true;
-            }
-            let mut detail = GuiDrawBatch::new(
-                surface.reference,
-                sequence,
-                GuiRect::new(
-                    surface.bounds.x,
-                    surface.bounds.y,
-                    surface.bounds.width,
-                    surface.bounds.height,
-                ),
-            );
-            push_surface_text(&mut detail, surface.bounds, 32, 82, 0xffffff, b"No files found");
-            push_surface_text(
-                &mut detail,
-                surface.bounds,
-                24,
-                132,
-                0xb8c7da,
-                b"Storage browser is not available yet",
-            );
-            common::ipc_send_scene_batch(display, &detail, 7) == IpcStatus::Full
-        }
-        logos_atrium::AppId::Terminal => {
-            draw_surface_chrome(display, surface, sequence, title, false, true)
-        }
+        logos_atrium::AppId::Calculator
+        | logos_atrium::AppId::Files
+        | logos_atrium::AppId::Terminal => render_app_scene(display, surface, calculator),
         logos_atrium::AppId::System => {
             // The System service owns this retained scene, including its chrome.
             false
@@ -1313,6 +1579,7 @@ fn hide_surfaces(
         count += 1;
     }
     for surface in handles[..count].iter().copied() {
+        unbind_app_scene_publisher(surface);
         send_surface_command(
             display,
             commands,
@@ -1759,7 +2026,9 @@ pub extern "C" fn _start() -> ! {
                     last_terminal_bounds = surface.bounds;
                 } else if let Some(surface) = atrium.surface_for_app(logos_atrium::AppId::Terminal)
                 {
-                    let _ = atrium.close_reference(surface.reference);
+                    if atrium.close_reference(surface.reference).is_ok() {
+                        unbind_app_scene_publisher(surface.reference);
+                    }
                     send_surface_command(
                         display_control,
                         &mut surface_commands,
@@ -1997,6 +2266,7 @@ pub extern "C" fn _start() -> ! {
         }
         for surface in stale_program_surfaces[..stale_count].iter().copied() {
             if let Ok(closed) = atrium.close_reference(surface) {
+                unbind_app_scene_publisher(closed.reference);
                 send_surface_command(
                     display_control,
                     &mut surface_commands,
@@ -2104,6 +2374,7 @@ pub extern "C" fn _start() -> ! {
             let admitted = if let Some(request) = app {
                 match atrium.spawn_surface(request, response.surface) {
                     Ok(surface) if for_client => {
+                        bind_app_scene_publisher(surface);
                         if let Some(client_request) = pending_client_request.take() {
                             queue_terminal_response(
                                 &mut pending_client_response,
@@ -2128,7 +2399,10 @@ pub extern "C" fn _start() -> ! {
                         }
                         true
                     }
-                    Ok(_) => true,
+                    Ok(surface) => {
+                        bind_app_scene_publisher(surface);
+                        true
+                    }
                     Err(error) => {
                         send_surface_command(
                             display_control,
@@ -2697,6 +2971,7 @@ pub extern "C" fn _start() -> ! {
                     let old = atrium.focused_surface();
                     if atrium.apply_action(action).is_ok() {
                         if let Some(surface) = old {
+                            unbind_app_scene_publisher(surface.reference);
                             if surface.app == logos_atrium::AppId::Terminal {
                                 queue_terminal_revoke(
                                     &mut pending_client_response,

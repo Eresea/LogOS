@@ -681,6 +681,12 @@ impl UiTree {
         Ok(())
     }
 
+    pub fn clear(&mut self) {
+        self.nodes.fill(UiNode::EMPTY);
+        self.count = 0;
+        self.next_order = 0;
+    }
+
     pub const fn len(&self) -> usize {
         self.count
     }
