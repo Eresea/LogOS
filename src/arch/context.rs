@@ -226,9 +226,11 @@ fn initialize_task_context(handle: crate::TaskHandle) {
         fatal(b"LogOS vNext: task stack");
     };
     let fx = (top.saturating_sub(FX_STATE_SIZE + 8)) & !15;
-    let gpr = fx.saturating_sub(GPR_WORDS * 8 + 8 + 24);
+    // Vector plus the full five-word iretq frame. RSP and SS must be real: an
+    // IRQ can land on task_bootstrap's first instruction, before it loads r15.
+    let gpr = fx.saturating_sub(GPR_WORDS * 8 + 8 + 40);
     unsafe {
-        core::ptr::write_bytes(gpr as *mut u8, 0, GPR_WORDS * 8 + 8 + 24);
+        core::ptr::write_bytes(gpr as *mut u8, 0, GPR_WORDS * 8 + 8 + 40);
         core::ptr::write_bytes(fx as *mut u8, 0, FX_STATE_SIZE + 8);
         core::ptr::write_unaligned((fx as *mut u8).add(0) as *mut u16, 0x037f);
         core::ptr::write_unaligned((fx as *mut u8).add(24) as *mut u32, 0x1f80);
@@ -243,6 +245,11 @@ fn initialize_task_context(handle: crate::TaskHandle) {
             KERNEL_CODE_SELECTOR as usize,
         );
         core::ptr::write_unaligned((gpr + VECTOR_OFFSET + 24) as *mut usize, 0x202);
+        core::ptr::write_unaligned((gpr + VECTOR_OFFSET + 32) as *mut usize, gpr);
+        core::ptr::write_unaligned(
+            (gpr + VECTOR_OFFSET + 40) as *mut usize,
+            KERNEL_DATA_SELECTOR as usize,
+        );
         // The save area is in push order (r15 first, rax last on restore).
         core::ptr::write_unaligned(gpr as *mut usize, top);
     }
