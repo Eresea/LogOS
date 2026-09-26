@@ -88,3 +88,4 @@
 | [0085](0085-live-input-settings.md) | Accepted | Fixed live Atrium→Input keyboard-layout and mouse-acceleration settings control |
 | [0086](0086-wall-clock-time-source.md) | Accepted | Core-owned RTC-anchored wall clock exposed to services through one bounded read-only syscall |
 | [0087](0087-retained-text-grid-node.md) | Accepted | Retained bounded TextGrid scene node with dirty-row cell delivery, and a 24 -> 48 `MAX_GUI_NODES` budget |
+| [0088](0088-inter-proportional-ui-font.md) | Accepted | Offline Inter proportional UI font (14/20 px) with a shared text-measurement API; Terminal and TextGrid keep JetBrains Mono |

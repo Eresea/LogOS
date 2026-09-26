@@ -16,7 +16,6 @@ pub const MAX_UI_SCENE_UPSERTS: usize = MAX_GUI_NODES;
 /// holds two full `UiSceneFrame`s (`MAX_UI_SCENE_OPS` ops each), so this
 /// roughly doubles from 7_232 with the ops budget.
 pub const MAX_UI_SCENE_PUBLISHER_BYTES: usize = 9_264;
-const GUI_GLYPH_WIDTH: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UiSceneTheme {
@@ -683,12 +682,10 @@ fn push_avatar_text(
     if text.is_empty() {
         return Ok(());
     }
-    let scale = text_scale(node) as u32;
-    let text_width =
-        (text.len() as u32).saturating_mul(GUI_GLYPH_WIDTH as u32).saturating_mul(scale);
-    let x = bounds.x.saturating_add(bounds.width.saturating_sub(text_width) as i32 / 2);
-    let text_height = logos_display_text_height(scale as usize);
-    let y = bounds.y.saturating_add(bounds.height.saturating_sub(text_height) as i32 / 2);
+    let measured_width = text_width(node, text);
+    let x = bounds.x.saturating_add(bounds.width.saturating_sub(measured_width) as i32 / 2);
+    let measured_height = text_height(node);
+    let y = bounds.y.saturating_add(bounds.height.saturating_sub(measured_height) as i32 / 2);
     let Some(command) =
         GuiDrawCommand::glyph_run_styled(x, y, color(text_color, node), text_flags(node), text)
     else {
@@ -715,18 +712,16 @@ fn push_text(
     let mut chunk = 0;
     while offset < text.len() {
         let end = offset.saturating_add(logos_abi::MAX_GUI_TEXT_BYTES).min(text.len());
-        let scale = text_scale(node);
-        let x_offset = offset.saturating_mul(GUI_GLYPH_WIDTH).saturating_mul(scale) as i32;
+        let x_offset = text_width(node, &text[..offset]) as i32;
         let node_id = if chunk == 0 {
             (index as u32).saturating_mul(3).saturating_add(fragment + 1)
         } else {
             0x8000_0000 | index as u32
         };
-        let text_height = logos_display_text_height(scale);
-        let y =
-            node.bounds.y.saturating_add(
-                node.bounds.height.saturating_sub(text_height).saturating_div(2) as i32,
-            );
+        let measured_height = text_height(node);
+        let y = node.bounds.y.saturating_add(
+            node.bounds.height.saturating_sub(measured_height).saturating_div(2) as i32,
+        );
         let Some(command) = GuiDrawCommand::glyph_run_styled(
             node.bounds.x.saturating_add(12).saturating_add(x_offset),
             y,
@@ -882,23 +877,37 @@ fn text_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
     }
 }
 
-fn text_scale(node: &UiNode) -> usize {
-    if node.styles.contains(UiStyle::Text4xl) { 2 } else { 1 }
+/// Text styles select the font (ADR-0088): `Text4xl` labels use the 20 px
+/// Inter title atlas, everything else uses the 14 px Inter body atlas.
+/// Terminal and the `TextGrid` node never go through this path, so they
+/// keep JetBrains Mono untouched.
+fn text_style(node: &UiNode) -> logos_abi::InterStyle {
+    if node.styles.contains(UiStyle::Text4xl) {
+        logos_abi::InterStyle::Title
+    } else {
+        logos_abi::InterStyle::Body
+    }
 }
 
 fn text_flags(node: &UiNode) -> u32 {
-    let mut flags = 0;
+    let mut flags = match text_style(node) {
+        logos_abi::InterStyle::Body => logos_abi::GUI_TEXT_FLAG_FONT_INTER_BODY,
+        logos_abi::InterStyle::Title => logos_abi::GUI_TEXT_FLAG_FONT_INTER_TITLE,
+    };
     if node.styles.contains(UiStyle::FontLight) {
         flags |= logos_abi::GUI_TEXT_FLAG_LIGHT;
-    }
-    if text_scale(node) == 2 {
-        flags |= logos_abi::GUI_TEXT_FLAG_DOUBLE;
     }
     flags
 }
 
-const fn logos_display_text_height(scale: usize) -> u32 {
-    (16 * scale) as u32
+/// The real, measured pixel width of `text` set in `node`'s selected font
+/// (no kerning/shaping) -- the API layout uses to size and center labels.
+fn text_width(node: &UiNode, text: &[u8]) -> u32 {
+    logos_abi::inter_text_width(text_style(node), text)
+}
+
+fn text_height(node: &UiNode) -> u32 {
+    text_style(node).cell().1 as u32
 }
 
 fn color(value: u32, node: &UiNode) -> u32 {
@@ -1237,9 +1246,12 @@ mod tests {
             .iter()
             .find(|operation| operation.command.kind == logos_abi::GuiDrawKind::GlyphRun)
             .unwrap();
-        assert_eq!(text.command.auxiliary, logos_abi::GUI_TEXT_FLAG_DOUBLE);
+        assert_eq!(text.command.auxiliary, logos_abi::GUI_TEXT_FLAG_FONT_INTER_TITLE);
         assert_eq!(text.command.x, 20);
-        assert_eq!(text.command.y, 16);
+        // Vertically centered against the real Inter title cell height
+        // (25 px, ADR-0088), not a doubled 8x16 Mono cell.
+        let (_, title_height) = logos_abi::InterStyle::Title.cell();
+        assert_eq!(text.command.y, 8 + (48 - title_height as i32) / 2);
     }
 
     #[test]

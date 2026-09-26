@@ -7,6 +7,8 @@ use logos_abi::{
     SurfaceHandle,
 };
 
+use super::TextFont;
+
 #[derive(Clone, Copy)]
 struct RenderNode {
     id: u32,
@@ -1101,14 +1103,18 @@ fn command_rect(command: GuiDrawCommand) -> GuiRect {
 
 fn base_command_rect(command: GuiDrawCommand) -> GuiRect {
     match command.kind {
-        GuiDrawKind::GlyphRun => GuiRect::new(
-            command.x,
-            command.y,
-            u32::from(command.text_len)
-                .saturating_mul(super::GLYPH_WIDTH as u32)
-                .saturating_mul(text_scale(command)),
-            (super::GLYPH_HEIGHT as u32).saturating_mul(text_scale(command)),
-        ),
+        GuiDrawKind::GlyphRun => {
+            let (_, cell_height) = text_font(command).cell();
+            GuiRect::new(
+                command.x,
+                command.y,
+                glyph_run_width(command),
+                (cell_height as u32).saturating_mul(match text_font(command) {
+                    TextFont::Mono => text_scale(command),
+                    TextFont::Inter(_) => 1,
+                }),
+            )
+        }
         GuiDrawKind::Line => expand_rect(
             GuiRect::new(command.x, command.y, command.width, command.height),
             i32::from(command.line_width()),
@@ -1251,6 +1257,24 @@ fn is_opaque_occluder(command: GuiDrawCommand) -> bool {
 
 fn text_scale(command: GuiDrawCommand) -> u32 {
     if command.auxiliary & GUI_TEXT_FLAG_DOUBLE != 0 { 2 } else { 1 }
+}
+
+fn text_font(command: GuiDrawCommand) -> TextFont {
+    TextFont::from_flags(command.auxiliary)
+}
+
+/// Total pixel width of a `GlyphRun` command's text in its selected font:
+/// a fixed `GLYPH_WIDTH` pitch per byte for Mono, or the summed Inter
+/// advance widths for a proportional style. No kerning or shaping.
+fn glyph_run_width(command: GuiDrawCommand) -> u32 {
+    match text_font(command) {
+        TextFont::Mono => u32::from(command.text_len)
+            .saturating_mul(super::GLYPH_WIDTH as u32)
+            .saturating_mul(text_scale(command)),
+        TextFont::Inter(style) => {
+            logos_abi::inter_text_width(style, &command.text[..command.text_len as usize])
+        }
+    }
 }
 
 fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
@@ -1408,61 +1432,154 @@ fn render_command(
         // Dispatched to `GuiRenderBackend::draw_text_grid` before reaching
         // `backend.draw`/`render_command`; never actually hit.
         GuiDrawKind::TextGrid => 0,
-        GuiDrawKind::GlyphRun => {
-            let mut rendered = 0;
-            let packed = super::pixel_bytes(command.color, format);
-            let scale = text_scale(command) as i32;
-            let clip_left = clip.x.max(0) as usize;
-            let clip_top = clip.y.max(0) as usize;
-            let clip_right =
-                clip.x.saturating_add(clip.width as i32).max(0).min(width as i32) as usize;
-            let clip_bottom =
-                clip.y.saturating_add(clip.height as i32).max(0).min(height as i32) as usize;
-            for (index, byte) in
-                command.text[..command.text_len as usize].iter().copied().enumerate()
-            {
-                let glyph = glyph_cache.get(u32::from(byte));
-                let base_x = command.x + (index * super::GLYPH_WIDTH) as i32 * scale;
-                let first_x = ((clip_left as i32 - base_x).max(0) / scale)
-                    .min(super::GLYPH_WIDTH as i32) as usize;
-                let last_x = ((clip_right as i32 - base_x + scale - 1).max(0) / scale)
-                    .min(super::GLYPH_WIDTH as i32) as usize;
-                let first_y = ((clip_top as i32 - command.y).max(0) / scale)
-                    .min(super::GLYPH_HEIGHT as i32) as usize;
-                let last_y = ((clip_bottom as i32 - command.y + scale - 1).max(0) / scale)
-                    .min(super::GLYPH_HEIGHT as i32) as usize;
-                for glyph_y in first_y..last_y {
-                    for glyph_x in first_x..last_x {
-                        let coverage = glyph.rows[glyph_y][glyph_x];
-                        let coverage = if command.auxiliary & GUI_TEXT_FLAG_LIGHT != 0 {
-                            (u16::from(coverage) * 3 / 4) as u8
-                        } else {
-                            coverage
-                        };
-                        if coverage != 0 {
-                            for y_offset in 0..scale {
-                                for x_offset in 0..scale {
-                                    rendered += plot_packed(
-                                        framebuffer,
-                                        width,
-                                        height,
-                                        stride,
-                                        format,
-                                        base_x + glyph_x as i32 * scale + x_offset,
-                                        command.y + glyph_y as i32 * scale + y_offset,
-                                        command.color,
-                                        packed,
-                                        coverage,
-                                    ) as usize;
-                                }
-                            }
+        GuiDrawKind::GlyphRun => match text_font(command) {
+            TextFont::Mono => render_mono_glyph_run(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                glyph_cache,
+                command,
+                clip,
+            ),
+            TextFont::Inter(style) => render_inter_glyph_run(
+                framebuffer,
+                width,
+                height,
+                stride,
+                format,
+                command,
+                style,
+                clip,
+            ),
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_mono_glyph_run(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    glyph_cache: &mut super::GlyphCache,
+    command: GuiDrawCommand,
+    clip: GuiRect,
+) -> usize {
+    let mut rendered = 0;
+    let packed = super::pixel_bytes(command.color, format);
+    let scale = text_scale(command) as i32;
+    let clip_left = clip.x.max(0) as usize;
+    let clip_top = clip.y.max(0) as usize;
+    let clip_right = clip.x.saturating_add(clip.width as i32).max(0).min(width as i32) as usize;
+    let clip_bottom = clip.y.saturating_add(clip.height as i32).max(0).min(height as i32) as usize;
+    for (index, byte) in command.text[..command.text_len as usize].iter().copied().enumerate() {
+        let glyph = glyph_cache.get(u32::from(byte));
+        let base_x = command.x + (index * super::GLYPH_WIDTH) as i32 * scale;
+        let first_x =
+            ((clip_left as i32 - base_x).max(0) / scale).min(super::GLYPH_WIDTH as i32) as usize;
+        let last_x = ((clip_right as i32 - base_x + scale - 1).max(0) / scale)
+            .min(super::GLYPH_WIDTH as i32) as usize;
+        let first_y =
+            ((clip_top as i32 - command.y).max(0) / scale).min(super::GLYPH_HEIGHT as i32) as usize;
+        let last_y = ((clip_bottom as i32 - command.y + scale - 1).max(0) / scale)
+            .min(super::GLYPH_HEIGHT as i32) as usize;
+        for glyph_y in first_y..last_y {
+            for glyph_x in first_x..last_x {
+                let coverage = glyph.rows[glyph_y][glyph_x];
+                let coverage = if command.auxiliary & GUI_TEXT_FLAG_LIGHT != 0 {
+                    (u16::from(coverage) * 3 / 4) as u8
+                } else {
+                    coverage
+                };
+                if coverage != 0 {
+                    for y_offset in 0..scale {
+                        for x_offset in 0..scale {
+                            rendered += plot_packed(
+                                framebuffer,
+                                width,
+                                height,
+                                stride,
+                                format,
+                                base_x + glyph_x as i32 * scale + x_offset,
+                                command.y + glyph_y as i32 * scale + y_offset,
+                                command.color,
+                                packed,
+                                coverage,
+                            ) as usize;
                         }
                     }
                 }
             }
-            rendered
         }
     }
+    rendered
+}
+
+/// Proportional Inter raster: each glyph's cell is only as wide as its own
+/// advance, so the cursor walks forward by that advance instead of a fixed
+/// pitch. No scale/double-size flag applies (the atlas is already the
+/// requested pixel size).
+#[allow(clippy::too_many_arguments)]
+fn render_inter_glyph_run(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    command: GuiDrawCommand,
+    style: logos_abi::InterStyle,
+    clip: GuiRect,
+) -> usize {
+    let mut rendered = 0;
+    let packed = super::pixel_bytes(command.color, format);
+    let (cell_width, cell_height) = style.cell();
+    let clip_left = clip.x.max(0) as usize;
+    let clip_top = clip.y.max(0) as usize;
+    let clip_right = clip.x.saturating_add(clip.width as i32).max(0).min(width as i32) as usize;
+    let clip_bottom = clip.y.saturating_add(clip.height as i32).max(0).min(height as i32) as usize;
+    // ponytail: running cursor keeps this a single pass; the transformed
+    // (rotated) sampling path below instead recomputes the same sum from
+    // scratch per destination pixel, which is fine since it stays bounded
+    // by the fixed 32-byte text cap.
+    let mut cursor = 0u32;
+    for byte in command.text[..command.text_len as usize].iter().copied() {
+        let base_x = command.x + cursor as i32;
+        let first_x = (clip_left as i32 - base_x).max(0).min(cell_width as i32) as usize;
+        let last_x = (clip_right as i32 - base_x).max(0).min(cell_width as i32) as usize;
+        let first_y = (clip_top as i32 - command.y).max(0).min(cell_height as i32) as usize;
+        let last_y = (clip_bottom as i32 - command.y).max(0).min(cell_height as i32) as usize;
+        for glyph_y in first_y..last_y {
+            for glyph_x in first_x..last_x {
+                let coverage =
+                    super::inter_glyph_coverage(style, u32::from(byte), glyph_x, glyph_y);
+                let coverage = if command.auxiliary & GUI_TEXT_FLAG_LIGHT != 0 {
+                    (u16::from(coverage) * 3 / 4) as u8
+                } else {
+                    coverage
+                };
+                if coverage != 0 {
+                    rendered += plot_packed(
+                        framebuffer,
+                        width,
+                        height,
+                        stride,
+                        format,
+                        base_x + glyph_x as i32,
+                        command.y + glyph_y as i32,
+                        command.color,
+                        packed,
+                        coverage,
+                    ) as usize;
+                }
+            }
+        }
+        cursor = cursor
+            .saturating_add(u32::from(logos_abi::inter_glyph_advance(style, u32::from(byte))));
+    }
+    rendered
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1566,29 +1683,72 @@ fn glyph_source_coverage(
     y: i32,
     glyph_cache: &mut super::GlyphCache,
 ) -> Option<u8> {
-    let scale = text_scale(command) as i32;
     let local_x = x.saturating_sub(command.x);
     let local_y = y.saturating_sub(command.y);
     if local_x < 0 || local_y < 0 {
         return None;
     }
-    let glyph_index = (local_x / (super::GLYPH_WIDTH as i32 * scale)) as usize;
-    if glyph_index >= command.text_len as usize {
-        return None;
-    }
-    let glyph_x = (local_x / scale) as usize % super::GLYPH_WIDTH;
-    let glyph_y = (local_y / scale) as usize;
-    if glyph_y >= super::GLYPH_HEIGHT {
-        return None;
-    }
-    let glyph = glyph_cache.get(u32::from(command.text[glyph_index]));
-    let coverage = glyph.rows[glyph_y][glyph_x];
-    if coverage == 0 {
+    let raw_coverage = match text_font(command) {
+        TextFont::Mono => {
+            let scale = text_scale(command) as i32;
+            let glyph_index = (local_x / (super::GLYPH_WIDTH as i32 * scale)) as usize;
+            if glyph_index >= command.text_len as usize {
+                return None;
+            }
+            let glyph_x = (local_x / scale) as usize % super::GLYPH_WIDTH;
+            let glyph_y = (local_y / scale) as usize;
+            if glyph_y >= super::GLYPH_HEIGHT {
+                return None;
+            }
+            let glyph = glyph_cache.get(u32::from(command.text[glyph_index]));
+            glyph.rows[glyph_y][glyph_x]
+        }
+        TextFont::Inter(style) => {
+            let (cell_width, cell_height) = style.cell();
+            if local_y as usize >= cell_height {
+                return None;
+            }
+            // ponytail: bounded (<= MAX_GUI_TEXT_BYTES) linear scan of the
+            // running advance sum to find which glyph cell local_x lands
+            // in; only the rotated/scaled sampling path pays this, once
+            // per destination pixel.
+            let mut cursor = 0i32;
+            for byte in command.text[..command.text_len as usize].iter().copied() {
+                let advance = i32::from(logos_abi::inter_glyph_advance(style, u32::from(byte)));
+                if local_x < cursor {
+                    return None;
+                }
+                if local_x < cursor + advance {
+                    let glyph_x = (local_x - cursor) as usize;
+                    if glyph_x >= cell_width {
+                        return None;
+                    }
+                    return Some(super::inter_glyph_coverage(
+                        style,
+                        u32::from(byte),
+                        glyph_x,
+                        local_y as usize,
+                    ))
+                    .filter(|&coverage| coverage != 0)
+                    .map(|coverage| {
+                        if command.auxiliary & GUI_TEXT_FLAG_LIGHT != 0 {
+                            (u16::from(coverage) * 3 / 4) as u8
+                        } else {
+                            coverage
+                        }
+                    });
+                }
+                cursor += advance;
+            }
+            return None;
+        }
+    };
+    if raw_coverage == 0 {
         None
     } else if command.auxiliary & GUI_TEXT_FLAG_LIGHT != 0 {
-        Some((u16::from(coverage) * 3 / 4) as u8)
+        Some((u16::from(raw_coverage) * 3 / 4) as u8)
     } else {
-        Some(coverage)
+        Some(raw_coverage)
     }
 }
 
@@ -3342,6 +3502,69 @@ mod tests {
 
         assert_eq!(pixel(&framebuffer, 16, 2, 8), [0, 255, 0, 0]);
         assert_eq!(pixel(&framebuffer, 16, 10, 8), [255, 0, 0, 0]);
+    }
+
+    #[test]
+    fn inter_glyph_run_stays_within_its_measured_width() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let bounds = GuiRect::new(0, 0, 64, 32);
+        let surface = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, bounds))
+            .unwrap()
+            .surface;
+        let text = b"il"; // narrow glyphs: exercises real proportional spacing
+        let command = GuiDrawCommand::glyph_run_styled(
+            0,
+            0,
+            0xffffff,
+            logos_abi::GUI_TEXT_FLAG_FONT_INTER_BODY,
+            text,
+        )
+        .unwrap();
+        let mut batch = GuiDrawBatch::new(surface, 1, GuiRect::SURFACE);
+        assert!(batch.push(GuiDrawCommand::fill_surface(0x000000)));
+        assert!(batch.push(command));
+        registry.update(7, batch).unwrap();
+
+        let measured_width = logos_abi::inter_text_width(logos_abi::InterStyle::Body, text);
+        let (_, cell_height) = logos_abi::InterStyle::Body.cell();
+
+        let (damage, damage_count) = registry.take_damage();
+        let mut framebuffer = vec![0u8; 64 * 32 * 4];
+        let mut glyph_cache = crate::GlyphCache::new();
+        registry.render(
+            &mut glyph_cache,
+            &mut framebuffer,
+            64,
+            32,
+            64 * 4,
+            PixelFormat::Bgr8,
+            &damage,
+            damage_count,
+        );
+
+        // Nothing beyond the measured advance width, or below the fixed
+        // cell height, should have been touched by this glyph run.
+        for y in 0..32usize {
+            for x in 0..64usize {
+                if x as u32 >= measured_width || y >= cell_height {
+                    assert_eq!(
+                        pixel(&framebuffer, 64, x, y),
+                        [0, 0, 0, 0],
+                        "unexpected paint outside measured bounds at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(
+            (0..cell_height).any(|y| (0..measured_width as usize).any(|x| pixel(
+                &framebuffer,
+                64,
+                x,
+                y
+            ) != [0, 0, 0, 0])),
+            "expected some coverage inside the measured run"
+        );
     }
 
     fn modal(registry: &mut GuiSurfaceRegistry, request_id: u32, bounds: GuiRect) -> SurfaceHandle {
