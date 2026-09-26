@@ -12,7 +12,10 @@ use logos_ui::{UiIcon, UiNode, UiStyle};
 
 pub const MAX_UI_SCENE_OPS: usize = MAX_GUI_NODES + 2;
 pub const MAX_UI_SCENE_UPSERTS: usize = MAX_GUI_NODES;
-pub const MAX_UI_SCENE_PUBLISHER_BYTES: usize = 7_232;
+/// Raised alongside `MAX_GUI_NODES` (24 -> 48, ADR-0087): `UiScenePublisher`
+/// holds two full `UiSceneFrame`s (`MAX_UI_SCENE_OPS` ops each), so this
+/// roughly doubles from 7_232 with the ops budget.
+pub const MAX_UI_SCENE_PUBLISHER_BYTES: usize = 9_264;
 const GUI_GLYPH_WIDTH: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,8 +1,10 @@
 use logos_abi::{
-    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT,
-    GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiMaterialSymbol, GuiNodeOperation, GuiRect,
-    GuiSceneOp, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse,
-    MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, SurfaceHandle,
+    Cell, DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL,
+    GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind,
+    GuiMaterialSymbol, GuiNodeOperation, GuiRect, GuiSceneOp, GuiStatus, GuiSurfaceOperation,
+    GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
+    MAX_GUI_SURFACES, MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS, MAX_GUI_TEXT_GRIDS,
+    SurfaceHandle,
 };
 
 #[derive(Clone, Copy)]
@@ -24,6 +26,9 @@ struct RenderPlanEntry {
     clip: GuiRect,
     occluder_start: u16,
     occluder_count: u16,
+    /// Index into `GuiSurfaceRegistry::text_grids` for a `TextGrid` command,
+    /// resolved once at plan-build time by the command's own surface.
+    text_grid_index: Option<u8>,
 }
 
 struct RenderPlan {
@@ -44,10 +49,49 @@ impl RenderPlan {
             valid: false,
         }
     }
+
+    /// Clears every field in place rather than building a fresh `Self` by
+    /// value (`MAX_GUI_SURFACES * MAX_GUI_NODES` entries and occluders,
+    /// ADR-0087): `ensure_plan` calls this on every scene change, so it
+    /// must stay cheap on a bounded service stack.
+    fn reset(&mut self) {
+        for entry in self.entries.iter_mut() {
+            *entry = None;
+        }
+        self.entry_count = 0;
+        for occluder in self.occluders.iter_mut() {
+            *occluder = GuiRect::EMPTY;
+        }
+        self.occluder_count = 0;
+        self.valid = false;
+    }
 }
 
 pub trait GuiRenderBackend {
     fn draw(&mut self, command: GuiDrawCommand, clip: GuiRect) -> usize;
+
+    /// Rasterizes the visible slice of a retained `TextGrid` node. Given a
+    /// default no-op so existing backends keep compiling; only the software
+    /// backend implements it today. A future GPU backend can replace just
+    /// this method, per ADR-0075.
+    fn draw_text_grid(&mut self, _clip: GuiRect, _grid: GuiTextGridSnapshot<'_>) -> usize {
+        0
+    }
+}
+
+/// A read-only, publicly shareable view of the bound text-grid buffer,
+/// passed to [`GuiRenderBackend::draw_text_grid`] without exposing the
+/// registry's internal storage type.
+#[derive(Clone, Copy)]
+pub struct GuiTextGridSnapshot<'a> {
+    pub bounds: GuiRect,
+    pub columns: u16,
+    pub rows: u16,
+    pub cells: &'a [Cell],
+}
+
+impl GuiTextGridSnapshot<'_> {
+    pub const EMPTY: Self = Self { bounds: GuiRect::EMPTY, columns: 0, rows: 0, cells: &[] };
 }
 
 struct SoftwareRenderBackend<'framebuffer, 'glyph> {
@@ -72,6 +116,93 @@ impl GuiRenderBackend for SoftwareRenderBackend<'_, '_> {
             clip,
         )
     }
+
+    fn draw_text_grid(&mut self, clip: GuiRect, grid: GuiTextGridSnapshot<'_>) -> usize {
+        render_text_grid(
+            self.framebuffer,
+            self.width,
+            self.height,
+            self.stride,
+            self.format,
+            self.glyph_cache,
+            grid,
+            clip,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_text_grid(
+    framebuffer: &mut [u8],
+    width: usize,
+    height: usize,
+    stride: usize,
+    format: super::PixelFormat,
+    glyph_cache: &mut super::GlyphCache,
+    grid: GuiTextGridSnapshot<'_>,
+    clip: GuiRect,
+) -> usize {
+    if clip.is_empty() || grid.columns == 0 || grid.rows == 0 {
+        return 0;
+    }
+    let mut rendered = 0;
+    let columns = grid.columns as usize;
+    let rows = grid.rows as usize;
+    for row in 0..rows {
+        let cell_top = grid.bounds.y.saturating_add((row * DISPLAY_CELL_HEIGHT) as i32);
+        let row_rect =
+            GuiRect::new(grid.bounds.x, cell_top, grid.bounds.width, DISPLAY_CELL_HEIGHT as u32);
+        if !touches(row_rect, clip) {
+            continue;
+        }
+        for column in 0..columns {
+            let cell_left = grid.bounds.x.saturating_add((column * DISPLAY_CELL_WIDTH) as i32);
+            let cell_rect = GuiRect::new(
+                cell_left,
+                cell_top,
+                DISPLAY_CELL_WIDTH as u32,
+                DISPLAY_CELL_HEIGHT as u32,
+            );
+            let draw_rect = intersect(cell_rect, clip);
+            if draw_rect.is_empty() {
+                continue;
+            }
+            let cell = grid.cells[row * MAX_GUI_TEXT_GRID_COLUMNS + column];
+            let glyph = glyph_cache.get(cell.codepoint);
+            let foreground = super::styled_foreground(cell);
+            let left = draw_rect.x.max(0).min(width as i32) as usize;
+            let top = draw_rect.y.max(0).min(height as i32) as usize;
+            let right = draw_rect.x.saturating_add(draw_rect.width as i32).max(0).min(width as i32)
+                as usize;
+            let bottom =
+                draw_rect.y.saturating_add(draw_rect.height as i32).max(0).min(height as i32)
+                    as usize;
+            for pixel_y in top..bottom {
+                let glyph_row = pixel_y as i32 - cell_top;
+                if glyph_row < 0 || glyph_row as usize >= DISPLAY_CELL_HEIGHT {
+                    continue;
+                }
+                for pixel_x in left..right {
+                    let glyph_column = pixel_x as i32 - cell_left;
+                    if glyph_column < 0 || glyph_column as usize >= DISPLAY_CELL_WIDTH {
+                        continue;
+                    }
+                    let coverage = super::styled_coverage(
+                        &glyph,
+                        glyph_row as usize,
+                        glyph_column as usize,
+                        cell.attributes,
+                    );
+                    let color = super::blend_color(cell.background, foreground, coverage);
+                    let offset = pixel_y * stride + pixel_x * 4;
+                    let bytes = super::pixel_bytes(color, format);
+                    framebuffer[offset..offset + 4].copy_from_slice(&bytes);
+                }
+            }
+            rendered += 1;
+        }
+    }
+    rendered
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +257,37 @@ pub enum GuiRegistryError {
     NotFound,
 }
 
+/// One retained `TextGrid` node's bound cell content. `GuiSurfaceRegistry`
+/// holds `MAX_GUI_TEXT_GRIDS` of these, one per surface, so multiple Terminal
+/// sessions in separate tiled panes (#76) each keep independent content — no
+/// shared slot a second grid can steal from the first. Each store's binding
+/// follows whichever node in that surface's active scene currently carries
+/// `GuiDrawKind::TextGrid`.
+#[derive(Clone, Copy)]
+struct TextGridStore {
+    surface: SurfaceHandle,
+    node_id: u32,
+    bounds: GuiRect,
+    columns: u16,
+    rows: u16,
+    cells: [Cell; MAX_GUI_TEXT_GRID_COLUMNS * MAX_GUI_TEXT_GRID_ROWS],
+}
+
+impl TextGridStore {
+    const EMPTY: Self = Self {
+        surface: SurfaceHandle::EMPTY,
+        node_id: 0,
+        bounds: GuiRect::EMPTY,
+        columns: 0,
+        rows: 0,
+        cells: [Cell::EMPTY; MAX_GUI_TEXT_GRID_COLUMNS * MAX_GUI_TEXT_GRID_ROWS],
+    };
+
+    const fn bound(&self) -> bool {
+        self.surface.is_valid()
+    }
+}
+
 pub struct GuiSurfaceRegistry {
     slots: [SurfaceSlot; MAX_GUI_SURFACES],
     generations: [u16; MAX_GUI_SURFACES],
@@ -134,6 +296,7 @@ pub struct GuiSurfaceRegistry {
     focused: SurfaceHandle,
     order: u32,
     plan: RenderPlan,
+    text_grids: [TextGridStore; MAX_GUI_TEXT_GRIDS],
 }
 
 impl GuiSurfaceRegistry {
@@ -146,6 +309,35 @@ impl GuiSurfaceRegistry {
             focused: SurfaceHandle::EMPTY,
             order: 0,
             plan: RenderPlan::new(),
+            text_grids: [TextGridStore::EMPTY; MAX_GUI_TEXT_GRIDS],
+        }
+    }
+
+    /// Returns this registry to its `new()` state without ever building a
+    /// fresh `Self` by value: at `MAX_GUI_TEXT_GRIDS` full text-grid
+    /// buffers, that whole-struct construction is large enough on its own
+    /// to threaten a bounded service stack (see ADR-0087) when called at
+    /// runtime (unlike a `const` initializer, which the compiler bakes
+    /// into static data at zero runtime cost). Each field is cleared in
+    /// place instead, so no single step needs more stack than that field's
+    /// own assignment.
+    pub fn reset(&mut self) {
+        for slot in self.slots.iter_mut() {
+            *slot = SurfaceSlot::EMPTY;
+        }
+        self.generations = [0; MAX_GUI_SURFACES];
+        self.damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        self.damage_count = 0;
+        self.focused = SurfaceHandle::EMPTY;
+        self.order = 0;
+        self.plan.reset();
+        for store in self.text_grids.iter_mut() {
+            store.surface = SurfaceHandle::EMPTY;
+            store.node_id = 0;
+            store.bounds = GuiRect::EMPTY;
+            store.columns = 0;
+            store.rows = 0;
+            store.cells.fill(Cell::EMPTY);
         }
     }
 
@@ -342,12 +534,130 @@ impl GuiSurfaceRegistry {
                 self.add_damage(command_rect(new.command))?;
             }
         }
+        // A staged TextGrid node needs a bound store before this frame's
+        // node table is committed: reject the publish (active_nodes/frame
+        // stay on the previous committed scene) if none is free and this
+        // surface doesn't already own one, rather than silently evicting
+        // another surface's grid (the single-slot bug class that broke
+        // Terminal originally).
+        let surface = self.slots[index].handle;
+        let staged_grid = self.slots[index].staged_nodes
+            [..self.slots[index].staged_node_count as usize]
+            .iter()
+            .flatten()
+            .find(|node| node.command.kind == GuiDrawKind::TextGrid)
+            .map(|node| (node.id, node.command));
+        if staged_grid.is_some()
+            && !self.text_grids.iter().any(|store| store.surface == surface)
+            && self.text_grids.iter().all(TextGridStore::bound)
+        {
+            return Err(GuiRegistryError::Capacity);
+        }
+
         self.slots[index].active_nodes = new_nodes;
         self.slots[index].active_node_count = self.slots[index].staged_node_count;
         self.slots[index].active_frame = self.slots[index].staged_frame;
         self.slots[index].staged_frame = 0;
         self.plan.valid = false;
+        self.sync_text_grid(surface, staged_grid);
         Ok(())
+    }
+
+    /// Rebinds, updates, or releases the retained `TextGrid` store bound to
+    /// `surface` to match whichever node (if any) currently carries
+    /// `GuiDrawKind::TextGrid` in that surface's active scene. Up to
+    /// `MAX_GUI_TEXT_GRIDS` surfaces each keep their own independent store
+    /// (never a single shared slot another surface's grid can steal). A
+    /// change of `node_id` on an already-bound store blanks its cells so
+    /// stale content from a previous grid can never show through; an
+    /// unchanged binding keeps its cell content untouched so
+    /// `set_text_grid_row` updates survive ordinary commits. Capacity is
+    /// already guaranteed by the precheck in `publish_scene`.
+    fn sync_text_grid(&mut self, surface: SurfaceHandle, found: Option<(u32, GuiDrawCommand)>) {
+        match found {
+            Some((node_id, command)) => {
+                let bounds = GuiRect::new(command.x, command.y, command.width, command.height);
+                let columns = command.text_grid_columns();
+                let rows = command.text_grid_rows();
+                let store = if let Some(store) =
+                    self.text_grids.iter_mut().find(|store| store.surface == surface)
+                {
+                    store
+                } else if let Some(free) = self.text_grids.iter_mut().find(|store| !store.bound()) {
+                    free
+                } else {
+                    return;
+                };
+                let rebind = store.node_id != node_id;
+                store.surface = surface;
+                store.node_id = node_id;
+                store.bounds = bounds;
+                store.columns = columns;
+                store.rows = rows;
+                if rebind {
+                    // Never build a fresh `TextGridStore` (its 128,000-byte
+                    // `cells` array) as a stack value to assign wholesale:
+                    // that construction is large enough on its own to blow
+                    // a bounded service stack. Clear the existing storage
+                    // in place instead.
+                    store.cells.fill(Cell::EMPTY);
+                }
+            }
+            None => {
+                if let Some(store) =
+                    self.text_grids.iter_mut().find(|store| store.surface == surface)
+                {
+                    store.surface = SurfaceHandle::EMPTY;
+                    store.node_id = 0;
+                    store.bounds = GuiRect::EMPTY;
+                    store.columns = 0;
+                    store.rows = 0;
+                    store.cells.fill(Cell::EMPTY);
+                }
+            }
+        }
+    }
+
+    /// Applies one dirty-row cell update to the `TextGrid` store bound to
+    /// `update.surface`/`update.node_id`. Only the changed row's rect is
+    /// damaged, so a single-line change never resends (or repaints) the
+    /// whole grid.
+    pub fn set_text_grid_row(
+        &mut self,
+        owner: u32,
+        update: &GuiTextGridRow,
+    ) -> Result<(), GuiRegistryError> {
+        if !update.is_valid() {
+            return Err(GuiRegistryError::Malformed);
+        }
+        let index = self.authorized_index(owner, update.surface)?;
+        let surface = self.slots[index].handle;
+        let Some(store) = self
+            .text_grids
+            .iter_mut()
+            .find(|store| store.surface == surface && store.node_id == update.node_id)
+        else {
+            return Err(GuiRegistryError::NotFound);
+        };
+        if update.row as usize >= store.rows as usize
+            || update.cell_count as usize > store.columns as usize
+        {
+            return Err(GuiRegistryError::InvalidRequest);
+        }
+        let base = update.row as usize * MAX_GUI_TEXT_GRID_COLUMNS;
+        let cell_count = update.cell_count as usize;
+        let columns = store.columns as usize;
+        store.cells[base..base + cell_count].copy_from_slice(&update.cells[..cell_count]);
+        for cell in store.cells[base + cell_count..base + columns].iter_mut() {
+            *cell = Cell::EMPTY;
+        }
+        let row_rect = GuiRect::new(
+            store.bounds.x,
+            store.bounds.y.saturating_add(update.row as i32 * DISPLAY_CELL_HEIGHT as i32),
+            store.bounds.width,
+            DISPLAY_CELL_HEIGHT as u32,
+        );
+        self.add_damage(row_rect)
     }
 
     pub fn active_frame(&self, handle: SurfaceHandle) -> Option<u32> {
@@ -447,6 +757,9 @@ impl GuiSurfaceRegistry {
         }
         self.slots[index] = SurfaceSlot::EMPTY;
         self.plan.valid = false;
+        if let Some(store) = self.text_grids.iter_mut().find(|store| store.surface == handle) {
+            *store = TextGridStore::EMPTY;
+        }
         self.add_damage(bounds)
     }
 
@@ -513,6 +826,18 @@ impl GuiSurfaceRegistry {
             let start = usize::from(entry.occluder_start);
             let end = start + usize::from(entry.occluder_count);
             let mut clip = entry.clip;
+            let text_grid = match entry.text_grid_index {
+                Some(index) => {
+                    let store = &self.text_grids[index as usize];
+                    GuiTextGridSnapshot {
+                        bounds: store.bounds,
+                        columns: store.columns,
+                        rows: store.rows,
+                        cells: &store.cells,
+                    }
+                }
+                None => GuiTextGridSnapshot::EMPTY,
+            };
             rendered += render_one(
                 backend,
                 entry.command,
@@ -521,6 +846,7 @@ impl GuiSurfaceRegistry {
                 damage_count,
                 &self.plan.occluders[start..end],
                 usize::from(entry.occluder_count),
+                text_grid,
             );
         }
         rendered
@@ -530,7 +856,7 @@ impl GuiSurfaceRegistry {
         if self.plan.valid {
             return;
         }
-        self.plan = RenderPlan::new();
+        self.plan.reset();
         let mut order = [usize::MAX; MAX_GUI_SURFACES];
         let mut count = 0;
         while count < MAX_GUI_SURFACES {
@@ -558,11 +884,12 @@ impl GuiSurfaceRegistry {
 
         for index in order[..count].iter().copied() {
             let mut clip = self.slots[index].bounds;
+            let surface = self.slots[index].handle;
             let node_count = self.slots[index].active_node_count as usize;
             let nodes = self.slots[index].active_nodes;
             for node in nodes[..node_count].iter().flatten() {
                 let command = node.command;
-                self.append_plan_entry(command, &mut clip);
+                self.append_plan_entry(command, &mut clip, surface);
             }
         }
         let occluder_count = self.plan.occluder_count;
@@ -573,7 +900,12 @@ impl GuiSurfaceRegistry {
         self.plan.valid = true;
     }
 
-    fn append_plan_entry(&mut self, command: GuiDrawCommand, clip: &mut GuiRect) {
+    fn append_plan_entry(
+        &mut self,
+        command: GuiDrawCommand,
+        clip: &mut GuiRect,
+        surface: SurfaceHandle,
+    ) {
         if command.kind == GuiDrawKind::ClipRect {
             *clip = intersect(*clip, command_rect(command));
             return;
@@ -581,6 +913,10 @@ impl GuiSurfaceRegistry {
         if self.plan.entry_count == MAX_GUI_PLAN_COMMANDS {
             return;
         }
+        let text_grid_index = (command.kind == GuiDrawKind::TextGrid)
+            .then(|| self.text_grids.iter().position(|store| store.surface == surface))
+            .flatten()
+            .map(|index| index as u8);
         let occluder = intersect(*clip, command_rect(command));
         let occluder_start = self.plan.occluder_count + usize::from(is_opaque_occluder(command));
         if is_opaque_occluder(command) && self.plan.occluder_count < MAX_GUI_PLAN_OCCLUDERS {
@@ -592,6 +928,7 @@ impl GuiSurfaceRegistry {
             clip: *clip,
             occluder_start: occluder_start as u16,
             occluder_count: 0,
+            text_grid_index,
         });
         self.plan.entry_count += 1;
     }
@@ -641,6 +978,7 @@ impl GuiSurfaceRegistry {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_one<B: GuiRenderBackend>(
     backend: &mut B,
     command: GuiDrawCommand,
@@ -649,6 +987,7 @@ fn render_one<B: GuiRenderBackend>(
     damage_count: usize,
     occluders: &[GuiRect],
     occluder_count: usize,
+    text_grid: GuiTextGridSnapshot<'_>,
 ) -> usize {
     if is_surface_fill(command) {
         return 0;
@@ -667,7 +1006,7 @@ fn render_one<B: GuiRenderBackend>(
         for damage_rect in damage[..damage_count].iter().copied() {
             let damage_clip = intersect(command_clip, damage_rect);
             if !damage_clip.is_empty() {
-                rendered += backend.draw(command, damage_clip);
+                rendered += draw_one(backend, command, damage_clip, text_grid);
             }
         }
         return rendered;
@@ -701,10 +1040,23 @@ fn render_one<B: GuiRenderBackend>(
             }
         }
         for damage_clip in visible[..visible_count].iter().copied() {
-            rendered += backend.draw(command, damage_clip);
+            rendered += draw_one(backend, command, damage_clip, text_grid);
         }
     }
     rendered
+}
+
+fn draw_one<B: GuiRenderBackend>(
+    backend: &mut B,
+    command: GuiDrawCommand,
+    clip: GuiRect,
+    text_grid: GuiTextGridSnapshot<'_>,
+) -> usize {
+    if command.kind == GuiDrawKind::TextGrid {
+        backend.draw_text_grid(clip, text_grid)
+    } else {
+        backend.draw(command, clip)
+    }
 }
 
 impl Default for GuiSurfaceRegistry {
@@ -1053,6 +1405,9 @@ fn render_command(
             render_modern(framebuffer, width, height, stride, format, command, clip)
         }
         GuiDrawKind::ClipRect => 0,
+        // Dispatched to `GuiRenderBackend::draw_text_grid` before reaching
+        // `backend.draw`/`render_command`; never actually hit.
+        GuiDrawKind::TextGrid => 0,
         GuiDrawKind::GlyphRun => {
             let mut rendered = 0;
             let packed = super::pixel_bytes(command.color, format);
@@ -1198,6 +1553,10 @@ fn transformed_coverage(
         GuiDrawKind::MaterialSymbol => material_symbol_source_coverage(command, x, y),
         GuiDrawKind::GlyphRun => glyph_source_coverage(command, x, y, glyph_cache),
         GuiDrawKind::ClipRect => None,
+        // TextGrid commands are always identity-transform (enforced by
+        // `GuiDrawCommand::is_valid`), so this transformed-sampling path
+        // never actually sees one.
+        GuiDrawKind::TextGrid => None,
     }
 }
 
@@ -2374,7 +2733,12 @@ mod tests {
             stride: 48 * 4,
             format: PixelFormat::Bgr8,
         };
-        assert_eq!(render_one(&mut backend, shadow, &mut clip, &damage, 1, &occluders, 1,), 0);
+        let empty_grid =
+            GuiTextGridSnapshot { bounds: GuiRect::EMPTY, columns: 0, rows: 0, cells: &[] };
+        assert_eq!(
+            render_one(&mut backend, shadow, &mut clip, &damage, 1, &occluders, 1, empty_grid),
+            0
+        );
     }
 
     #[test]
@@ -2816,5 +3180,292 @@ mod tests {
         root_terminal.flags = GUI_SURFACE_FLAG_TERMINAL;
         let mut fresh = GuiSurfaceRegistry::new();
         assert_eq!(fresh.create(7, root_terminal), Err(GuiRegistryError::InvalidRequest));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish_text_grid(
+        registry: &mut GuiSurfaceRegistry,
+        owner: u32,
+        surface: SurfaceHandle,
+        node_id: u32,
+        frame: u32,
+        bounds: GuiRect,
+        columns: u16,
+        rows: u16,
+    ) {
+        let command = GuiDrawCommand::text_grid(bounds, columns, rows).unwrap();
+        registry
+            .apply_scene_op(owner, GuiSceneOp::upsert(surface, frame, node_id, command))
+            .unwrap();
+    }
+
+    #[test]
+    fn text_grid_node_publishes_within_the_forty_eight_node_budget() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let surface = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 640, 480)))
+            .unwrap()
+            .surface;
+        for node_id in 1..=MAX_GUI_NODES as u32 {
+            let mut op = GuiSceneOp::upsert(
+                surface,
+                1,
+                node_id,
+                GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 1, 1), 0x112233),
+            );
+            op.flags = GUI_DRAW_FLAG_MORE;
+            registry.apply_scene_op(7, op).unwrap();
+        }
+        registry.apply_scene_op(7, GuiSceneOp::commit(surface, 1)).unwrap();
+
+        let mut over_budget = GuiSceneOp::upsert(
+            surface,
+            2,
+            MAX_GUI_NODES as u32 + 1,
+            GuiDrawCommand::text_grid(GuiRect::new(0, 0, 8, 16), 1, 1).unwrap(),
+        );
+        over_budget.flags = GUI_DRAW_FLAG_MORE;
+        for node_id in 1..=MAX_GUI_NODES as u32 {
+            let mut carry_forward = GuiSceneOp::upsert(
+                surface,
+                2,
+                node_id,
+                GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 1, 1), 0x112233),
+            );
+            carry_forward.flags = GUI_DRAW_FLAG_MORE;
+            registry.apply_scene_op(7, carry_forward).unwrap();
+        }
+        assert_eq!(registry.apply_scene_op(7, over_budget), Err(GuiRegistryError::Backpressure));
+    }
+
+    #[test]
+    fn text_grid_row_updates_are_authorized_and_bounded() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let surface = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 80, 32)))
+            .unwrap()
+            .surface;
+        publish_text_grid(&mut registry, 7, surface, 5, 1, GuiRect::new(0, 0, 80, 32), 10, 2);
+
+        let mut row = GuiTextGridRow::EMPTY;
+        row.surface = surface;
+        row.node_id = 5;
+        row.row = 0;
+        row.cell_count = 3;
+        row.cells[0] = Cell { codepoint: b'A' as u32, ..Cell::EMPTY };
+        assert!(registry.set_text_grid_row(7, &row).is_ok());
+
+        // Wrong owner is unauthorized.
+        assert_eq!(registry.set_text_grid_row(9, &row), Err(GuiRegistryError::Unauthorized));
+
+        // A node id that was never published as a TextGrid is rejected.
+        let mut wrong_node = row;
+        wrong_node.node_id = 6;
+        assert_eq!(registry.set_text_grid_row(7, &wrong_node), Err(GuiRegistryError::NotFound));
+
+        // Row past the node's own row count is rejected even though it is
+        // still under the ABI-wide `MAX_GUI_TEXT_GRID_ROWS` bound.
+        let mut out_of_bounds = row;
+        out_of_bounds.row = 2;
+        assert_eq!(
+            registry.set_text_grid_row(7, &out_of_bounds),
+            Err(GuiRegistryError::InvalidRequest)
+        );
+
+        // More cells than the node's own column count is rejected.
+        let mut too_wide = row;
+        too_wide.cell_count = 11;
+        assert_eq!(registry.set_text_grid_row(7, &too_wide), Err(GuiRegistryError::InvalidRequest));
+
+        // An unknown attribute bit fails ABI-level validation before
+        // authorization is even checked.
+        let mut unknown_attrs = row;
+        unknown_attrs.cells[0].attributes = 1 << 15;
+        assert_eq!(registry.set_text_grid_row(7, &unknown_attrs), Err(GuiRegistryError::Malformed));
+    }
+
+    #[test]
+    fn text_grid_dirty_row_damages_only_its_own_row() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let surface = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 80, 32)))
+            .unwrap()
+            .surface;
+        publish_text_grid(&mut registry, 7, surface, 5, 1, GuiRect::new(0, 0, 80, 32), 10, 2);
+        registry.take_damage();
+
+        let mut row = GuiTextGridRow::EMPTY;
+        row.surface = surface;
+        row.node_id = 5;
+        row.row = 1;
+        row.cell_count = 1;
+        row.cells[0] = Cell { codepoint: b'B' as u32, ..Cell::EMPTY };
+        registry.set_text_grid_row(7, &row).unwrap();
+
+        let (damage, count) = registry.take_damage();
+        assert_eq!(count, 1);
+        assert_eq!(damage[0], GuiRect::new(0, 16, 80, 16));
+    }
+
+    #[test]
+    fn text_grid_rasters_known_cells_to_expected_pixels() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let surface = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 16, 16)))
+            .unwrap()
+            .surface;
+        publish_text_grid(&mut registry, 7, surface, 5, 1, GuiRect::new(0, 0, 16, 16), 2, 1);
+        registry.take_damage();
+
+        let mut row = GuiTextGridRow::EMPTY;
+        row.surface = surface;
+        row.node_id = 5;
+        row.row = 0;
+        row.cell_count = 2;
+        row.cells[0] = Cell { codepoint: b' ' as u32, background: 0x00ff00, ..Cell::EMPTY };
+        row.cells[1] = Cell { codepoint: b' ' as u32, background: 0x0000ff, ..Cell::EMPTY };
+        registry.set_text_grid_row(7, &row).unwrap();
+
+        let (damage, damage_count) = registry.take_damage();
+        let mut framebuffer = vec![0u8; 16 * 16 * 4];
+        let mut glyph_cache = crate::GlyphCache::new();
+        registry.render(
+            &mut glyph_cache,
+            &mut framebuffer,
+            16,
+            16,
+            16 * 4,
+            PixelFormat::Bgr8,
+            &damage,
+            damage_count,
+        );
+
+        assert_eq!(pixel(&framebuffer, 16, 2, 8), [0, 255, 0, 0]);
+        assert_eq!(pixel(&framebuffer, 16, 10, 8), [255, 0, 0, 0]);
+    }
+
+    fn modal(registry: &mut GuiSurfaceRegistry, request_id: u32, bounds: GuiRect) -> SurfaceHandle {
+        let mut req = request(GuiSurfaceOperation::CreateModal, request_id, bounds);
+        req.z_order = request_id as i16;
+        registry.create(7, req).unwrap().surface
+    }
+
+    #[test]
+    fn two_surfaces_each_keep_an_independent_text_grid() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let left = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 16, 16)))
+            .unwrap()
+            .surface;
+        let right = modal(&mut registry, 2, GuiRect::new(16, 0, 16, 16));
+
+        publish_text_grid(&mut registry, 7, left, 5, 1, GuiRect::new(0, 0, 16, 16), 2, 1);
+        publish_text_grid(&mut registry, 7, right, 6, 1, GuiRect::new(16, 0, 16, 16), 2, 1);
+        registry.take_damage();
+
+        let mut left_row = GuiTextGridRow::EMPTY;
+        left_row.surface = left;
+        left_row.node_id = 5;
+        left_row.cell_count = 1;
+        left_row.cells[0] = Cell { codepoint: b' ' as u32, background: 0x00ff00, ..Cell::EMPTY };
+        registry.set_text_grid_row(7, &left_row).unwrap();
+
+        let mut right_row = GuiTextGridRow::EMPTY;
+        right_row.surface = right;
+        right_row.node_id = 6;
+        right_row.cell_count = 1;
+        right_row.cells[0] = Cell { codepoint: b' ' as u32, background: 0x0000ff, ..Cell::EMPTY };
+        registry.set_text_grid_row(7, &right_row).unwrap();
+
+        // Each store only ever sees its own surface's row updates.
+        let mut cross_surface = left_row;
+        cross_surface.surface = right;
+        cross_surface.node_id = 5;
+        assert_eq!(registry.set_text_grid_row(7, &cross_surface), Err(GuiRegistryError::NotFound));
+
+        let (damage, damage_count) = registry.take_damage();
+        let mut framebuffer = vec![0u8; 32 * 16 * 4];
+        let mut glyph_cache = crate::GlyphCache::new();
+        registry.render(
+            &mut glyph_cache,
+            &mut framebuffer,
+            32,
+            16,
+            32 * 4,
+            PixelFormat::Bgr8,
+            &damage,
+            damage_count,
+        );
+        assert_eq!(pixel(&framebuffer, 32, 2, 8), [0, 255, 0, 0]);
+        assert_eq!(pixel(&framebuffer, 32, 18, 8), [255, 0, 0, 0]);
+    }
+
+    #[test]
+    fn removing_a_text_grid_node_frees_its_store_for_reuse() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let surface = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 16, 16)))
+            .unwrap()
+            .surface;
+        publish_text_grid(&mut registry, 7, surface, 5, 1, GuiRect::new(0, 0, 16, 16), 2, 1);
+
+        let mut row = GuiTextGridRow::EMPTY;
+        row.surface = surface;
+        row.node_id = 5;
+        row.cell_count = 1;
+        row.cells[0] = Cell { codepoint: b'X' as u32, ..Cell::EMPTY };
+        registry.set_text_grid_row(7, &row).unwrap();
+
+        registry.apply_scene_op(7, GuiSceneOp::remove(surface, 2, 5)).unwrap();
+        // The store released with the node: a stale update to the old
+        // node id is rejected...
+        assert_eq!(registry.set_text_grid_row(7, &row), Err(GuiRegistryError::NotFound));
+
+        // ...and a brand new grid on the same surface can reuse the freed
+        // store, starting from blank content rather than the old node's
+        // leftover cells.
+        publish_text_grid(&mut registry, 7, surface, 9, 3, GuiRect::new(0, 0, 16, 16), 2, 1);
+        let mut new_row = row;
+        new_row.node_id = 9;
+        assert!(registry.set_text_grid_row(7, &new_row).is_ok());
+    }
+
+    #[test]
+    fn fifth_text_grid_is_rejected_without_evicting_the_first_four() {
+        let mut registry = GuiSurfaceRegistry::new();
+        let root = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 8, 16)))
+            .unwrap()
+            .surface;
+        let mut surfaces = [root, SurfaceHandle::EMPTY, SurfaceHandle::EMPTY, SurfaceHandle::EMPTY];
+        for (offset, slot) in surfaces.iter_mut().enumerate().skip(1) {
+            *slot = modal(&mut registry, offset as u32 + 1, GuiRect::new(0, 0, 8, 16));
+        }
+        for (index, surface) in surfaces.iter().copied().enumerate() {
+            publish_text_grid(&mut registry, 7, surface, 5, 1, GuiRect::new(0, 0, 8, 16), 1, 1);
+            let mut row = GuiTextGridRow::EMPTY;
+            row.surface = surface;
+            row.node_id = 5;
+            row.cell_count = 1;
+            row.cells[0] = Cell { codepoint: b'A' as u32 + index as u32, ..Cell::EMPTY };
+            registry.set_text_grid_row(7, &row).unwrap();
+        }
+
+        let fifth = modal(&mut registry, 5, GuiRect::new(0, 0, 8, 16));
+        let command = GuiDrawCommand::text_grid(GuiRect::new(0, 0, 8, 16), 1, 1).unwrap();
+        assert_eq!(
+            registry.apply_scene_op(7, GuiSceneOp::upsert(fifth, 1, 5, command)),
+            Err(GuiRegistryError::Capacity)
+        );
+
+        // None of the first four grids were evicted to make room.
+        for surface in surfaces {
+            let mut row = GuiTextGridRow::EMPTY;
+            row.surface = surface;
+            row.node_id = 5;
+            row.cell_count = 1;
+            row.cells[0] = Cell::EMPTY;
+            assert!(registry.set_text_grid_row(7, &row).is_ok());
+        }
     }
 }
