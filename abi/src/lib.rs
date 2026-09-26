@@ -35,7 +35,7 @@ pub use graphics::{
     GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, GuiTransform,
     MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
     MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS,
-    SurfaceHandle,
+    MAX_GUI_TEXT_GRIDS, SurfaceHandle,
 };
 
 pub use package_ipc::{

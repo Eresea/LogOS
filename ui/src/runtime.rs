@@ -1,4 +1,4 @@
-/// Raised alongside `MAX_GUI_NODES` (24 -> 48, ADR-0086) so a screen's own
+/// Raised alongside `MAX_GUI_NODES` (24 -> 48, ADR-0087) so a screen's own
 /// UI-tree capacity is no longer the tighter budget: a tree can now hold as
 /// many nodes as the retained scene can ever emit ops for.
 pub const MAX_UI_NODES: usize = 48;
@@ -979,7 +979,7 @@ impl Default for UiTree {
     }
 }
 
-/// Raised alongside `MAX_UI_NODES` (32 -> 48, ADR-0086).
+/// Raised alongside `MAX_UI_NODES` (32 -> 48, ADR-0087).
 const _: () = assert!(core::mem::size_of::<UiTree>() <= 12_208);
 
 #[cfg(test)]

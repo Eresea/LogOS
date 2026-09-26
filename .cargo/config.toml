@@ -6,3 +6,12 @@ rustflags = [
     '--cfg=chacha20_force_soft',
     '--cfg=poly1305_force_soft',
 ]
+
+[env]
+# `libtest` reads this to size each test's own thread (default 2 MiB). Host
+# tests build several `Display`/`GuiSurfaceRegistry` values (hundreds of KB,
+# e.g. MAX_GUI_TEXT_GRIDS text-grid buffers, ADR-0087) as local temporaries;
+# an unoptimized build gives no NRVO guarantee, so the momentary stack cost
+# of constructing one can exceed the default before it moves into a `Box` or
+# out of scope. This has no effect on the no_std kernel/service targets.
+RUST_MIN_STACK = "33554432"

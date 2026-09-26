@@ -7,7 +7,7 @@ pub const MAX_GUI_SURFACES: usize = 8;
 pub const MAX_GUI_DAMAGE_RECTS: usize = 8;
 pub const MAX_GUI_COMMANDS: usize = 3;
 pub const MAX_GUI_BATCH_FRAGMENTS: usize = 5;
-/// Raised from 24 for the retained `TextGrid` node (ADR-0086): a bounded
+/// Raised from 24 for the retained `TextGrid` node (ADR-0087): a bounded
 /// Terminal chrome (title, tab bar) plus one grid node, and headroom for
 /// existing Home/Settings scenes, fit comfortably under 48 while still
 /// keeping `RenderPlan` (`MAX_GUI_SURFACES * MAX_GUI_NODES`) bounded.
@@ -21,6 +21,10 @@ pub const MAX_GUI_TEXT_GRID_COLUMNS: usize = MAX_COLUMNS;
 /// protocol's larger scrollback allowance (`MAX_ROWS`): scrollback beyond a
 /// row offset is out of scope for this node (see #71).
 pub const MAX_GUI_TEXT_GRID_ROWS: usize = DEFAULT_SCREEN_HEIGHT / DISPLAY_CELL_HEIGHT;
+/// Concurrently bound grids, one per surface: up to 4 Terminal sessions
+/// (ADR-0087/#76), each keeping its own cell content independent of the
+/// others — never a single shared slot that the next surface can steal.
+pub const MAX_GUI_TEXT_GRIDS: usize = 4;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_CURSOR: u8 = 1 << 1;
