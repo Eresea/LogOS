@@ -563,7 +563,7 @@ fn emit_node(
                     index,
                     2,
                     with_transform(
-                        material_symbol_command(circle, text_color(node, theme), symbol),
+                        material_symbol_command(circle, text_color(node, theme), symbol, 24),
                         node,
                     ),
                 )?;
@@ -591,6 +591,7 @@ fn emit_node(
                 fill_command(bounds, control_color(node, theme), node),
             )?;
             if let Some(symbol) = material_symbol(node.icon) {
+                let max_size = if node.styles.contains(UiStyle::IconLarge) { 40 } else { 24 };
                 push_upsert(
                     output,
                     surface,
@@ -598,7 +599,7 @@ fn emit_node(
                     index,
                     2,
                     with_transform(
-                        material_symbol_command(bounds, text_color(node, theme), symbol),
+                        material_symbol_command(bounds, text_color(node, theme), symbol, max_size),
                         node,
                     ),
                 )?;
@@ -676,8 +677,9 @@ fn material_symbol_command(
     bounds: UiRect,
     color: u32,
     symbol: logos_abi::GuiMaterialSymbol,
+    max_size: u32,
 ) -> GuiDrawCommand {
-    let size = bounds.width.min(bounds.height).min(24);
+    let size = bounds.width.min(bounds.height).min(max_size);
     GuiDrawCommand::material_symbol(
         GuiRect::new(
             bounds.x.saturating_add(bounds.width.saturating_sub(size) as i32 / 2),

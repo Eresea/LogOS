@@ -101,6 +101,70 @@ pub const COMMAND_MENU_ITEM_TOP: i32 = 304;
 pub const COMMAND_MENU_ITEM_WIDTH: u32 = 512;
 pub const COMMAND_MENU_ITEM_HEIGHT: u32 = 64;
 pub const COMMAND_MENU_ITEM_GAP: i32 = 12;
+/// H1: the idle Home screen's icon tile grid, shown whenever the command
+/// menu (search) and sidebar popovers are closed. Five static tiles, one per
+/// app; unlike `COMMAND_MENU_ITEMS` this list is not query-filtered and
+/// includes Settings, which the launcher list omits (Settings has its own
+/// sidebar entry point instead).
+pub const HOME_GRID_APPS: [AppId; 5] =
+    [AppId::Calculator, AppId::Files, AppId::Terminal, AppId::System, AppId::Settings];
+pub const HOME_GRID_LABELS: [&[u8]; 5] =
+    [b"Calculator", b"Files", b"Terminal", b"System", b"Settings"];
+pub const HOME_HEADER_BOUNDS: GuiRect = GuiRect::new(100, 56, 1080, 56);
+pub const HOME_GRID_ITEM_WIDTH: u32 = 160;
+pub const HOME_GRID_ITEM_GAP: i32 = 40;
+pub const HOME_GRID_ICON_SIZE: u32 = 96;
+pub const HOME_GRID_ICON_TOP: i32 = 240;
+pub const HOME_GRID_LABEL_HEIGHT: u32 = 24;
+pub const HOME_GRID_LABEL_GAP: i32 = 12;
+pub const HOME_GRID_LEFT: i32 = (logos_abi::DEFAULT_SCREEN_WIDTH as i32
+    - (HOME_GRID_APPS.len() as i32 * HOME_GRID_ITEM_WIDTH as i32
+        + (HOME_GRID_APPS.len() as i32 - 1) * HOME_GRID_ITEM_GAP))
+    / 2;
+
+/// The icon-card rectangle for tile `index` (the tile's interactive/hit-test
+/// bounds); the label sits directly below it, see
+/// [`home_grid_label_bounds`].
+pub const fn home_grid_item_bounds(index: usize) -> GuiRect {
+    let column_left =
+        HOME_GRID_LEFT + index as i32 * (HOME_GRID_ITEM_WIDTH as i32 + HOME_GRID_ITEM_GAP);
+    GuiRect::new(
+        column_left + (HOME_GRID_ITEM_WIDTH as i32 - HOME_GRID_ICON_SIZE as i32) / 2,
+        HOME_GRID_ICON_TOP,
+        HOME_GRID_ICON_SIZE,
+        HOME_GRID_ICON_SIZE,
+    )
+}
+
+/// The name label rectangle for tile `index`, spanning the full tile column
+/// so [`home_scene`] can center the measured Inter text within it.
+pub const fn home_grid_label_bounds(index: usize) -> GuiRect {
+    let column_left =
+        HOME_GRID_LEFT + index as i32 * (HOME_GRID_ITEM_WIDTH as i32 + HOME_GRID_ITEM_GAP);
+    GuiRect::new(
+        column_left,
+        HOME_GRID_ICON_TOP + HOME_GRID_ICON_SIZE as i32 + HOME_GRID_LABEL_GAP,
+        HOME_GRID_ITEM_WIDTH,
+        HOME_GRID_LABEL_HEIGHT,
+    )
+}
+
+/// One shared backing card behind the whole tile row. Besides the Material 3
+/// look, this keeps Display's damage-merge budget (`MAX_GUI_DAMAGE_RECTS`,
+/// 8 per commit, `services/display/src/gui.rs`) satisfied: five
+/// independently spaced tiles would otherwise contribute up to five
+/// non-touching regions on their own; painting this card first gives every
+/// tile fragment something to merge into, so the grid costs one region
+/// instead of five.
+pub const HOME_GRID_CONTAINER_BOUNDS: GuiRect = GuiRect::new(
+    HOME_GRID_LEFT - 24,
+    HOME_GRID_ICON_TOP - 24,
+    (HOME_GRID_APPS.len() as u32) * HOME_GRID_ITEM_WIDTH
+        + (HOME_GRID_APPS.len() as u32 - 1) * HOME_GRID_ITEM_GAP as u32
+        + 48,
+    HOME_GRID_ICON_SIZE + HOME_GRID_LABEL_GAP as u32 + HOME_GRID_LABEL_HEIGHT + 48,
+);
+
 pub const SIDEBAR_BOUNDS: GuiRect = GuiRect::new(0, 0, SHELL_RAIL_WIDTH, 800);
 pub const SIDEBAR_ACCOUNT_BOUNDS: GuiRect = GuiRect::new(10, 12, 40, 40);
 pub const SIDEBAR_SETTINGS_BOUNDS: GuiRect = GuiRect::new(10, 748, 40, 40);
@@ -320,6 +384,7 @@ pub struct Atrium {
     sidebar_hover: u8,
     account_menu: logos_ui::UiPopover,
     settings_menu: logos_ui::UiPopover,
+    home_grid_focus: u8,
 }
 
 impl Atrium {
@@ -352,6 +417,7 @@ impl Atrium {
             sidebar_hover: 0,
             account_menu: logos_ui::UiPopover::new(),
             settings_menu: logos_ui::UiPopover::new(),
+            home_grid_focus: 0,
         }
     }
 
@@ -415,6 +481,38 @@ impl Atrium {
             let Some(app) = self.launcher_result_app(index) else { continue };
             if command_menu_item_bounds(index).contains(x, y) {
                 self.command_menu.set_selected(index as u8);
+                return Some(app);
+            }
+        }
+        None
+    }
+
+    /// Index into [`HOME_GRID_APPS`] currently holding keyboard focus on the
+    /// idle Home tile grid.
+    pub const fn home_grid_focus(&self) -> u8 {
+        self.home_grid_focus
+    }
+
+    /// True whenever the idle Home tile grid (header + tiles) is the
+    /// foreground Home content: no search overlay, no sidebar popover, and
+    /// no app surface holding focus.
+    pub fn home_grid_showing(&self) -> bool {
+        self.phase == AtriumPhase::Home
+            && !self.command_menu_open
+            && !self.settings_menu_open()
+            && !self.account_menu_open()
+            && self.focused.is_none()
+    }
+
+    /// Hit-test a pointer position against the tile grid, moving keyboard
+    /// focus onto the hit tile (mirrors [`Self::command_menu_item_at`]).
+    pub fn home_grid_item_at(&mut self, x: i32, y: i32) -> Option<AppId> {
+        if !self.home_grid_showing() {
+            return None;
+        }
+        for (index, app) in HOME_GRID_APPS.into_iter().enumerate() {
+            if home_grid_item_bounds(index).contains(x, y) {
+                self.home_grid_focus = index as u8;
                 return Some(app);
             }
         }
@@ -880,7 +978,9 @@ impl Atrium {
         }
         self.phase = AtriumPhase::Home;
         self.clear_surface_records();
-        self.command_menu_open = true;
+        // H1: Home's default view is the header + icon tile grid, not the
+        // search overlay; Meta still opens the command menu on demand.
+        self.home_grid_focus = 0;
     }
 
     pub fn logout(&mut self) {
@@ -1213,6 +1313,23 @@ impl Atrium {
         if self.command_menu_open {
             if let Some(action) = self.command_menu_action(input.code) {
                 return action;
+            }
+        }
+        if self.home_grid_showing() && input.modifiers == 0 {
+            let last = HOME_GRID_APPS.len() as u8 - 1;
+            match code {
+                KeyCode::LEFT if self.home_grid_focus > 0 => {
+                    self.home_grid_focus -= 1;
+                    return AtriumAction::LauncherChanged;
+                }
+                KeyCode::RIGHT if self.home_grid_focus < last => {
+                    self.home_grid_focus += 1;
+                    return AtriumAction::LauncherChanged;
+                }
+                KeyCode::ENTER => {
+                    return AtriumAction::Launch(HOME_GRID_APPS[self.home_grid_focus as usize]);
+                }
+                _ => {}
             }
         }
         match (input.modifiers & MOD_CTRL != 0, code) {
@@ -2480,6 +2597,7 @@ mod tests {
     fn command_menu_selection_is_bounded_and_launchable() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
+        atrium.open_command_menu();
         assert_eq!(atrium.command_menu_item_at(151, COMMAND_MENU_ITEM_TOP), None);
         assert_eq!(
             atrium.command_menu_item_at(
@@ -2721,6 +2839,7 @@ mod tests {
     fn command_menu_filters_text_and_launches_the_selected_result() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
+        atrium.open_command_menu();
         assert_eq!(
             atrium.input(&InputMessage::text(b"calcu").unwrap()),
             AtriumAction::LauncherChanged
