@@ -187,6 +187,11 @@ static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static APIC_TIMER_COUNT: AtomicU32 = AtomicU32::new(10_000_000);
 static APIC_IDS: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 static TRAMPOLINE_PAGE: AtomicUsize = AtomicUsize::new(0);
+// Packed `WallTime` read from CMOS at boot, and the `TIMER_TICKS` value at
+// that moment. Queries add the elapsed ticks (converted to seconds) to this
+// anchor; nothing here ever sets the RTC.
+static WALL_CLOCK_ANCHOR: AtomicU64 = AtomicU64::new(0);
+static WALL_CLOCK_ANCHOR_TICKS: AtomicU64 = AtomicU64::new(0);
 static mut BOOT_RESOURCES: Option<BootResources> = None;
 static mut SERVICE_IMAGES: Option<ServiceImageBundle> = None;
 #[cfg(target_os = "uefi")]
@@ -1528,6 +1533,7 @@ fn initialize_post_uefi(cpu_count: usize) {
     crate::user_mode::initialize_kernel_cr3(current_cr3());
     start_aps(cpu_count);
     configure_timer();
+    init_wall_clock();
     unsafe { CPU_LOCALS[0].online.store(true, Ordering::Release) };
     SCHEDULER.online_cpu(0);
     let mut ready = 0;
@@ -2035,6 +2041,126 @@ unsafe fn in_port(port: u16) -> u8 {
         asm!("in al, dx", in("dx") port, out("al") value, options(nomem, nostack, preserves_flags))
     };
     value
+}
+
+const CMOS_INDEX_PORT: u16 = 0x70;
+const CMOS_DATA_PORT: u16 = 0x71;
+const CMOS_REG_SECOND: u8 = 0x00;
+const CMOS_REG_MINUTE: u8 = 0x02;
+const CMOS_REG_HOUR: u8 = 0x04;
+const CMOS_REG_DAY: u8 = 0x07;
+const CMOS_REG_MONTH: u8 = 0x08;
+const CMOS_REG_YEAR: u8 = 0x09;
+const CMOS_REG_STATUS_A: u8 = 0x0a;
+const CMOS_REG_STATUS_B: u8 = 0x0b;
+const CMOS_STATUS_A_UPDATE_IN_PROGRESS: u8 = 1 << 7;
+
+unsafe fn read_cmos(register: u8) -> u8 {
+    unsafe {
+        out_port(CMOS_INDEX_PORT, register);
+        in_port(CMOS_DATA_PORT)
+    }
+}
+
+fn rtc_update_in_progress() -> bool {
+    unsafe { read_cmos(CMOS_REG_STATUS_A) & CMOS_STATUS_A_UPDATE_IN_PROGRESS != 0 }
+}
+
+/// Read one full set of CMOS RTC registers, guarding against the update tick
+/// so the read cannot straddle a rollover.
+fn read_rtc_snapshot() -> logos_abi::RtcRegisters {
+    unsafe {
+        logos_abi::RtcRegisters {
+            second: read_cmos(CMOS_REG_SECOND),
+            minute: read_cmos(CMOS_REG_MINUTE),
+            hour: read_cmos(CMOS_REG_HOUR),
+            day: read_cmos(CMOS_REG_DAY),
+            month: read_cmos(CMOS_REG_MONTH),
+            year: read_cmos(CMOS_REG_YEAR),
+            // The century register is at a non-standard, chipset-specific
+            // offset; QEMU's default RTC does not populate one, so the
+            // decoder's 2000-2099 assumption stands.
+            century: None,
+            status_b: read_cmos(CMOS_REG_STATUS_B),
+        }
+    }
+}
+
+/// Read the CMOS RTC safely: wait for update-in-progress to clear, then read
+/// twice and require the two snapshots to agree, retrying a bounded number
+/// of times against a torn read across the update tick.
+fn read_rtc_registers() -> logos_abi::RtcRegisters {
+    const MAX_ATTEMPTS: u32 = 8;
+    const MAX_UIP_SPINS: u32 = 100_000;
+    for _ in 0..MAX_ATTEMPTS {
+        let mut spins = 0;
+        while rtc_update_in_progress() && spins < MAX_UIP_SPINS {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+        let first = read_rtc_snapshot();
+        if rtc_update_in_progress() {
+            continue;
+        }
+        let second = read_rtc_snapshot();
+        if first == second {
+            return first;
+        }
+    }
+    read_rtc_snapshot()
+}
+
+/// Read the RTC once, anchor it to the current (still-zero, pre-interrupt)
+/// tick count, and print the one required boot log line. Falls back to the
+/// Unix epoch date if the RTC gives an out-of-range reading rather than
+/// failing boot over a non-critical clock.
+fn init_wall_clock() {
+    use core::fmt::Write;
+
+    let wall = logos_abi::decode_rtc(read_rtc_registers()).unwrap_or(logos_abi::WallTime {
+        year: 2000,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0,
+    });
+    WALL_CLOCK_ANCHOR.store(wall.pack(), Ordering::Release);
+    WALL_CLOCK_ANCHOR_TICKS.store(TIMER_TICKS.load(Ordering::Acquire), Ordering::Release);
+
+    struct Line {
+        bytes: [u8; 64],
+        len: usize,
+    }
+    impl Write for Line {
+        fn write_str(&mut self, text: &str) -> core::fmt::Result {
+            let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
+            let target = self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+            target.copy_from_slice(text.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+    let mut line = Line { bytes: [0; 64], len: 0 };
+    if write!(
+        &mut line,
+        "LogOS vNext: wall clock {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        wall.year, wall.month, wall.day, wall.hour, wall.minute, wall.second,
+    )
+    .is_ok()
+    {
+        debug_line(&line.bytes[..line.len]);
+    }
+}
+
+/// The bounded read-only wall-clock query: the RTC-anchored reading advanced
+/// by the ticks elapsed since boot.
+pub(crate) fn wall_time() -> logos_abi::WallTime {
+    let anchor = logos_abi::WallTime::unpack(WALL_CLOCK_ANCHOR.load(Ordering::Acquire));
+    let anchor_ticks = WALL_CLOCK_ANCHOR_TICKS.load(Ordering::Acquire);
+    let elapsed_ticks = TIMER_TICKS.load(Ordering::Acquire).saturating_sub(anchor_ticks);
+    let elapsed_seconds = elapsed_ticks / logos_abi::WALL_CLOCK_TICKS_PER_SECOND;
+    logos_abi::advance_wall_time(anchor, elapsed_seconds)
 }
 
 fn write_gs(local: &CpuLocal) {

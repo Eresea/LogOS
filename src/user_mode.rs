@@ -18,6 +18,7 @@ const PROOF_IMAGE_LEN: usize = 0x89;
 const SYSCALL_YIELD: usize = 1;
 const SYSCALL_EVENT: usize = logos_abi::EVENT_SYSCALL;
 const SYSCALL_CURRENT_TICKS: usize = logos_abi::CURRENT_TICKS_SYSCALL;
+const SYSCALL_WALL_TIME: usize = logos_abi::WALL_TIME_SYSCALL;
 #[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
 const SYSCALL_DEBUG_LINE: usize = logos_abi::DEBUG_LINE_SYSCALL;
 const SYSCALL_SERVICE_HEAP_GROW: usize = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
@@ -213,6 +214,15 @@ pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
         unsafe {
             core::ptr::write_unaligned((gpr as *mut usize).add(14), crate::current_ticks() as usize)
         };
+        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    if number == SYSCALL_WALL_TIME {
+        if SCHEDULER.user_launch(handle).is_none() {
+            return false;
+        }
+        let packed = crate::arch::wall_time().pack();
+        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), packed as usize) };
         USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
         return true;
     }

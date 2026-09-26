@@ -19,6 +19,7 @@ mod runtime_abi;
 mod service_manager;
 mod storage_api;
 mod user_api;
+mod walltime;
 
 pub use atrium::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumControlResponse, AtriumSection,
@@ -67,6 +68,7 @@ pub use user_api::{
     UserId, UserOperation, UserRequest, UserResponse, UserStatus, UserStorageOperation,
     UserStorageRequest, UserStorageResponse, UserStorageStatus,
 };
+pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
 pub const ABI_VERSION: u16 = 7;
 pub const MAX_TEXT_BYTES: usize = 64;
@@ -153,6 +155,9 @@ pub const SERVICE_DIRECTORY_SYSCALL: usize = 17;
 pub const EVENT_SYSCALL: usize = 18;
 pub const CURRENT_TICKS_SYSCALL: usize = 19;
 pub const DEBUG_LINE_SYSCALL: usize = 20;
+pub const WALL_TIME_SYSCALL: usize = 21;
+/// Ticks per second for the bounded APIC scheduler timer; see `arch::calibrate_timer`.
+pub const WALL_CLOCK_TICKS_PER_SECOND: u64 = 100;
 pub const MANAGER_SYSCALL: usize = 12;
 pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
