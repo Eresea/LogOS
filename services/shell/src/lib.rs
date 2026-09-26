@@ -271,7 +271,8 @@ pub fn login_page_text(
             | UiNodeKind::Panel
             | UiNodeKind::Form
             | UiNodeKind::Avatar
-            | UiNodeKind::RouteFrame => {}
+            | UiNodeKind::RouteFrame
+            | UiNodeKind::TextGrid => {}
         }
     }
     length
@@ -342,7 +343,8 @@ impl LoginLayout {
                 | UiNodeKind::Panel
                 | UiNodeKind::Form
                 | UiNodeKind::Avatar
-                | UiNodeKind::RouteFrame => (panel, None),
+                | UiNodeKind::RouteFrame
+                | UiNodeKind::TextGrid => (panel, None),
                 UiNodeKind::Label | UiNodeKind::TextInput | UiNodeKind::Button => {
                     let parent_index = usize::from(node.parent);
                     let parent = build.document.node(parent_index)?;
@@ -539,7 +541,8 @@ pub fn login_page_node_text(
         | UiNodeKind::Panel
         | UiNodeKind::Form
         | UiNodeKind::Avatar
-        | UiNodeKind::RouteFrame => &[],
+        | UiNodeKind::RouteFrame
+        | UiNodeKind::TextGrid => &[],
     };
     let mut length = 0;
     append_text(output, &mut length, text);

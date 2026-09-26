@@ -11,8 +11,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use logos_abi::{
     DISPLAY_CONFIG_BASE, DISPLAY_FRAMEBUFFER_BASE, DISPLAY_PRESENT_BASE, FramebufferConfig,
     FramebufferFormat, FramebufferPresentState, GuiDrawCommand, GuiDrawKind, GuiRect, GuiSceneOp,
-    GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, IpcStatus, MessageKind,
-    RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
+    GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow,
+    IpcStatus, MessageKind, RENDER_FLAG_MORE, RenderMessage, SurfaceHandle,
 };
 use logos_display::FrameCoordinator;
 const FPS_SURFACE_BOUNDS: GuiRect = GuiRect::new(
@@ -36,6 +36,9 @@ const READY_ALL: usize = (1 << 7) - 1;
 const MAX_SCENE_REJECTION_DETAILS: usize = 8;
 #[cfg(feature = "qemu-proof")]
 static SCENE_REJECTION_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "qemu-proof")]
+static TEXT_GRID_ROW_LOGGED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 #[cfg(feature = "qemu-proof")]
 struct ProofLine {
@@ -123,7 +126,7 @@ const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_nam
 const ATRIUM_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
     b"atrium",
-    core::mem::size_of::<RenderMessage>(),
+    core::mem::size_of::<GuiTextGridRow>(),
     logos_abi::IpcRights::Receive,
 );
 const GUI_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -603,14 +606,24 @@ pub extern "C" fn _start() -> ! {
         }
         ready_mask &= !(READY_ATRIUM_GUI | READY_LOCKSCREEN_GUI);
         if ready_mask & READY_ATRIUM_RENDER != 0 {
-            let mut atrium_render = RenderMessage::empty(MessageKind::RenderCells);
+            let mut atrium_render = GuiTextGridRow::EMPTY;
             while common::ipc_receive_handle(atrium_render_capability, &mut atrium_render)
                 == IpcStatus::Ok
             {
                 progressed = true;
-                if display.apply(generation, &atrium_render).is_ok() {
-                    coordinator
-                        .accept_terminal_fragment(atrium_render.flags & RENDER_FLAG_MORE != 0);
+                // Terminal content is now a retained `TextGrid` node
+                // (ADR-0087, #74): a dirty row damages its own node/store
+                // and composites through the ordinary GUI path, not the
+                // legacy full-screen `render()` cell buffer.
+                if display.gui_mut().set_text_grid_row(11, &atrium_render).is_ok() {
+                    coordinator.request_gui();
+                    #[cfg(feature = "qemu-proof")]
+                    if TEXT_GRID_ROW_LOGGED
+                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        common::proof_line(b"LogOS vNext: Display text grid row applied");
+                    }
                 }
             }
             ready_mask &= !READY_ATRIUM_RENDER;
@@ -627,9 +640,6 @@ pub extern "C" fn _start() -> ! {
                 &mut fps_scene_frame,
                 fps_enabled,
             );
-            if display.gui().terminal_bounds().is_some() {
-                coordinator.request_gui();
-            }
             if fps_changed {
                 coordinator.request_gui();
             }

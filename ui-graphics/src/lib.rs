@@ -4,8 +4,8 @@
 extern crate std;
 
 use logos_abi::{
-    GUI_DRAW_FLAG_MORE, GuiDrawCommand, GuiNodeOperation, GuiRect, GuiSceneOp, GuiTransform,
-    IpcStatus, MAX_GUI_NODES, SurfaceHandle,
+    DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GUI_DRAW_FLAG_MORE, GuiDrawCommand, GuiNodeOperation,
+    GuiRect, GuiSceneOp, GuiTransform, IpcStatus, MAX_GUI_NODES, SurfaceHandle,
 };
 pub use logos_ui::{UiBlueprint, UiComponentTree, UiNodeKind, UiRect, UiText};
 use logos_ui::{UiIcon, UiNode, UiStyle};
@@ -638,6 +638,17 @@ fn emit_node(
                 text_color(node, theme),
                 2,
             )?;
+        }
+        UiNodeKind::TextGrid => {
+            // Content arrives separately via `GuiTextGridRow`, addressed by
+            // this node's id (ADR-0087); the tree only carries bounds,
+            // which are exact 8x16 cell multiples by construction, so the
+            // columns/rows fall straight out of them.
+            let columns = (bounds.width / DISPLAY_CELL_WIDTH as u32) as u16;
+            let rows = (bounds.height / DISPLAY_CELL_HEIGHT as u32) as u16;
+            if let Some(command) = GuiDrawCommand::text_grid(to_gui_rect(bounds), columns, rows) {
+                push_upsert(output, surface, frame, index, 0, command)?;
+            }
         }
     }
     Ok(())

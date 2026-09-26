@@ -103,6 +103,7 @@ impl UiComponentContract {
             UiNodeKind::Label => Self::new("ui.text", kind, false),
             UiNodeKind::Avatar => Self::new("ui.avatar", kind, false),
             UiNodeKind::RouteFrame => Self::new("ui.route-frame", kind, false),
+            UiNodeKind::TextGrid => Self::new("ui.text-grid", kind, false),
         }
     }
 

@@ -30,13 +30,12 @@ pub use device_api::{
     DeviceState, DeviceStatus, MAX_DEVICES,
 };
 pub use graphics::{
-    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE,
-    GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind,
-    GuiMaterialSymbol, GuiNodeOperation, GuiRect, GuiSceneOp, GuiSessionContext, GuiStatus,
-    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, GuiTransform,
-    MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
-    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS,
-    MAX_GUI_TEXT_GRIDS, SurfaceHandle,
+    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT,
+    GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiMaterialSymbol,
+    GuiNodeOperation, GuiRect, GuiSceneOp, GuiSessionContext, GuiStatus, GuiSurfaceOperation,
+    GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, GuiTransform, MAX_GUI_BATCH_FRAGMENTS,
+    MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES,
+    MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS, MAX_GUI_TEXT_GRIDS, SurfaceHandle,
 };
 
 pub use package_ipc::{
@@ -1815,7 +1814,7 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
     if endpoint == IpcEndpointId::TerminalToAtriumSurfaceRender as usize
         || endpoint == IpcEndpointId::AtriumToDisplaySurfaceRender as usize
     {
-        return Some(core::mem::size_of::<RenderMessage>());
+        return Some(core::mem::size_of::<GuiTextGridRow>());
     }
     if endpoint == IpcEndpointId::ShellToAtrium as usize {
         return Some(core::mem::size_of::<GuiSessionContext>());
@@ -2786,7 +2785,7 @@ mod tests {
         );
         assert_eq!(
             ipc_message_size(IpcEndpointId::AtriumToDisplaySurfaceRender as usize),
-            Some(core::mem::size_of::<RenderMessage>())
+            Some(core::mem::size_of::<GuiTextGridRow>())
         );
         assert_eq!(IpcEndpointId::SystemToAtriumSurface.producer(), ServiceId::System);
         assert_eq!(IpcEndpointId::SystemToAtriumSurface.consumer(), ServiceId::Atrium);

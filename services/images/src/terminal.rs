@@ -5,8 +5,8 @@
 mod common;
 
 use logos_abi::{
-    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, InputMessage,
-    IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind, SurfaceHandle,
+    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GuiTextGridRow,
+    InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind, SurfaceHandle,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -18,7 +18,7 @@ const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_nam
 const ATRIUM_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
     b"atrium",
-    core::mem::size_of::<logos_abi::RenderMessage>(),
+    core::mem::size_of::<GuiTextGridRow>(),
     logos_abi::IpcRights::Send,
 );
 const ATRIUM_SURFACE_REQUEST_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -48,7 +48,7 @@ const SESSION_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_con
 );
 
 static mut TERMINAL: logos_terminal::TerminalService = logos_terminal::TerminalService::new();
-static mut PENDING_RENDER: Option<logos_abi::RenderMessage> = None;
+static mut PENDING_RENDER: Option<GuiTextGridRow> = None;
 static mut PENDING_SESSION_INPUT: Option<IpcBytes> = None;
 
 #[unsafe(no_mangle)]
@@ -84,13 +84,12 @@ pub extern "C" fn _start() -> ! {
         Err(_) => common::idle(),
     };
     let mut heartbeat_ticks = 0u16;
-    let mut render_more = false;
     let client = common::bootstrap_page().service;
     let surface_request = AtriumSurfaceRequest::new(AtriumApp::Terminal, client, 1);
     let mut surface_request_sent = false;
     let mut terminal_surface = SurfaceHandle::EMPTY;
     loop {
-        if render_more || pending_render.is_some() {
+        if pending_render.is_some() {
             common::heartbeat();
         } else {
             common::heartbeat_tick(&mut heartbeat_ticks);
@@ -123,7 +122,6 @@ pub extern "C" fn _start() -> ! {
             } else if surface_response.is_revoke() && surface_response.surface == terminal_surface {
                 terminal_surface = SurfaceHandle::EMPTY;
                 *pending_render = None;
-                render_more = false;
             }
         }
         if let Some(message) = *pending_session_input {
@@ -172,9 +170,9 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if pending_render.is_none() {
-            *pending_render = terminal.next_render();
+            *pending_render = terminal.next_grid_row();
         }
-        if let Some(mut render) = *pending_render {
+        if let Some(mut row) = *pending_render {
             if !terminal_surface.is_valid() {
                 common::wait_on_capabilities(&[
                     input_capability,
@@ -186,24 +184,25 @@ pub extern "C" fn _start() -> ! {
                 ]);
                 continue;
             }
-            render.surface = terminal_surface;
-            match common::ipc_send_handle(atrium_render_capability, &render) {
+            // `node_id` is left at 0: only Atrium knows this surface's own
+            // text-grid node id, and fills it in before relaying the row
+            // to Display (#74).
+            row.surface = terminal_surface;
+            match common::ipc_send_handle(atrium_render_capability, &row) {
                 IpcStatus::Ok => {
-                    *pending_render = None;
-                    render_more = render.flags & logos_abi::RENDER_FLAG_MORE != 0;
+                    *pending_render = terminal.next_grid_row();
                 }
-                IpcStatus::Full => *pending_render = Some(render),
+                IpcStatus::Full => *pending_render = Some(row),
                 IpcStatus::Stale
                 | IpcStatus::Disconnected
                 | IpcStatus::Unauthorized
                 | IpcStatus::Malformed
                 | IpcStatus::Empty => {
                     *pending_render = None;
-                    render_more = false;
                 }
             }
         }
-        if pending_render.is_none() && render_more {
+        if pending_render.is_some() {
             continue;
         }
         common::wait_on_capabilities(&[

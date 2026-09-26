@@ -7,9 +7,9 @@ extern crate std;
 
 use logos_abi::{
     CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, DEFAULT_COLUMNS, DEFAULT_ROWS,
-    DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GuiRect, InputMessage, IpcBytes, KeyCode, KeyState,
-    MAX_COLUMNS, MAX_RENDER_CELLS, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind,
-    RENDER_FLAG_MORE, RenderMessage, TERMINAL_CHROME_HEIGHT,
+    DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GuiRect, GuiTextGridRow, InputMessage, IpcBytes,
+    KeyCode, KeyState, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind,
+    TERMINAL_CHROME_HEIGHT,
 };
 
 const MAX_PARAMS: usize = 16;
@@ -165,8 +165,8 @@ impl TerminalService {
         self.terminal.resize(columns, rows);
     }
 
-    pub fn next_render(&mut self) -> Option<RenderMessage> {
-        self.terminal.next_render()
+    pub fn next_grid_row(&mut self) -> Option<GuiTextGridRow> {
+        self.terminal.next_grid_row()
     }
 }
 
@@ -606,53 +606,35 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         }
     }
 
-    /// Return at most 128 dirty cells; repeated calls drain the dirty set.
-    pub fn next_render(&mut self) -> Option<RenderMessage> {
-        let kind = if self.full_redraw_pending {
-            MessageKind::FullRedraw
-        } else {
-            MessageKind::RenderCells
-        };
-        let mut message = RenderMessage::empty(kind);
-        message.columns = self.columns as u16;
-        message.rows = self.rows as u16;
-        message.cursor_column = self.cursor_column as u16;
-        message.cursor_row = self.cursor_row as u16;
-        let mut count = 0;
-        let mut more = false;
+    /// Drains one dirty row at a time as a whole-row `GuiTextGridRow`
+    /// update (repeated calls drain the dirty set, `None` once every
+    /// dirty row has been sent). `surface`/`node_id` are left at
+    /// `SurfaceHandle::EMPTY`/0: only Atrium knows this surface's own
+    /// text-grid node id, so it fills those in before relaying the row to
+    /// Display (#74). A full redraw (reset/resize/`\x1bc`/`\x1b[2J`) marks
+    /// every row dirty, so it drains as an ordinary sequence of whole-row
+    /// updates — there is no separate "clear" signal to send; a shrunk
+    /// grid's stale trailing cells are cleared by the bound store itself
+    /// (ADR-0087's `sync_text_grid`) when Atrium republishes the node.
+    pub fn next_grid_row(&mut self) -> Option<GuiTextGridRow> {
         for row in 0..self.rows {
+            let row_dirty = (0..self.columns).any(|column| self.dirty[Self::index(column, row)]);
+            if !row_dirty {
+                continue;
+            }
+            let mut message = GuiTextGridRow::EMPTY;
+            message.row = row as u16;
+            message.cell_count = self.columns as u16;
             for column in 0..self.columns {
                 let index = Self::index(column, row);
-                if !self.dirty[index] {
-                    continue;
-                }
-                if count < MAX_RENDER_CELLS {
-                    message.positions[count] = (row * MAX_COLUMNS + column) as u16;
-                    message.cells[count] = self.visible_cell(row, column);
-                    self.dirty[index] = false;
-                    count += 1;
-                } else {
-                    more = true;
-                }
+                message.cells[column] = self.visible_cell(row, column);
+                self.dirty[index] = false;
             }
-        }
-        if more {
-            message.flags = RENDER_FLAG_MORE;
-        }
-        if count == 0 {
-            if !self.cursor_dirty {
-                None
-            } else {
-                self.cursor_dirty = false;
-                message.count = 0;
-                Some(message)
-            }
-        } else {
-            self.cursor_dirty = false;
             self.full_redraw_pending = false;
-            message.count = count as u16;
-            Some(message)
+            return Some(message);
         }
+        self.cursor_dirty = false;
+        None
     }
 
     pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
@@ -771,7 +753,7 @@ mod tests {
 
     fn drain(terminal: &mut Terminal) -> usize {
         let mut count = 0;
-        while terminal.next_render().is_some() {
+        while terminal.next_grid_row().is_some() {
             count += 1;
         }
         count
@@ -791,10 +773,31 @@ mod tests {
     fn resize_updates_render_dimensions() {
         let mut terminal = TerminalService::new();
         terminal.resize_to_surface(GuiRect::new(0, 0, 640, 352));
-        let message = terminal.next_render().unwrap();
-        assert_eq!(message.columns, 80);
-        assert_eq!(message.rows, 20);
-        assert!(message.count > 0);
+        let mut rows_seen = 0;
+        while let Some(message) = terminal.next_grid_row() {
+            assert_eq!(message.cell_count, 80);
+            rows_seen += 1;
+        }
+        assert_eq!(rows_seen, 20);
+    }
+
+    #[test]
+    fn session_output_bytes_become_grid_rows() {
+        // #74: Terminal content reaches Display as `GuiTextGridRow`s, not
+        // raw `RenderCells`. Feeding session bytes should surface as a
+        // dirty row whose cells carry the fed codepoints, addressed by
+        // row index rather than a flat cell position.
+        let mut service = TerminalService::new();
+        drain_service(&mut service);
+        service.session_output_bytes(b"hi");
+        let row = service.next_grid_row().unwrap();
+        assert_eq!(row.row, 0);
+        assert_eq!(row.cells[0].codepoint, b'h' as u32);
+        assert_eq!(row.cells[1].codepoint, b'i' as u32);
+    }
+
+    fn drain_service(service: &mut TerminalService) {
+        while service.next_grid_row().is_some() {}
     }
 
     #[test]
@@ -899,14 +902,16 @@ mod tests {
     }
 
     #[test]
-    fn cursor_motion_emits_cursor_only_render_updates() {
+    fn cursor_only_motion_emits_no_grid_row() {
+        // The text-grid transport carries cell content only; cursor
+        // rendering is a later ticket (#74 boundary), so a cursor-only
+        // move drains to nothing instead of an empty/positionless update.
         let mut terminal = Terminal::new();
         terminal.feed(b"hello");
         drain(&mut terminal);
         terminal.feed(b"\x1b[2D");
-        let message = terminal.next_render().unwrap();
-        assert_eq!(message.count, 0);
-        assert_eq!((message.cursor_column, message.cursor_row), (3, 0));
+        assert_eq!(terminal.cursor(), (3, 0));
+        assert!(terminal.next_grid_row().is_none());
     }
 
     #[test]
@@ -951,48 +956,41 @@ mod tests {
     }
 
     #[test]
-    fn render_is_chunked() {
+    fn render_is_chunked_one_row_at_a_time() {
         let mut terminal = Terminal::new();
         let mut messages = 0;
-        let mut saw_more = false;
-        while let Some(message) = terminal.next_render() {
+        while let Some(message) = terminal.next_grid_row() {
+            assert_eq!(message.row as usize, messages);
+            assert_eq!(message.cell_count as usize, DEFAULT_COLUMNS);
             messages += 1;
-            saw_more |= message.flags & RENDER_FLAG_MORE != 0;
-            if message.flags & RENDER_FLAG_MORE == 0 {
-                assert_eq!(message.flags, 0);
-            }
         }
-        assert!(messages > 1);
-        assert!(saw_more);
-        assert!(terminal.next_render().is_none());
+        assert_eq!(messages, DEFAULT_ROWS);
+        assert!(terminal.next_grid_row().is_none());
     }
 
     #[test]
-    fn first_render_after_reset_requests_a_full_redraw() {
+    fn first_render_after_reset_redraws_every_row() {
         let mut terminal = Terminal::new();
-        assert_eq!(terminal.next_render().unwrap().kind, MessageKind::FullRedraw);
-        drain(&mut terminal);
+        assert_eq!(drain(&mut terminal), DEFAULT_ROWS);
         terminal.feed(b"\x1bc");
-        assert_eq!(terminal.next_render().unwrap().kind, MessageKind::FullRedraw);
+        assert_eq!(drain(&mut terminal), DEFAULT_ROWS);
     }
 
     #[test]
-    fn full_screen_erase_requests_a_full_redraw() {
+    fn full_screen_erase_redraws_every_row() {
         let mut terminal = Terminal::new();
         drain(&mut terminal);
         terminal.feed(b"x\x1b[2J");
-        assert_eq!(terminal.next_render().unwrap().kind, MessageKind::FullRedraw);
+        assert_eq!(drain(&mut terminal), DEFAULT_ROWS);
     }
 
     #[test]
-    fn render_positions_use_display_stride() {
+    fn grid_rows_are_addressed_directly_not_by_flat_position() {
         let mut terminal = Terminal::new();
         let mut saw_second_row = false;
-        while let Some(message) = terminal.next_render() {
-            for index in 0..message.count as usize {
-                if message.positions[index] == MAX_COLUMNS as u16 {
-                    saw_second_row = true;
-                }
+        while let Some(message) = terminal.next_grid_row() {
+            if message.row == 1 {
+                saw_second_row = true;
             }
         }
         assert!(saw_second_row);
