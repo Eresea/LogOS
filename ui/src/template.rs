@@ -254,6 +254,9 @@ pub enum UiStyle {
     PaddingY3,
     RoundedLarge,
     RoundedFull,
+    /// Raises a button's material-symbol icon cap from the default 24 px to
+    /// 40 px (H1 home tiles); settings/sidebar icons keep the 24 px default.
+    IconLarge,
     BackgroundAccent,
     TextMuted,
     TextSuccess,

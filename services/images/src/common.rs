@@ -1102,6 +1102,28 @@ pub fn current_ticks() -> u64 {
     }
 }
 
+/// Current wall-clock reading (ADR-0086), through `WALL_TIME_SYSCALL`. Host
+/// builds return a fixed epoch since there is no RTC to read.
+#[allow(dead_code)]
+pub fn wall_time() -> logos_abi::WallTime {
+    #[cfg(target_os = "none")]
+    {
+        let mut raw = logos_abi::WALL_TIME_SYSCALL;
+        unsafe {
+            asm!(
+                "int 49",
+                inout("rax") raw,
+                options(preserves_flags),
+            );
+        }
+        logos_abi::WallTime::unpack(raw as u64)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        logos_abi::WallTime { year: 2026, month: 1, day: 1, hour: 0, minute: 0, second: 0 }
+    }
+}
+
 #[allow(dead_code)]
 pub fn wait_on_capability(capability: logos_abi::CapabilityHandle) {
     wait_on_capabilities(core::slice::from_ref(&capability));

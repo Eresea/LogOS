@@ -389,6 +389,10 @@ function Framebuffer-HasLockscreenPanel {
 }
 
 function Framebuffer-HasHomePanel {
+    # H1: Home's centred search-list panel was replaced by a header and an
+    # icon tile grid (services/atrium/src/lib.rs HOME_GRID_* bounds), shown
+    # by default (no popover). Tile 1 (Files) is never focused by default, so
+    # its icon card reliably shows the unfocused control fill color.
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [IO.File]::ReadAllBytes($Path)
@@ -396,29 +400,35 @@ function Framebuffer-HasHomePanel {
     if ($layout.Width -le 500 -or $layout.Height -le 700) {
         return $false
     }
-    # Below the Home popover, this desktop pixel differs from LockScreen fill.
+    # Below the Home content, this desktop pixel differs from LockScreen fill.
     $desktop = $layout.Offset + ((700 * $layout.Width + 200) * 3)
     # x=30 is inside the 60-pixel rail, away from its controls.
     $rail = $layout.Offset + ((400 * $layout.Width + 30) * 3)
     # x=70 is just outside the rail and should show the desktop background.
     $besideRail = $layout.Offset + ((400 * $layout.Width + 70) * 3)
-    # This point stays inside the Home popover, away from text and its shadow.
-    $popover = $layout.Offset + ((140 * $layout.Width + 500) * 3)
+    # Inside tile index 1's (Files) icon card, offset from its corner so the
+    # centered icon glyph itself is not sampled: column_left=360, icon
+    # x=360+32=392, y=240; sample point (392+8, 240+8) = (400, 248).
+    $tile = $layout.Offset + ((248 * $layout.Width + 400) * 3)
     return $bytes[$desktop] -eq 16 -and $bytes[$desktop + 1] -eq 24 -and $bytes[$desktop + 2] -eq 32 -and
         $bytes[$rail] -eq 24 -and $bytes[$rail + 1] -eq 37 -and $bytes[$rail + 2] -eq 53 -and
         $bytes[$besideRail] -eq 16 -and $bytes[$besideRail + 1] -eq 24 -and $bytes[$besideRail + 2] -eq 32 -and
-        $bytes[$popover] -eq 24 -and $bytes[$popover + 1] -eq 37 -and $bytes[$popover + 2] -eq 53
+        $bytes[$tile] -eq 38 -and $bytes[$tile + 1] -eq 53 -and $bytes[$tile + 2] -eq 72
 }
 
 function Framebuffer-HasHomeSelectedCard {
+    # Tile index 0 (Calculator) holds keyboard focus by default; its icon
+    # card should show the focus fill color, sampled off-center so the
+    # centered icon glyph is not hit. Column_left=160, icon x=160+32=192,
+    # y=240; sample point (192+8, 240+8) = (200, 248).
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     $bytes = [IO.File]::ReadAllBytes($Path)
     $layout = Get-PpmLayout $bytes
-    $x = 400
-    $y = 320
+    $x = 200
+    $y = 248
     $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
-    return $bytes[$index] -eq 53 -and $bytes[$index + 1] -eq 107 -and $bytes[$index + 2] -eq 216
+    return $bytes[$index] -eq 75 -and $bytes[$index + 1] -eq 130 -and $bytes[$index + 2] -eq 242
 }
 
 function Framebuffer-HasSystemStatusBar {
@@ -834,8 +844,12 @@ try {
         }
         if ($SystemProof) {
             $systemSceneMarker = Get-ProofMarkerCount 'LogOS vNext: System scene built'
+            # H1: Home's default view is the header + icon tile grid (arrow
+            # keys move focus across tiles, Enter opens); System sits at tile
+            # index 3 (Calculator, Files, Terminal, System, Settings), so
+            # Right x3 from the default Calculator focus reaches it.
             1..3 | ForEach-Object {
-                Send-QmpKey $qmp 'down'
+                Send-QmpKey $qmp 'right'
                 Start-Sleep -Milliseconds 100
             }
             Send-QmpKey $qmp 'ret'

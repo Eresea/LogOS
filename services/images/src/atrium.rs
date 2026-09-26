@@ -152,6 +152,16 @@ static mut HOME_SCENE_PUBLISHER: logos_ui_graphics::UiScenePublisher =
     logos_ui_graphics::UiScenePublisher::new();
 static mut HOME_SCENE_REPORTED: bool = false;
 static mut HOME_SCENE_SEQUENCE: u32 = 0;
+/// (hour, minute) last rendered on the Home header clock (H1). Compared each
+/// time the main loop wakes (already bounded/no-busy-wait, see
+/// `common::WAIT_TIMEOUT_TICKS`) so the clock advances without a dedicated
+/// timer or extra busy-waking.
+static mut HOME_CLOCK_LAST: Option<(u8, u8)> = None;
+/// The home surface `HOME_CLOCK_LAST` was seeded for. A fresh session (new
+/// surface handle) seeds the clock silently instead of forcing an extra
+/// render that would race the login flow's own first publish for the same
+/// surface/sequence and get rejected as backpressure.
+static mut HOME_CLOCK_SURFACE: SurfaceHandle = SurfaceHandle::EMPTY;
 static mut APP_SCENE_PUBLISHERS: [logos_ui_graphics::UiScenePublisher;
     logos_atrium::MAX_ATRIUM_SURFACES] =
     [logos_ui_graphics::UiScenePublisher::new(); logos_atrium::MAX_ATRIUM_SURFACES];
@@ -1136,7 +1146,14 @@ fn publish_home_scene(
     let pending =
         unsafe { (*core::ptr::addr_of!(HOME_SCENE_PUBLISHER)).is_pending_for(surface, sequence) };
     let tree = unsafe { &mut *core::ptr::addr_of_mut!(COMMAND_MENU_TREE) };
-    if !pending && !logos_atrium::build_home_scene(tree, atrium, common::current_ticks()) {
+    if !pending
+        && !logos_atrium::build_home_scene(
+            tree,
+            atrium,
+            common::current_ticks(),
+            common::wall_time(),
+        )
+    {
         return IpcStatus::Malformed;
     }
     let mut sink = HomeSceneSink(display);
@@ -2372,6 +2389,26 @@ pub extern "C" fn _start() -> ! {
                             .flatten()
                     })
                     .is_some();
+            let previous_grid_focus = atrium.home_grid_focus();
+            let grid_selected = atrium.home_grid_showing()
+                && event
+                    .pointer_event()
+                    .and_then(|pointer| {
+                        (pointer.state == PointerState::Down && pointer.buttons & 1 != 0)
+                            .then(|| {
+                                atrium.home_grid_item_at(i32::from(pointer.x), i32::from(pointer.y))
+                            })
+                            .flatten()
+                    })
+                    .is_some();
+            let grid_hover_changed = atrium.home_grid_showing()
+                && event.pointer_event().is_some_and(|pointer| {
+                    pointer.state == PointerState::Move
+                        && atrium
+                            .home_grid_item_at(i32::from(pointer.x), i32::from(pointer.y))
+                            .is_some()
+                        && previous_grid_focus != atrium.home_grid_focus()
+                });
             let settings_menu_was_open = atrium.settings_menu_open();
             let account_menu_was_open = atrium.account_menu_open();
             let settings_menu_hovered_option = atrium.settings_menu_hovered_option();
@@ -2413,10 +2450,15 @@ pub extern "C" fn _start() -> ! {
                         i32::from(pointer.y),
                     )
                 });
-            if menu_selected {
+            if menu_selected || grid_selected {
                 event = InputMessage::key(KeyCode::ENTER, KeyState::Pressed, 0);
             } else if atrium.command_menu_open() && event.pointer_event().is_some() {
                 if command_menu_hover_changed {
+                    pending_app_render = render_home_surface(display, atrium);
+                }
+                continue;
+            } else if atrium.home_grid_showing() && event.pointer_event().is_some() {
+                if grid_hover_changed {
                     pending_app_render = render_home_surface(display, atrium);
                 }
                 continue;
@@ -2780,6 +2822,24 @@ pub extern "C" fn _start() -> ! {
         }
         if unsafe { (*core::ptr::addr_of!(HOME_SCENE_PUBLISHER)).is_pending() } {
             pending_app_render = render_home_surface(display, atrium);
+        }
+        let home_surface = atrium.home_surface();
+        if home_surface.is_valid() {
+            let wall = common::wall_time();
+            let minute = (wall.hour, wall.minute);
+            let surface_changed =
+                unsafe { *core::ptr::addr_of!(HOME_CLOCK_SURFACE) } != home_surface;
+            if surface_changed {
+                unsafe {
+                    *core::ptr::addr_of_mut!(HOME_CLOCK_SURFACE) = home_surface;
+                    *core::ptr::addr_of_mut!(HOME_CLOCK_LAST) = Some(minute);
+                }
+            } else if unsafe { *core::ptr::addr_of!(HOME_CLOCK_LAST) } != Some(minute) {
+                unsafe { *core::ptr::addr_of_mut!(HOME_CLOCK_LAST) = Some(minute) };
+                pending_app_render = render_home_surface(display, atrium) || pending_app_render;
+            }
+        } else {
+            unsafe { *core::ptr::addr_of_mut!(HOME_CLOCK_SURFACE) = SurfaceHandle::EMPTY };
         }
         let mut wait_capabilities = [logos_abi::CapabilityHandle::EMPTY; 24];
         let mut wait_count = 0;
