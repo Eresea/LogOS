@@ -35,8 +35,8 @@ pub use font::{
     InterStyle, inter_glyph_advance, inter_glyph_index, inter_text_width,
 };
 pub use graphics::{
-    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_FONT_INTER_BODY,
-    GUI_TEXT_FLAG_FONT_INTER_TITLE, GUI_TEXT_FLAG_LIGHT,
+    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_TEXT_FLAG_DOUBLE,
+    GUI_TEXT_FLAG_FONT_INTER_BODY, GUI_TEXT_FLAG_FONT_INTER_TITLE, GUI_TEXT_FLAG_LIGHT,
     GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiMaterialSymbol,
     GuiNodeOperation, GuiRect, GuiSceneOp, GuiSessionContext, GuiStatus, GuiSurfaceOperation,
     GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, GuiTransform, MAX_GUI_BATCH_FRAGMENTS,
@@ -1880,6 +1880,12 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
     {
         return Some(core::mem::size_of::<DeviceResponse>());
     }
+    // The Terminal render path carries retained text-grid rows (#74, ADR-0087).
+    if endpoint == IpcEndpointId::TerminalToAtriumSurfaceRender as usize
+        || endpoint == IpcEndpointId::AtriumToDisplaySurfaceRender as usize
+    {
+        return Some(core::mem::size_of::<GuiTextGridRow>());
+    }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
         Some(IpcMessageType::Render) => Some(core::mem::size_of::<RenderMessage>()),
@@ -2885,6 +2891,14 @@ mod tests {
         assert_eq!(ipc_message_type(8), Some(IpcMessageType::Bytes));
         assert_eq!(ipc_message_size(0), Some(core::mem::size_of::<InputMessage>()));
         assert_eq!(ipc_message_size(1), Some(core::mem::size_of::<RenderMessage>()));
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::TerminalToAtriumSurfaceRender as usize),
+            Some(core::mem::size_of::<GuiTextGridRow>())
+        );
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::AtriumToDisplaySurfaceRender as usize),
+            Some(core::mem::size_of::<GuiTextGridRow>())
+        );
         assert_eq!(ipc_message_size(5), Some(core::mem::size_of::<IpcBytes>()));
         assert_eq!(ipc_contract_id(0), Some(IPC_CONTRACT_INPUT));
         assert_eq!(ipc_contract_id(2), Some(IPC_CONTRACT_BYTES));

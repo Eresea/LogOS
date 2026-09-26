@@ -627,14 +627,14 @@ impl GuiSurfaceRegistry {
         else {
             return Err(GuiRegistryError::NotFound);
         };
-        if update.row as usize >= store.rows as usize
-            || update.cell_count as usize > store.columns as usize
-        {
+        if update.row as usize >= store.rows as usize {
             return Err(GuiRegistryError::InvalidRequest);
         }
         let base = update.row as usize * MAX_GUI_TEXT_GRID_COLUMNS;
-        let cell_count = update.cell_count as usize;
         let columns = store.columns as usize;
+        // ponytail: rows wider than the grid (Terminal in a narrow tiled pane) are clipped to
+        // the grid width; Terminal reflow to its pane size lands with #75.
+        let cell_count = (update.cell_count as usize).min(columns);
         store.cells[base..base + cell_count].copy_from_slice(&update.cells[..cell_count]);
         for cell in store.cells[base + cell_count..base + columns].iter_mut() {
             *cell = Cell::EMPTY;
@@ -3388,10 +3388,10 @@ mod tests {
             Err(GuiRegistryError::InvalidRequest)
         );
 
-        // More cells than the node's own column count is rejected.
+        // More cells than the node's own column count are clipped to the grid width.
         let mut too_wide = row;
         too_wide.cell_count = 11;
-        assert_eq!(registry.set_text_grid_row(7, &too_wide), Err(GuiRegistryError::InvalidRequest));
+        assert!(registry.set_text_grid_row(7, &too_wide).is_ok());
 
         // An unknown attribute bit fails ABI-level validation before
         // authorization is even checked.

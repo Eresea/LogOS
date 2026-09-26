@@ -464,16 +464,19 @@ function Wait-QmpSystemFramebuffer {
 function Framebuffer-HasTerminalGlyphs {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
+    # Terminal bounds come from Atrium's scene-published marker (#74); the
+    # content starts below the 48 px chrome. A glyph is a bright pixel.
+    $match = [regex]::Matches((Get-Content $log -Raw), 'app=Terminal scene published surface=\d+/\d+ bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
+    if ($match.Count -eq 0) { return $false }
+    $groups = $match[$match.Count - 1].Groups
+    $left = [int]$groups[1].Value; $top = [int]$groups[2].Value + 48
+    $right = $left + [int]$groups[3].Value; $bottom = [int]$groups[2].Value + [int]$groups[4].Value
     $bytes = [IO.File]::ReadAllBytes($Path)
     $layout = Get-PpmLayout $bytes
-    # Terminal content starts at the surface's own origin (rail width, 0)
-    # plus its 32px chrome; scan the first few rows/columns of that region
-    # for any cell that differs from the terminal's default background
-    # (0x000b1020) -- i.e. a rendered glyph (#74).
-    for ($y = 32; $y -lt 400 -and $y -lt $layout.Height; $y++) {
-        for ($x = 60; $x -lt 620 -and $x -lt $layout.Width; $x++) {
+    for ($y = [Math]::Max($top, 0); $y -lt $bottom -and $y -lt $layout.Height; $y++) {
+        for ($x = [Math]::Max($left, 0); $x -lt $right -and $x -lt $layout.Width; $x++) {
             $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
-            if ($bytes[$index] -ne 11 -or $bytes[$index + 1] -ne 16 -or $bytes[$index + 2] -ne 32) {
+            if ($bytes[$index] -ge 160 -and $bytes[$index + 1] -ge 160 -and $bytes[$index + 2] -ge 160) {
                 return $true
             }
         }

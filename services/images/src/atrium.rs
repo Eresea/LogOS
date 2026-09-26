@@ -213,7 +213,7 @@ fn proof_home_surface_ready(surface: SurfaceHandle) {
 fn proof_home_surface_ready(_surface: SurfaceHandle) {}
 
 #[cfg(feature = "qemu-proof")]
-fn proof_app_scene_published(app: logos_atrium::AppId, surface: SurfaceHandle) {
+fn proof_app_scene_published(app: logos_atrium::AppId, surface: SurfaceHandle, bounds: GuiRect) {
     use core::fmt::Write as _;
 
     struct ProofLine {
@@ -240,14 +240,15 @@ fn proof_app_scene_published(app: logos_atrium::AppId, surface: SurfaceHandle) {
     let mut line = ProofLine { bytes: [0; 112], length: 0 };
     let _ = write!(
         line,
-        "LogOS vNext: Atrium app={title} scene published surface={}/{}",
-        surface.slot, surface.generation,
+        "LogOS vNext: Atrium app={title} scene published surface={}/{} bounds={},{},{},{}",
+        surface.slot, surface.generation, bounds.x, bounds.y, bounds.width, bounds.height,
     );
     common::proof_line(&line.bytes[..line.length]);
 }
 
 #[cfg(not(feature = "qemu-proof"))]
-fn proof_app_scene_published(_app: logos_atrium::AppId, _surface: SurfaceHandle) {}
+fn proof_app_scene_published(_app: logos_atrium::AppId, _surface: SurfaceHandle, _bounds: GuiRect) {
+}
 
 fn settings_route(page: logos_atrium::SettingsPage) -> u8 {
     match page {
@@ -1118,7 +1119,7 @@ fn render_app_scene(
             let reported = unsafe { &mut (*core::ptr::addr_of_mut!(APP_SCENE_REPORTED))[slot] };
             if !*reported {
                 *reported = true;
-                proof_app_scene_published(surface.app, surface.reference);
+                proof_app_scene_published(surface.app, surface.reference, surface.bounds);
             }
             resuming
         }
