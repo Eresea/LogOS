@@ -233,6 +233,39 @@ pub enum GuiDrawKind {
 #[repr(u32)]
 pub enum GuiMaterialSymbol {
     Settings = 1,
+    Calculator = 2,
+    Folder = 3,
+    Terminal = 4,
+    Monitor = 5,
+    Keyboard = 6,
+    Mouse = 7,
+    Palette = 8,
+    Info = 9,
+    Add = 10,
+    Close = 11,
+    Home = 12,
+}
+
+impl GuiMaterialSymbol {
+    /// Bounded, explicit decode: any discriminator outside the current
+    /// catalog (ADR-0084) is rejected rather than reinterpreted.
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            1 => Some(Self::Settings),
+            2 => Some(Self::Calculator),
+            3 => Some(Self::Folder),
+            4 => Some(Self::Terminal),
+            5 => Some(Self::Monitor),
+            6 => Some(Self::Keyboard),
+            7 => Some(Self::Mouse),
+            8 => Some(Self::Palette),
+            9 => Some(Self::Info),
+            10 => Some(Self::Add),
+            11 => Some(Self::Close),
+            12 => Some(Self::Home),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -539,7 +572,7 @@ impl GuiDrawCommand {
                     self.text_len == 0
                         && self.width != 0
                         && self.height != 0
-                        && self.auxiliary == GuiMaterialSymbol::Settings as u32
+                        && GuiMaterialSymbol::from_u32(self.auxiliary).is_some()
                 }
                 GuiDrawKind::TextGrid => {
                     let columns = self.text_grid_columns();
@@ -1093,6 +1126,41 @@ mod tests {
         let mut no_node = row;
         no_node.node_id = 0;
         assert!(!no_node.is_valid());
+    }
+
+    #[test]
+    fn material_symbol_catalog_round_trips_and_rejects_unknown() {
+        let catalog = [
+            GuiMaterialSymbol::Settings,
+            GuiMaterialSymbol::Calculator,
+            GuiMaterialSymbol::Folder,
+            GuiMaterialSymbol::Terminal,
+            GuiMaterialSymbol::Monitor,
+            GuiMaterialSymbol::Keyboard,
+            GuiMaterialSymbol::Mouse,
+            GuiMaterialSymbol::Palette,
+            GuiMaterialSymbol::Info,
+            GuiMaterialSymbol::Add,
+            GuiMaterialSymbol::Close,
+            GuiMaterialSymbol::Home,
+        ];
+        for symbol in catalog {
+            assert_eq!(GuiMaterialSymbol::from_u32(symbol as u32), Some(symbol));
+            let command =
+                GuiDrawCommand::material_symbol(GuiRect::new(0, 0, 24, 24), 0xffffff, symbol);
+            assert!(command.is_valid());
+        }
+        assert!(GuiMaterialSymbol::from_u32(0).is_none());
+        assert!(GuiMaterialSymbol::from_u32(13).is_none());
+        assert!(GuiMaterialSymbol::from_u32(u32::MAX).is_none());
+
+        let mut unknown = GuiDrawCommand::material_symbol(
+            GuiRect::new(0, 0, 24, 24),
+            0xffffff,
+            GuiMaterialSymbol::Settings,
+        );
+        unknown.auxiliary = 13;
+        assert!(!unknown.is_valid());
     }
 
     #[test]

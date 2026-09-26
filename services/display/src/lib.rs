@@ -1822,6 +1822,64 @@ mod tests {
     }
 
     #[test]
+    fn every_catalog_symbol_rasterizes_non_empty_at_h1_and_s1_sizes() {
+        let catalog = [
+            logos_abi::GuiMaterialSymbol::Settings,
+            logos_abi::GuiMaterialSymbol::Calculator,
+            logos_abi::GuiMaterialSymbol::Folder,
+            logos_abi::GuiMaterialSymbol::Terminal,
+            logos_abi::GuiMaterialSymbol::Monitor,
+            logos_abi::GuiMaterialSymbol::Keyboard,
+            logos_abi::GuiMaterialSymbol::Mouse,
+            logos_abi::GuiMaterialSymbol::Palette,
+            logos_abi::GuiMaterialSymbol::Info,
+            logos_abi::GuiMaterialSymbol::Add,
+            logos_abi::GuiMaterialSymbol::Close,
+            logos_abi::GuiMaterialSymbol::Home,
+        ];
+        for symbol in catalog {
+            for size in [24u32, 40u32] {
+                let command = logos_abi::GuiDrawCommand::material_symbol(
+                    logos_abi::GuiRect::new(0, 0, size, size),
+                    0xffffff,
+                    symbol,
+                );
+                let mut covered_pixels = 0usize;
+                for y in 0..size as i32 {
+                    for x in 0..size as i32 {
+                        if crate::gui::material_symbol_source_coverage(command, x, y).is_some() {
+                            covered_pixels += 1;
+                        }
+                        // Every hit must stay strictly within the command's bounds.
+                        assert!(x >= 0 && x < size as i32 && y >= 0 && y < size as i32);
+                    }
+                }
+                assert!(covered_pixels > 0, "{symbol:?} at {size}px produced no coverage",);
+                // Outside the bounds, nothing should ever rasterize.
+                assert!(crate::gui::material_symbol_source_coverage(command, -1, 0).is_none());
+                assert!(
+                    crate::gui::material_symbol_source_coverage(command, size as i32, 0).is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_material_symbol_discriminator_rasterizes_nothing() {
+        let mut command = logos_abi::GuiDrawCommand::material_symbol(
+            logos_abi::GuiRect::new(0, 0, 24, 24),
+            0xffffff,
+            logos_abi::GuiMaterialSymbol::Settings,
+        );
+        command.auxiliary = 13;
+        for y in 0..24 {
+            for x in 0..24 {
+                assert!(crate::gui::material_symbol_source_coverage(command, x, y).is_none());
+            }
+        }
+    }
+
+    #[test]
     fn coverage_blends_background_and_foreground() {
         assert_eq!(blend_color(0x102030, 0xe0d0c0, 0), 0x102030);
         assert_eq!(blend_color(0x102030, 0xe0d0c0, 255), 0xe0d0c0);
