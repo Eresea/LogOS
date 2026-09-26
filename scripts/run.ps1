@@ -465,14 +465,17 @@ function Framebuffer-HasTerminalGlyphs {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     # Terminal bounds come from Atrium's scene-published marker (#74); the
-    # content starts below the 48 px chrome. A glyph is a bright pixel.
+    # content starts below the 32 px chrome (TERMINAL_CHROME_HEIGHT). A
+    # glyph is a bright pixel. The bottom 40 px is excluded so the always-on
+    # white FPS counter (bottom-right) can never false-pass this check.
     $match = [regex]::Matches((Get-Content $log -Raw), 'app=Terminal scene published surface=\d+/\d+ bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
     if ($match.Count -eq 0) { return $false }
     $groups = $match[$match.Count - 1].Groups
-    $left = [int]$groups[1].Value; $top = [int]$groups[2].Value + 48
-    $right = $left + [int]$groups[3].Value; $bottom = [int]$groups[2].Value + [int]$groups[4].Value
+    $left = [int]$groups[1].Value; $top = [int]$groups[2].Value + 32
+    $right = $left + [int]$groups[3].Value
     $bytes = [IO.File]::ReadAllBytes($Path)
     $layout = Get-PpmLayout $bytes
+    $bottom = [Math]::Min([int]$groups[2].Value + [int]$groups[4].Value, $layout.Height - 40)
     for ($y = [Math]::Max($top, 0); $y -lt $bottom -and $y -lt $layout.Height; $y++) {
         for ($x = [Math]::Max($left, 0); $x -lt $right -and $x -lt $layout.Width; $x++) {
             $index = $layout.Offset + (($y * $layout.Width + $x) * 3)

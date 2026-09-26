@@ -1878,6 +1878,72 @@ mod tests {
     }
 
     #[test]
+    fn text_grid_row_survives_a_second_commit_of_the_same_scene() {
+        // Atrium republishes a surface's node tree on ordinary events
+        // (focus, unrelated cursor/window activity) with the *same*
+        // TextGrid node id, not only on first admission. A row applied
+        // between two such commits must still be visible after the
+        // second one composes (#74).
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 64);
+        let root_handle = display.gui_mut().create(11, root).unwrap().surface;
+        let mut root_batch =
+            logos_abi::GuiDrawBatch::new(root_handle, 1, logos_abi::GuiRect::new(0, 0, 64, 64));
+        assert!(root_batch.push(logos_abi::GuiDrawCommand::fill_surface(0x203040)));
+        display.gui_mut().update(11, root_batch).unwrap();
+
+        let mut terminal_surface =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        terminal_surface.bounds = logos_abi::GuiRect::new(16, 8, 16, 48);
+        terminal_surface.z_order = 2;
+        let handle = display.gui_mut().create(11, terminal_surface).unwrap().surface;
+
+        let grid_bounds = logos_abi::GuiRect::new(16, 8, 16, 16);
+        let command = logos_abi::GuiDrawCommand::text_grid(grid_bounds, 2, 1).unwrap();
+        let publish = |display: &mut Display| {
+            let op = logos_abi::GuiSceneOp::upsert(handle, 1, 5, command);
+            display.gui_mut().apply_scene_op(11, op).unwrap();
+            let op = logos_abi::GuiSceneOp::commit(handle, 1);
+            display.gui_mut().apply_scene_op(11, op).unwrap();
+        };
+        publish(&mut display);
+
+        let mut row = logos_abi::GuiTextGridRow::EMPTY;
+        row.surface = handle;
+        row.node_id = 5;
+        row.row = 0;
+        row.cell_count = 1;
+        row.cells[0] = Cell {
+            codepoint: b'T' as u32,
+            background: 0x102030,
+            foreground: 0xffffff,
+            ..Cell::EMPTY
+        };
+        display.gui_mut().set_text_grid_row(11, &row).unwrap();
+
+        // A second commit of the identical scene (same node id) must not
+        // blank the store the first commit bound.
+        publish(&mut display);
+
+        let mut framebuffer = std::vec![0; 64 * 64 * 4];
+        loop {
+            display.render_gui(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
+            if !display.render_pending() {
+                break;
+            }
+        }
+
+        assert!(
+            framebuffer[(8 * 64 + 16) * 4..(24 * 64 + 24) * 4]
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == [0xff, 0xff, 0xff]),
+            "row content did not survive the second scene commit"
+        );
+    }
+
+    #[test]
     fn native_pointer_surface_renders_above_lockscreen() {
         let mut display = Display::new(1);
         let mut root =

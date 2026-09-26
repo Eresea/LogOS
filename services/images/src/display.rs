@@ -615,23 +615,6 @@ pub extern "C" fn _start() -> ! {
                 // (ADR-0087, #74): a dirty row damages its own node/store
                 // and composites through the ordinary GUI path, not the
                 // legacy full-screen `render()` cell buffer.
-                // DEBUG-74: dump the first rows (removed before merge).
-                #[cfg(feature = "qemu-proof")]
-                {
-                    static DEBUG_ROWS: core::sync::atomic::AtomicU32 =
-                        core::sync::atomic::AtomicU32::new(0);
-                    if DEBUG_ROWS.fetch_add(1, Ordering::Relaxed) < 12 {
-                        let mut line = [b' '; 64];
-                        line[..10].copy_from_slice(b"DEBUG-74 r");
-                        line[10] = b'0' + (atrium_render.row % 10) as u8;
-                        line[11] = if display.gui_mut().set_text_grid_row(13, &atrium_render).is_ok() { b'+' } else { b'!' };
-                        for i in 0..40usize.min(atrium_render.cell_count as usize) {
-                            let c = atrium_render.cells[i].codepoint;
-                            line[13 + i] = if (32..127).contains(&c) { c as u8 } else { b'?' };
-                        }
-                        common::proof_line(&line[..56]);
-                    }
-                }
                 if display.gui_mut().set_text_grid_row(13, &atrium_render).is_ok() {
                     coordinator.request_gui();
                     #[cfg(feature = "qemu-proof")]
