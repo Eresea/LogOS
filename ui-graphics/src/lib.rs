@@ -12,7 +12,10 @@ use logos_ui::{UiIcon, UiNode, UiStyle};
 
 pub const MAX_UI_SCENE_OPS: usize = MAX_GUI_NODES + 2;
 pub const MAX_UI_SCENE_UPSERTS: usize = MAX_GUI_NODES;
-pub const MAX_UI_SCENE_PUBLISHER_BYTES: usize = 7_232;
+/// Raised alongside `MAX_GUI_NODES` (24 -> 48, ADR-0086): `UiScenePublisher`
+/// holds two full `UiSceneFrame`s (`MAX_UI_SCENE_OPS` ops each), so this
+/// roughly doubles from 7_232 with the ops budget.
+pub const MAX_UI_SCENE_PUBLISHER_BYTES: usize = 9_264;
 const GUI_GLYPH_WIDTH: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1850,12 +1853,27 @@ mod tests {
 
     #[test]
     fn login_and_claim_publication_matches_pixels_after_full_at_every_op_index() {
-        for build in
-            [logos_ui_compiler::compile_login_page(), logos_ui_compiler::compile_register_page()]
-        {
-            assert_initial_app_publication_at_every_index(&build);
-            assert_app_transition_at_every_index(&build, 2);
-            assert_app_transition_at_every_index(&build, 3);
-        }
+        // ponytail: this test builds several boxed `Display`s (each now
+        // carrying the 48-node retained scene plus the bounded text-grid
+        // buffer) as stack temporaries before the move into `Box`, in a
+        // debug build with no NRVO guarantee. A dedicated larger stack
+        // keeps that host-only construction cost off the default test
+        // thread; raise it further if a future budget increase overflows
+        // it again.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                for build in [
+                    logos_ui_compiler::compile_login_page(),
+                    logos_ui_compiler::compile_register_page(),
+                ] {
+                    assert_initial_app_publication_at_every_index(&build);
+                    assert_app_transition_at_every_index(&build, 2);
+                    assert_app_transition_at_every_index(&build, 3);
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

@@ -1,11 +1,26 @@
-use super::{NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot, SessionHandle, UserId};
+use super::{
+    Cell, DEFAULT_SCREEN_HEIGHT, DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, MAX_COLUMNS,
+    NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot, SessionHandle, UserId,
+};
 
 pub const MAX_GUI_SURFACES: usize = 8;
 pub const MAX_GUI_DAMAGE_RECTS: usize = 8;
 pub const MAX_GUI_COMMANDS: usize = 3;
 pub const MAX_GUI_BATCH_FRAGMENTS: usize = 5;
-pub const MAX_GUI_NODES: usize = 24;
+/// Raised from 24 for the retained `TextGrid` node (ADR-0086): a bounded
+/// Terminal chrome (title, tab bar) plus one grid node, and headroom for
+/// existing Home/Settings scenes, fit comfortably under 48 while still
+/// keeping `RenderPlan` (`MAX_GUI_SURFACES * MAX_GUI_NODES`) bounded.
+pub const MAX_GUI_NODES: usize = 48;
 pub const MAX_GUI_TEXT_BYTES: usize = 32;
+/// Text-grid columns share the terminal cell protocol's bound so a future
+/// adapter can hand the same `Cell` buffer to either path.
+pub const MAX_GUI_TEXT_GRID_COLUMNS: usize = MAX_COLUMNS;
+/// Rows are bounded to the 1280x800 Terminal viewport at 8x16 glyphs
+/// (`DEFAULT_SCREEN_HEIGHT / DISPLAY_CELL_HEIGHT`), not the legacy
+/// protocol's larger scrollback allowance (`MAX_ROWS`): scrollback beyond a
+/// row offset is out of scope for this node (see #71).
+pub const MAX_GUI_TEXT_GRID_ROWS: usize = DEFAULT_SCREEN_HEIGHT / DISPLAY_CELL_HEIGHT;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_CURSOR: u8 = 1 << 1;
@@ -198,6 +213,7 @@ pub enum GuiDrawKind {
     Shadow = 8,
     LogosMark = 9,
     MaterialSymbol = 10,
+    TextGrid = 11,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -292,6 +308,38 @@ impl GuiDrawCommand {
         command.kind = GuiDrawKind::MaterialSymbol;
         command.auxiliary = symbol as u32;
         command
+    }
+
+    /// A retained text-grid node: `bounds` must exactly match `columns` by
+    /// `rows` whole 8x16 cells, both within the bounded grid size. The
+    /// command carries only this descriptor; cell content is delivered
+    /// separately through [`GuiTextGridRow`] and stored by the Display
+    /// backend, addressed by the node's (surface, node_id).
+    pub const fn text_grid(bounds: GuiRect, columns: u16, rows: u16) -> Option<Self> {
+        if columns == 0
+            || rows == 0
+            || columns as usize > MAX_GUI_TEXT_GRID_COLUMNS
+            || rows as usize > MAX_GUI_TEXT_GRID_ROWS
+            || bounds.width != columns as u32 * DISPLAY_CELL_WIDTH as u32
+            || bounds.height != rows as u32 * DISPLAY_CELL_HEIGHT as u32
+        {
+            return None;
+        }
+        let mut command = Self::empty(GuiDrawKind::TextGrid);
+        command.x = bounds.x;
+        command.y = bounds.y;
+        command.width = bounds.width;
+        command.height = bounds.height;
+        command.auxiliary = columns as u32 | ((rows as u32) << 16);
+        Some(command)
+    }
+
+    pub const fn text_grid_columns(self) -> u16 {
+        self.auxiliary as u16
+    }
+
+    pub const fn text_grid_rows(self) -> u16 {
+        (self.auxiliary >> 16) as u16
     }
 
     pub const fn stroke_rect(bounds: GuiRect, color: u32, width: u32) -> Self {
@@ -482,6 +530,18 @@ impl GuiDrawCommand {
                         && self.width != 0
                         && self.height != 0
                         && self.auxiliary == GuiMaterialSymbol::Settings as u32
+                }
+                GuiDrawKind::TextGrid => {
+                    let columns = self.text_grid_columns();
+                    let rows = self.text_grid_rows();
+                    self.text_len == 0
+                        && self.is_identity_transform()
+                        && columns != 0
+                        && rows != 0
+                        && columns as usize <= MAX_GUI_TEXT_GRID_COLUMNS
+                        && rows as usize <= MAX_GUI_TEXT_GRID_ROWS
+                        && self.width == columns as u32 * DISPLAY_CELL_WIDTH as u32
+                        && self.height == rows as u32 * DISPLAY_CELL_HEIGHT as u32
                 }
             }
     }
@@ -751,6 +811,50 @@ impl GuiSessionContext {
     }
 }
 
+/// Bounded dirty-row delivery for a retained [`GuiDrawKind::TextGrid`] node.
+/// Like [`super::RenderMessage`], this carries real cell content and is
+/// exempt from `MAX_IPC_BYTES`: it is not sent over the small scene-op
+/// ring, only addressed to an already-published grid node by
+/// `(surface, node_id)`. Sending one row at a time is the "dirty-row"
+/// update: a single changed line never resends the whole grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct GuiTextGridRow {
+    pub surface: SurfaceHandle,
+    pub node_id: u32,
+    pub row: u16,
+    pub cell_count: u16,
+    pub cells: [Cell; MAX_GUI_TEXT_GRID_COLUMNS],
+}
+
+impl GuiTextGridRow {
+    pub const EMPTY: Self = Self {
+        surface: SurfaceHandle::EMPTY,
+        node_id: 0,
+        row: 0,
+        cell_count: 0,
+        cells: [Cell::EMPTY; MAX_GUI_TEXT_GRID_COLUMNS],
+    };
+
+    pub const fn is_valid(&self) -> bool {
+        if !self.surface.is_valid()
+            || self.node_id == 0
+            || self.row as usize >= MAX_GUI_TEXT_GRID_ROWS
+            || self.cell_count as usize > MAX_GUI_TEXT_GRID_COLUMNS
+        {
+            return false;
+        }
+        let mut index = 0;
+        while index < self.cell_count as usize {
+            if !self.cells[index].is_valid() {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+}
+
 const _: () = assert!(core::mem::size_of::<GuiSurfaceRequest>() <= super::MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<GuiSurfaceResponse>() <= super::MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<GuiDrawBatch>() <= super::MAX_IPC_BYTES);
@@ -886,5 +990,96 @@ mod tests {
     fn session_context_requires_all_authority_handles() {
         assert!(GuiSessionContext::EMPTY.is_clear());
         assert!(!GuiSessionContext::EMPTY.is_authenticated());
+    }
+
+    #[test]
+    fn text_grid_command_requires_exact_cell_aligned_bounds() {
+        let bounds = GuiRect::new(0, 0, 80, 32);
+        let command = GuiDrawCommand::text_grid(bounds, 10, 2).unwrap();
+        assert!(command.is_valid());
+        assert_eq!(command.text_grid_columns(), 10);
+        assert_eq!(command.text_grid_rows(), 2);
+
+        assert!(GuiDrawCommand::text_grid(bounds, 11, 2).is_none());
+        assert!(GuiDrawCommand::text_grid(bounds, 10, 3).is_none());
+        assert!(GuiDrawCommand::text_grid(bounds, 0, 2).is_none());
+        assert!(GuiDrawCommand::text_grid(bounds, 10, 0).is_none());
+    }
+
+    #[test]
+    fn text_grid_command_rejects_oversized_grids() {
+        let oversized_columns = GuiRect::new(
+            0,
+            0,
+            (MAX_GUI_TEXT_GRID_COLUMNS as u32 + 1) * DISPLAY_CELL_WIDTH as u32,
+            DISPLAY_CELL_HEIGHT as u32,
+        );
+        assert!(
+            GuiDrawCommand::text_grid(oversized_columns, MAX_GUI_TEXT_GRID_COLUMNS as u16 + 1, 1,)
+                .is_none()
+        );
+        let oversized_rows = GuiRect::new(
+            0,
+            0,
+            DISPLAY_CELL_WIDTH as u32,
+            (MAX_GUI_TEXT_GRID_ROWS as u32 + 1) * DISPLAY_CELL_HEIGHT as u32,
+        );
+        assert!(
+            GuiDrawCommand::text_grid(oversized_rows, 1, MAX_GUI_TEXT_GRID_ROWS as u16 + 1)
+                .is_none()
+        );
+
+        let mut malformed = GuiDrawCommand::text_grid(GuiRect::new(0, 0, 80, 32), 10, 2).unwrap();
+        malformed.text_len = 1;
+        assert!(!malformed.is_valid());
+    }
+
+    #[test]
+    fn text_grid_row_rejects_out_of_bounds_and_unknown_attrs() {
+        let surface = SurfaceHandle::new(0, 1, 1).unwrap();
+        let mut row = GuiTextGridRow::EMPTY;
+        row.surface = surface;
+        row.node_id = 4;
+        row.row = 0;
+        row.cell_count = 1;
+        row.cells[0] = super::Cell::EMPTY;
+        assert!(row.is_valid());
+
+        let mut out_of_bounds_row = row;
+        out_of_bounds_row.row = MAX_GUI_TEXT_GRID_ROWS as u16;
+        assert!(!out_of_bounds_row.is_valid());
+
+        let mut oversized = row;
+        oversized.cell_count = MAX_GUI_TEXT_GRID_COLUMNS as u16 + 1;
+        assert!(!oversized.is_valid());
+
+        let mut unknown_attrs = row;
+        unknown_attrs.cells[0].attributes = 1 << 15;
+        assert!(!unknown_attrs.is_valid());
+
+        let mut no_node = row;
+        no_node.node_id = 0;
+        assert!(!no_node.is_valid());
+    }
+
+    #[test]
+    fn scene_with_forty_eight_nodes_publishes_within_budget() {
+        let surface = SurfaceHandle::new(0, 1, 1).unwrap();
+        for node_id in 1..=MAX_GUI_NODES as u32 {
+            let op = GuiSceneOp::upsert(
+                surface,
+                1,
+                node_id,
+                GuiDrawCommand::fill_rect(GuiRect::new(0, node_id as i32, 4, 1), 0x112233),
+            );
+            assert!(op.is_valid());
+        }
+        let text_grid = GuiSceneOp::upsert(
+            surface,
+            1,
+            MAX_GUI_NODES as u32 + 1,
+            GuiDrawCommand::text_grid(GuiRect::new(0, 0, 80, 32), 10, 2).unwrap(),
+        );
+        assert!(text_grid.is_valid());
     }
 }

@@ -32,9 +32,10 @@ pub use graphics::{
     GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE,
     GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind,
     GuiMaterialSymbol, GuiNodeOperation, GuiRect, GuiSceneOp, GuiSessionContext, GuiStatus,
-    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTransform,
+    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, GuiTransform,
     MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
-    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, SurfaceHandle,
+    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS,
+    SurfaceHandle,
 };
 
 pub use package_ipc::{
@@ -1508,6 +1509,15 @@ impl Cell {
         width: 1,
         reserved: 0,
     };
+
+    pub const fn is_valid(self) -> bool {
+        self.codepoint <= 0x10_ffff
+            && !(self.codepoint >= 0xd800 && self.codepoint <= 0xdfff)
+            && self.attributes & !(CELL_ATTR_BOLD | CELL_ATTR_DIM | CELL_ATTR_UNDERLINE) == 0
+            && self.width != 0
+            && self.width <= 2
+            && self.reserved == 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
