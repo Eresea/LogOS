@@ -7,9 +7,8 @@ extern crate std;
 
 use logos_abi::{
     CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, DEFAULT_COLUMNS, DEFAULT_ROWS,
-    DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GuiRect, GuiTextGridRow, InputMessage, IpcBytes,
-    KeyCode, KeyState, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind,
-    TERMINAL_CHROME_HEIGHT,
+    GuiRect, GuiTextGridRow, InputMessage, IpcBytes, KeyCode, KeyState, MOD_ALT, MOD_CAPS_LOCK,
+    MOD_CTRL, MOD_SHIFT, MessageKind, terminal_grid_metrics,
 };
 
 const MAX_PARAMS: usize = 16;
@@ -159,9 +158,9 @@ impl TerminalService {
     }
 
     pub fn resize_to_surface(&mut self, bounds: GuiRect) {
-        let columns = bounds.width as usize / DISPLAY_CELL_WIDTH;
-        let rows = bounds.height.saturating_sub(TERMINAL_CHROME_HEIGHT as u32) as usize
-            / DISPLAY_CELL_HEIGHT;
+        // Shared with Atrium's `TextGrid` scene-node sizing (#75) so both
+        // sides always agree on the grid shape; see `terminal_grid_metrics`.
+        let (columns, rows, _) = terminal_grid_metrics(bounds);
         self.terminal.resize(columns, rows);
     }
 
@@ -250,7 +249,22 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         for &byte in bytes {
             self.feed_byte(byte);
         }
-        self.cursor_dirty |= cursor != (self.cursor_column, self.cursor_row);
+        let moved = cursor != (self.cursor_column, self.cursor_row);
+        self.cursor_dirty |= moved;
+        if moved {
+            // The cursor is drawn by inverting a cell's colors in
+            // `next_grid_row`, not stored in `screen`, so a cursor-only move
+            // (no character written) still needs both the vacated and the
+            // newly-occupied cell marked dirty to repaint the visible block.
+            self.mark_cell_dirty(cursor.0, cursor.1);
+            self.mark_cell_dirty(self.cursor_column, self.cursor_row);
+        }
+    }
+
+    fn mark_cell_dirty(&mut self, column: usize, row: usize) {
+        if column < self.columns && row < self.rows {
+            self.dirty[Self::index(column, row)] = true;
+        }
     }
 
     fn feed_byte(&mut self, byte: u8) {
@@ -625,9 +639,18 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             let mut message = GuiTextGridRow::EMPTY;
             message.row = row as u16;
             message.cell_count = self.columns as u16;
+            let cursor_column =
+                (self.view_offset == 0 && row == self.cursor_row).then_some(self.cursor_column);
             for column in 0..self.columns {
                 let index = Self::index(column, row);
-                message.cells[column] = self.visible_cell(row, column);
+                let mut cell = self.visible_cell(row, column);
+                if Some(column) == cursor_column {
+                    // Solid block cursor: invert the cell's own colors so it
+                    // reads correctly against any foreground/background the
+                    // program set there (S2 adds blink/reduced-motion).
+                    core::mem::swap(&mut cell.foreground, &mut cell.background);
+                }
+                message.cells[column] = cell;
                 self.dirty[index] = false;
             }
             self.full_redraw_pending = false;
@@ -640,6 +663,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
         if event.kind == MessageKind::Key
             && matches!(event.state, KeyState::Pressed | KeyState::Repeat)
+            && event.modifiers & MOD_SHIFT != 0
         {
             match KeyCode::from_raw(event.code) {
                 KeyCode::PageUp => {
@@ -771,14 +795,17 @@ mod tests {
 
     #[test]
     fn resize_updates_render_dimensions() {
+        // Bounds minus `TERMINAL_CHROME_HEIGHT` and `TERMINAL_CONTENT_PADDING`
+        // on every edge (#75), matching `terminal_grid_metrics` exactly so
+        // Atrium's grid node and this resize can never disagree on shape.
         let mut terminal = TerminalService::new();
         terminal.resize_to_surface(GuiRect::new(0, 0, 640, 352));
         let mut rows_seen = 0;
         while let Some(message) = terminal.next_grid_row() {
-            assert_eq!(message.cell_count, 80);
+            assert_eq!(message.cell_count, 78);
             rows_seen += 1;
         }
-        assert_eq!(rows_seen, 20);
+        assert_eq!(rows_seen, 19);
     }
 
     #[test]
@@ -819,6 +846,35 @@ mod tests {
     }
 
     #[test]
+    fn cursor_renders_on_the_wrapped_row_not_the_last_column_of_the_old_row() {
+        // #75 host test: after a wrap, the rendered block cursor follows the
+        // cursor to its new (column, row), not the column it wrapped from.
+        let mut terminal = Terminal::new();
+        drain(&mut terminal);
+        terminal.feed(&[b'x'; DEFAULT_COLUMNS]);
+        terminal.feed(b"y");
+        assert_eq!(terminal.cursor(), (1, 1));
+        let mut saw_cursor_on_row1_col1 = false;
+        let mut saw_cursor_elsewhere = false;
+        while let Some(row) = terminal.next_grid_row() {
+            for (column, cell) in row.cells[..row.cell_count as usize].iter().enumerate() {
+                let is_cursor = cell.foreground == DEFAULT_BACKGROUND
+                    && cell.background == DEFAULT_FOREGROUND
+                    && cell.codepoint == b' ' as u32;
+                if is_cursor {
+                    if row.row == 1 && column == 1 {
+                        saw_cursor_on_row1_col1 = true;
+                    } else {
+                        saw_cursor_elsewhere = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_cursor_on_row1_col1);
+        assert!(!saw_cursor_elsewhere);
+    }
+
+    #[test]
     fn cursor_motion_cancels_pending_wrap() {
         let mut terminal = Terminal::new();
         terminal.feed(&[b'x'; DEFAULT_COLUMNS]);
@@ -852,14 +908,63 @@ mod tests {
             terminal.feed(b"x\n");
         }
         drain(&mut terminal);
-        let event = InputMessage::key(KeyCode::PageUp, KeyState::Pressed, 0);
+        // Plain PageUp (no Shift) does not scroll: it's reserved for
+        // whatever the running program wants it to mean (#75).
+        let unshifted = InputMessage::key(KeyCode::PageUp, KeyState::Pressed, 0);
+        assert!(terminal.input(&unshifted).is_none());
+        assert_eq!(terminal.view_offset, 0);
+        let event = InputMessage::key(KeyCode::PageUp, KeyState::Pressed, MOD_SHIFT);
         assert!(terminal.input(&event).is_none());
         assert!(terminal.view_offset > 0);
         assert!(drain(&mut terminal) > 0);
-        let event = InputMessage::key(KeyCode::PageUp, KeyState::Repeat, 0);
+        let event = InputMessage::key(KeyCode::PageUp, KeyState::Repeat, MOD_SHIFT);
         assert!(terminal.input(&event).is_none());
-        let event = InputMessage::key(KeyCode::PageDown, KeyState::Pressed, 0);
+        let event = InputMessage::key(KeyCode::PageDown, KeyState::Pressed, MOD_SHIFT);
         assert!(terminal.input(&event).is_none());
+        assert_eq!(terminal.view_offset, 0);
+    }
+
+    #[test]
+    fn typing_snaps_the_scrolled_view_back_to_the_bottom() {
+        // Ticket acceptance: scrolling up, then any input (a keystroke that
+        // reaches the session), snaps the view back to live (offset 0).
+        let mut terminal = Terminal::new();
+        for _ in 0..(DEFAULT_ROWS + 2) {
+            terminal.feed(b"x\n");
+        }
+        drain(&mut terminal);
+        let scroll_up = InputMessage::key(KeyCode::PageUp, KeyState::Pressed, MOD_SHIFT);
+        assert!(terminal.input(&scroll_up).is_none());
+        assert!(terminal.view_offset > 0);
+        terminal.feed(b"y");
+        assert_eq!(terminal.view_offset, 0);
+    }
+
+    #[test]
+    fn scrollback_ring_is_bounded_to_its_configured_line_count() {
+        // Ring bounds: feeding far more lines than the configured cap never
+        // grows `scrollback_len` past it, and the oldest lines fall off.
+        let mut terminal = Terminal::new();
+        for line in 0..(TERMINAL_SCROLLBACK_LINES * 3) {
+            let byte = b'a' + (line % 26) as u8;
+            terminal.feed(&[byte, b'\n']);
+        }
+        drain(&mut terminal);
+        assert_eq!(terminal.scrollback_len, TERMINAL_SCROLLBACK_LINES);
+    }
+
+    #[test]
+    fn scroll_offset_clamps_to_available_scrollback() {
+        // Offset clamping: scrolling up further than the stored history
+        // clamps at `scrollback_len`, it never goes negative or past it.
+        let mut terminal = Terminal::new();
+        for _ in 0..(DEFAULT_ROWS + 4) {
+            terminal.feed(b"x\n");
+        }
+        drain(&mut terminal);
+        terminal.scroll_view(isize::MAX);
+        assert_eq!(terminal.view_offset, terminal.scrollback_len);
+        terminal.scroll_view(isize::MIN);
         assert_eq!(terminal.view_offset, 0);
     }
 
@@ -902,15 +1007,23 @@ mod tests {
     }
 
     #[test]
-    fn cursor_only_motion_emits_no_grid_row() {
-        // The text-grid transport carries cell content only; cursor
-        // rendering is a later ticket (#74 boundary), so a cursor-only
-        // move drains to nothing instead of an empty/positionless update.
+    fn cursor_only_motion_repaints_old_and_new_cursor_rows() {
+        // #75: the cursor is a solid block drawn by inverting a cell's own
+        // colors, so a cursor-only move (no character written) must still
+        // redraw the vacated row and, if different, the newly-occupied row.
         let mut terminal = Terminal::new();
         terminal.feed(b"hello");
         drain(&mut terminal);
         terminal.feed(b"\x1b[2D");
         assert_eq!(terminal.cursor(), (3, 0));
+        let row = terminal.next_grid_row().unwrap();
+        assert_eq!(row.row, 0);
+        // Cursor cell's colors are inverted relative to an ordinary blank cell.
+        assert_eq!(row.cells[3].foreground, DEFAULT_BACKGROUND);
+        assert_eq!(row.cells[3].background, DEFAULT_FOREGROUND);
+        // The character cell one column to the left is untouched.
+        assert_eq!(row.cells[2].codepoint, b'l' as u32);
+        assert_eq!(row.cells[2].foreground, DEFAULT_FOREGROUND);
         assert!(terminal.next_grid_row().is_none());
     }
 

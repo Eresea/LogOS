@@ -86,11 +86,48 @@ pub const DEFAULT_ROWS: usize = 48;
 pub const DISPLAY_CELL_WIDTH: usize = 8;
 pub const DISPLAY_CELL_HEIGHT: usize = 16;
 pub const TERMINAL_CHROME_HEIGHT: usize = 32;
+/// Inner padding for Terminal content on every edge, in pixels (#75). Shared
+/// by `terminal_grid_metrics` so Atrium's `TextGrid` scene node and
+/// Terminal's own `resize_to_surface` always compute the identical
+/// column/row count from the same surface bounds — previously duplicated
+/// ad hoc math that could (and did, in narrow tiled panes) disagree, which
+/// showed up as clipped or rejected rows.
+pub const TERMINAL_CONTENT_PADDING: u32 = 8;
 pub const DEFAULT_SCREEN_WIDTH: usize = 1280;
 pub const DEFAULT_SCREEN_HEIGHT: usize = 800;
 pub const MIN_FRAMEBUFFER_WIDTH: usize = DEFAULT_SCREEN_WIDTH;
 pub const MIN_FRAMEBUFFER_HEIGHT: usize = DEFAULT_SCREEN_HEIGHT;
 pub const MAX_SCROLLBACK_LINES: usize = 2048;
+
+/// Columns, rows and pixel rect of the Terminal content grid that fits
+/// inside a surface's `bounds`, after the title-bar chrome strip
+/// (`TERMINAL_CHROME_HEIGHT`) and inner content padding
+/// (`TERMINAL_CONTENT_PADDING`) on every edge. Atrium (sizing the
+/// `TextGrid` scene node) and `TerminalService::resize_to_surface` both call
+/// this instead of duplicating the math, so they can never disagree on the
+/// grid shape (#75; a prior duplicate-formula drift showed up as Terminal
+/// rows being clipped or rejected in narrow tiled panes, ADR-0087's
+/// `set_text_grid_row` "ponytail" note).
+pub fn terminal_grid_metrics(bounds: GuiRect) -> (usize, usize, GuiRect) {
+    let padding = TERMINAL_CONTENT_PADDING as i32;
+    let content_x = bounds.x.saturating_add(padding);
+    let content_y = bounds.y.saturating_add(TERMINAL_CHROME_HEIGHT as i32).saturating_add(padding);
+    let content_width = bounds.width.saturating_sub(TERMINAL_CONTENT_PADDING * 2);
+    let content_height = bounds
+        .height
+        .saturating_sub(TERMINAL_CHROME_HEIGHT as u32)
+        .saturating_sub(TERMINAL_CONTENT_PADDING * 2);
+    let columns = ((content_width as usize) / DISPLAY_CELL_WIDTH).clamp(1, DEFAULT_COLUMNS);
+    let rows = ((content_height as usize) / DISPLAY_CELL_HEIGHT).clamp(1, DEFAULT_ROWS);
+    let grid_rect = GuiRect::new(
+        content_x,
+        content_y,
+        (columns * DISPLAY_CELL_WIDTH) as u32,
+        (rows * DISPLAY_CELL_HEIGHT) as u32,
+    );
+    (columns, rows, grid_rect)
+}
+
 pub const MAX_HISTORY_ENTRIES: usize = 64;
 pub const MAX_HISTORY_BYTES: usize = 256;
 pub const CELL_ATTR_BOLD: u16 = 1;
@@ -2694,6 +2731,28 @@ mod tests {
         assert_eq!((x, y), (-12, 34));
         state.set_hardware_cursor(true);
         assert!(state.hardware_cursor());
+    }
+
+    #[test]
+    fn terminal_grid_metrics_fits_padding_and_chrome_inside_bounds() {
+        let (columns, rows, grid) = terminal_grid_metrics(GuiRect::new(100, 50, 640, 400));
+        // Grid rect sits below the chrome strip and inset by the padding on
+        // every edge, and never overflows the surface bounds it was sized from.
+        assert_eq!(grid.x, 100 + TERMINAL_CONTENT_PADDING as i32);
+        assert_eq!(grid.y, 50 + TERMINAL_CHROME_HEIGHT as i32 + TERMINAL_CONTENT_PADDING as i32);
+        assert!(grid.x as u32 + grid.width <= 100u32.wrapping_add(640));
+        assert!(grid.y as u32 + grid.height <= 50u32.wrapping_add(400));
+        assert_eq!(grid.width, (columns * DISPLAY_CELL_WIDTH) as u32);
+        assert_eq!(grid.height, (rows * DISPLAY_CELL_HEIGHT) as u32);
+    }
+
+    #[test]
+    fn terminal_grid_metrics_never_reports_zero_columns_or_rows() {
+        // A tiny (or degenerate) pane still gets a grid at least one cell wide
+        // and tall rather than dividing down to zero.
+        let (columns, rows, _) = terminal_grid_metrics(GuiRect::new(0, 0, 4, 4));
+        assert_eq!(columns, 1);
+        assert_eq!(rows, 1);
     }
 
     #[test]

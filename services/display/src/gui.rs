@@ -262,6 +262,22 @@ pub enum GuiRegistryError {
 /// shared slot a second grid can steal from the first. Each store's binding
 /// follows whichever node in that surface's active scene currently carries
 /// `GuiDrawKind::TextGrid`.
+/// Fill for a `TextGrid` cell that hasn't been written by its app yet
+/// (freshly (re)bound, or a row shrunk to fewer columns). Matches
+/// `UiSceneTheme::DEFAULT.surface` — the same dark background every app's
+/// own root panel already paints behind its content — instead of
+/// `Cell::EMPTY`'s solid black (#75): a not-yet-written cell then reads as
+/// "background peeking through" rather than a black hole, whatever the
+/// drain speed of the app filling the grid turns out to be.
+const TEXT_GRID_BLANK: Cell = Cell {
+    codepoint: b' ' as u32,
+    foreground: 0x00ff_ffff,
+    background: 0x0010_1820,
+    attributes: 0,
+    width: 1,
+    reserved: 0,
+};
+
 #[derive(Clone, Copy)]
 struct TextGridStore {
     surface: SurfaceHandle,
@@ -279,7 +295,7 @@ impl TextGridStore {
         bounds: GuiRect::EMPTY,
         columns: 0,
         rows: 0,
-        cells: [Cell::EMPTY; MAX_GUI_TEXT_GRID_COLUMNS * MAX_GUI_TEXT_GRID_ROWS],
+        cells: [TEXT_GRID_BLANK; MAX_GUI_TEXT_GRID_COLUMNS * MAX_GUI_TEXT_GRID_ROWS],
     };
 
     const fn bound(&self) -> bool {
@@ -336,7 +352,7 @@ impl GuiSurfaceRegistry {
             store.bounds = GuiRect::EMPTY;
             store.columns = 0;
             store.rows = 0;
-            store.cells.fill(Cell::EMPTY);
+            store.cells.fill(TEXT_GRID_BLANK);
         }
     }
 
@@ -588,7 +604,7 @@ impl GuiSurfaceRegistry {
                     // that construction is large enough on its own to blow
                     // a bounded service stack. Clear the existing storage
                     // in place instead.
-                    store.cells.fill(Cell::EMPTY);
+                    store.cells.fill(TEXT_GRID_BLANK);
                 }
             }
             None => {
@@ -600,7 +616,7 @@ impl GuiSurfaceRegistry {
                     store.bounds = GuiRect::EMPTY;
                     store.columns = 0;
                     store.rows = 0;
-                    store.cells.fill(Cell::EMPTY);
+                    store.cells.fill(TEXT_GRID_BLANK);
                 }
             }
         }
@@ -637,7 +653,7 @@ impl GuiSurfaceRegistry {
         let cell_count = (update.cell_count as usize).min(columns);
         store.cells[base..base + cell_count].copy_from_slice(&update.cells[..cell_count]);
         for cell in store.cells[base + cell_count..base + columns].iter_mut() {
-            *cell = Cell::EMPTY;
+            *cell = TEXT_GRID_BLANK;
         }
         let row_rect = GuiRect::new(
             store.bounds.x,
@@ -3483,6 +3499,41 @@ mod tests {
         let mut unknown_attrs = row;
         unknown_attrs.cells[0].attributes = 1 << 15;
         assert_eq!(registry.set_text_grid_row(7, &unknown_attrs), Err(GuiRegistryError::Malformed));
+    }
+
+    #[test]
+    fn unwritten_text_grid_cells_default_to_the_theme_background_not_black() {
+        // #75: a freshly (re)bound `TextGrid` store, or a row's columns
+        // beyond what the app actually sent, must never show as
+        // `Cell::EMPTY`'s solid black — that's what made a Terminal pane
+        // with more rows than it had written content look like a black box
+        // with a navy strip. Unwritten cells use `TEXT_GRID_BLANK` instead.
+        let mut registry = GuiSurfaceRegistry::new();
+        let surface = registry
+            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 80, 32)))
+            .unwrap()
+            .surface;
+        publish_text_grid(&mut registry, 7, surface, 5, 1, GuiRect::new(0, 0, 80, 32), 10, 2);
+
+        // Row 0 is only partly written; row 1 is never touched at all.
+        let mut row = GuiTextGridRow::EMPTY;
+        row.surface = surface;
+        row.node_id = 5;
+        row.row = 0;
+        row.cell_count = 3;
+        row.cells[0] = Cell { codepoint: b'A' as u32, ..Cell::EMPTY };
+        assert!(registry.set_text_grid_row(7, &row).is_ok());
+
+        let store = registry.text_grids.iter().find(|store| store.surface == surface).unwrap();
+        // Columns 3..10 of row 0 (never sent) and every cell of row 1 (never
+        // sent at all) still read as the theme background, not black.
+        for column in 3..10 {
+            assert_eq!(store.cells[column], TEXT_GRID_BLANK);
+        }
+        for column in 0..10 {
+            assert_eq!(store.cells[MAX_GUI_TEXT_GRID_COLUMNS + column], TEXT_GRID_BLANK);
+        }
+        assert_ne!(TEXT_GRID_BLANK.background, Cell::EMPTY.background);
     }
 
     #[test]
