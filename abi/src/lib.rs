@@ -13,6 +13,7 @@ use core::{
 
 mod atrium;
 mod device_api;
+mod font;
 mod graphics;
 mod package_ipc;
 mod runtime_abi;
@@ -29,8 +30,13 @@ pub use device_api::{
     DEVICE_ABI_VERSION, DeviceKind, DeviceOperation, DeviceRecord, DeviceRequest, DeviceResponse,
     DeviceState, DeviceStatus, MAX_DEVICES,
 };
+pub use font::{
+    INTER_ASCII_FIRST, INTER_ASCII_LAST, INTER_BODY_CELL, INTER_GLYPH_COUNT, INTER_TITLE_CELL,
+    InterStyle, inter_glyph_advance, inter_glyph_index, inter_text_width,
+};
 pub use graphics::{
-    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT,
+    GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_FONT_INTER_BODY,
+    GUI_TEXT_FLAG_FONT_INTER_TITLE, GUI_TEXT_FLAG_LIGHT,
     GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiMaterialSymbol,
     GuiNodeOperation, GuiRect, GuiSceneOp, GuiSessionContext, GuiStatus, GuiSurfaceOperation,
     GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, GuiTransform, MAX_GUI_BATCH_FRAGMENTS,

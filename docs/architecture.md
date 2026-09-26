@@ -46,7 +46,7 @@ Terminal → Session → Flow → typed system API registry
 | Keyboard byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_KEYBOARD_RING_BASE`; PS/2 decoding remains outside the kernel |
 | Pointer byte mapping | `logos-abi` + `service_runtime` | allocates one zeroed fixed byte ring with an observable drop counter and maps it only into Input at `INPUT_POINTER_RING_BASE`; the existing three-byte decoder remains outside Core |
 | PS/2 interrupt adapter | `arch` | remaps the legacy PIC, unmasks IRQ1 and IRQ12 after the Input rings are published, copies port `0x60` bytes into their respective rings, and signals distinct keyboard/pointer events; no decoding occurs in Core |
-| Font rendering | `logos-display` | fixed 8×16 anti-aliased JetBrains Mono coverage atlas with deterministic replacement glyph |
+| Font rendering | `logos-display` + `logos-abi` | Terminal/TextGrid: fixed 8×16 anti-aliased JetBrains Mono coverage atlas with deterministic replacement glyph. General UI text: offline proportional Inter atlas (14 px body / 20 px title, ADR-0088), ASCII-only, with shared advance-width tables in `logos-abi` so `logos-ui-graphics` can measure/center labels without depending on Display |
 | Per-CPU state | `arch::CpuLocal` via `GS_BASE` | private scheduler/idle stacks, TSS ring-transition fallback, cursor/current task, ticks, online state |
 | Context boundary | `arch/context.rs` | timer, voluntary, reschedule IPI, Wait/Notify syscall dispatch, and user-fault entries save one GPR/RIP/RSP/RFLAGS/CS and x87/SSE frame shape |
 | Publication | `Scheduler::save_context` + `finish` | outgoing task is claimable only after context-save publication |
