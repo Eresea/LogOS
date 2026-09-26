@@ -129,6 +129,17 @@ fn write_icon<W: fmt::Write>(output: &mut W, icon: logos_ui::UiIcon) -> Result<(
         logos_ui::UiIcon::None => "None",
         logos_ui::UiIcon::Settings => "Settings",
         logos_ui::UiIcon::LogosMark => "LogosMark",
+        logos_ui::UiIcon::Calculator => "Calculator",
+        logos_ui::UiIcon::Folder => "Folder",
+        logos_ui::UiIcon::Terminal => "Terminal",
+        logos_ui::UiIcon::Monitor => "Monitor",
+        logos_ui::UiIcon::Keyboard => "Keyboard",
+        logos_ui::UiIcon::Mouse => "Mouse",
+        logos_ui::UiIcon::Palette => "Palette",
+        logos_ui::UiIcon::Info => "Info",
+        logos_ui::UiIcon::Add => "Add",
+        logos_ui::UiIcon::Close => "Close",
+        logos_ui::UiIcon::Home => "Home",
     };
     write!(output, "logos_ui::UiIcon::{name}").map_err(|_| UiCodegenError::Output)
 }

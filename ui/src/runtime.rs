@@ -65,6 +65,17 @@ pub enum UiIcon {
     None,
     Settings,
     LogosMark,
+    Calculator,
+    Folder,
+    Terminal,
+    Monitor,
+    Keyboard,
+    Mouse,
+    Palette,
+    Info,
+    Add,
+    Close,
+    Home,
 }
 
 impl UiIcon {
@@ -72,6 +83,17 @@ impl UiIcon {
         match bytes {
             b"none" => Some(Self::None),
             b"settings" => Some(Self::Settings),
+            b"calculator" => Some(Self::Calculator),
+            b"folder" => Some(Self::Folder),
+            b"terminal" => Some(Self::Terminal),
+            b"monitor" => Some(Self::Monitor),
+            b"keyboard" => Some(Self::Keyboard),
+            b"mouse" => Some(Self::Mouse),
+            b"palette" => Some(Self::Palette),
+            b"info" => Some(Self::Info),
+            b"add" => Some(Self::Add),
+            b"close" => Some(Self::Close),
+            b"home" => Some(Self::Home),
             _ => None,
         }
     }

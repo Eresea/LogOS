@@ -658,6 +658,17 @@ fn material_symbol(icon: UiIcon) -> Option<logos_abi::GuiMaterialSymbol> {
         UiIcon::None => None,
         UiIcon::Settings => Some(logos_abi::GuiMaterialSymbol::Settings),
         UiIcon::LogosMark => None,
+        UiIcon::Calculator => Some(logos_abi::GuiMaterialSymbol::Calculator),
+        UiIcon::Folder => Some(logos_abi::GuiMaterialSymbol::Folder),
+        UiIcon::Terminal => Some(logos_abi::GuiMaterialSymbol::Terminal),
+        UiIcon::Monitor => Some(logos_abi::GuiMaterialSymbol::Monitor),
+        UiIcon::Keyboard => Some(logos_abi::GuiMaterialSymbol::Keyboard),
+        UiIcon::Mouse => Some(logos_abi::GuiMaterialSymbol::Mouse),
+        UiIcon::Palette => Some(logos_abi::GuiMaterialSymbol::Palette),
+        UiIcon::Info => Some(logos_abi::GuiMaterialSymbol::Info),
+        UiIcon::Add => Some(logos_abi::GuiMaterialSymbol::Add),
+        UiIcon::Close => Some(logos_abi::GuiMaterialSymbol::Close),
+        UiIcon::Home => Some(logos_abi::GuiMaterialSymbol::Home),
     }
 }
 

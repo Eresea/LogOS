@@ -1870,10 +1870,8 @@ pub(crate) fn material_symbol_source_coverage(
     x: i32,
     y: i32,
 ) -> Option<u8> {
-    if command.auxiliary != GuiMaterialSymbol::Settings as u32
-        || command.width == 0
-        || command.height == 0
-    {
+    let symbol = GuiMaterialSymbol::from_u32(command.auxiliary)?;
+    if command.width == 0 || command.height == 0 {
         return None;
     }
     let local_x = x.saturating_sub(command.x);
@@ -1889,14 +1887,101 @@ pub(crate) fn material_symbol_source_coverage(
     let normalized_y = local_y * 256 / command.height as i32;
     let dx = normalized_x - 128;
     let dy = normalized_y - 128;
-    let distance_squared = dx * dx + dy * dy;
-    let ring = (34 * 34..=78 * 78).contains(&distance_squared);
-    let axial_tooth = (dx.abs() <= 15 && (70..=112).contains(&dy.abs()))
-        || (dy.abs() <= 15 && (70..=112).contains(&dx.abs()));
-    let diagonal_tooth = (dx.abs() - dy.abs()).abs() <= 15
-        && (50..=90).contains(&dx.abs())
-        && (50..=90).contains(&dy.abs());
-    (ring || axial_tooth || diagonal_tooth).then_some(u8::MAX)
+    symbol_shape_hit(symbol, dx, dy).then_some(u8::MAX)
+}
+
+/// One analytic, resolution-independent shape per catalog symbol (ADR-0084):
+/// `dx`/`dy` are centered coordinates in roughly `-128..=127`. This mirrors
+/// `settings`'s gear (ring plus teeth) rather than rasterizing a font, so no
+/// webfont, glyph data, or network fetch is involved.
+fn symbol_shape_hit(symbol: GuiMaterialSymbol, dx: i32, dy: i32) -> bool {
+    match symbol {
+        GuiMaterialSymbol::Settings => {
+            let distance_squared = dx * dx + dy * dy;
+            let ring = (34 * 34..=78 * 78).contains(&distance_squared);
+            let axial_tooth = (dx.abs() <= 15 && (70..=112).contains(&dy.abs()))
+                || (dy.abs() <= 15 && (70..=112).contains(&dx.abs()));
+            let diagonal_tooth = (dx.abs() - dy.abs()).abs() <= 15
+                && (50..=90).contains(&dx.abs())
+                && (50..=90).contains(&dy.abs());
+            ring || axial_tooth || diagonal_tooth
+        }
+        GuiMaterialSymbol::Calculator => {
+            let outer = dx.abs() <= 90 && dy.abs() <= 110;
+            let inner = dx.abs() <= 78 && dy.abs() <= 98;
+            let body_outline = outer && !inner;
+            let screen = (-95..=-60).contains(&dy) && dx.abs() <= 70;
+            let key_row = (-40..=95).contains(&dy) && dx.abs() <= 80;
+            let key_cell = (dy + 40).rem_euclid(35) < 22 && (dx + 90).rem_euclid(45) < 28;
+            body_outline || screen || (key_row && key_cell)
+        }
+        GuiMaterialSymbol::Folder => {
+            let tab = (-60..=-20).contains(&dy) && (-100..=-20).contains(&dx);
+            let body = (-20..=90).contains(&dy) && dx.abs() <= 100;
+            tab || body
+        }
+        GuiMaterialSymbol::Terminal => {
+            let outer = dx.abs() <= 100 && dy.abs() <= 90;
+            let inner = dx.abs() <= 88 && dy.abs() <= 78;
+            let outline = outer && !inner;
+            let chevron_up =
+                (dx - dy).abs() <= 12 && (-60..=-10).contains(&dx) && (-40..=0).contains(&dy);
+            let chevron_down =
+                (dx + dy).abs() <= 12 && (-60..=-10).contains(&dx) && (0..=40).contains(&dy);
+            let cursor = (45..=60).contains(&dy) && (-10..=50).contains(&dx);
+            outline || chevron_up || chevron_down || cursor
+        }
+        GuiMaterialSymbol::Monitor => {
+            let outer = dx.abs() <= 100 && dy.abs() <= 70;
+            let inner = dx.abs() <= 90 && dy.abs() <= 60;
+            let screen_outline = outer && !inner;
+            let neck = dx.abs() <= 10 && (70..=95).contains(&dy);
+            let base = dx.abs() <= 40 && (95..=110).contains(&dy);
+            screen_outline || neck || base
+        }
+        GuiMaterialSymbol::Keyboard => {
+            let outer = dx.abs() <= 110 && dy.abs() <= 90;
+            let inner = dx.abs() <= 98 && dy.abs() <= 78;
+            let outline = outer && !inner;
+            let row1 = (-70..=-40).contains(&dy) && (dx + 110).rem_euclid(40) < 25;
+            let row2 = (-25..=5).contains(&dy) && (dx + 110).rem_euclid(40) < 25;
+            let spacebar = (30..=60).contains(&dy) && dx.abs() <= 90;
+            outline || row1 || row2 || spacebar
+        }
+        GuiMaterialSymbol::Mouse => {
+            let body = dx.abs() <= 55 && dy.abs() <= 95;
+            let divider = dx.abs() <= 6 && (-95..=-40).contains(&dy);
+            body && !divider
+        }
+        GuiMaterialSymbol::Palette => {
+            let distance_squared = dx * dx + dy * dy;
+            let ring = (70 * 70..=100 * 100).contains(&distance_squared);
+            let dot1 = (dx + 40) * (dx + 40) + (dy + 40) * (dy + 40) <= 15 * 15;
+            let dot2 = (dx - 40) * (dx - 40) + (dy + 30) * (dy + 30) <= 15 * 15;
+            let dot3 = dx * dx + (dy - 50) * (dy - 50) <= 15 * 15;
+            ring || dot1 || dot2 || dot3
+        }
+        GuiMaterialSymbol::Info => {
+            let distance_squared = dx * dx + dy * dy;
+            let ring = (100 * 100..=118 * 118).contains(&distance_squared);
+            let dot = dx.abs() <= 12 && (-70..=-46).contains(&dy);
+            let stem = dx.abs() <= 12 && (-30..=70).contains(&dy);
+            ring || dot || stem
+        }
+        GuiMaterialSymbol::Add => {
+            (dx.abs() <= 15 && dy.abs() <= 90) || (dy.abs() <= 15 && dx.abs() <= 90)
+        }
+        GuiMaterialSymbol::Close => {
+            let dx_abs = dx.abs();
+            let dy_abs = dy.abs();
+            dx_abs <= 90 && dy_abs <= 90 && ((dx - dy).abs() <= 18 || (dx + dy).abs() <= 18)
+        }
+        GuiMaterialSymbol::Home => {
+            let base = (10..=90).contains(&dy) && dx.abs() <= 70;
+            let roof = (-60..=10).contains(&dy) && dx.abs() <= dy + 60;
+            base || roof
+        }
+    }
 }
 
 fn logos_mark_source_coverage(command: GuiDrawCommand, x: i32, y: i32) -> Option<u8> {
