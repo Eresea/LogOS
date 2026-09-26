@@ -17,14 +17,20 @@ changed row by itself — instead of re-publishing the whole grid — is the
 "dirty-row" update the node is built around: only that row's rectangle is
 damaged and repainted.
 
-Display owns exactly one bound text-grid buffer (one grid at a time is all any
-current or planned screen needs) and rasterizes it inside the owning surface's
-clip through a new `GuiRenderBackend::draw_text_grid` method with a default
-no-op body, so an eventual GPU backend can replace only that method, per
-ADR-0075's backend trait split. Binding follows whichever node in the active
-scene currently carries `GuiDrawKind::TextGrid`; a changed `(surface,
-node_id)` blanks the buffer so stale content from a previous grid can never
-show through a new one.
+Display owns a fixed array of `MAX_GUI_TEXT_GRIDS` (4) bound text-grid
+buffers, one per surface, and rasterizes each inside its owning surface's clip
+through a new `GuiRenderBackend::draw_text_grid` method with a default no-op
+body, so an eventual GPU backend can replace only that method, per ADR-0075's
+backend trait split. A store binds to whichever node in its surface's active
+scene currently carries `GuiDrawKind::TextGrid`; a changed `node_id` on an
+already-bound store blanks its cells so stale content from a previous grid on
+that surface can never show through a new one. A new surface's grid claims a
+free store, or is rejected outright with `GuiRegistryError::Capacity` — before
+any of that frame's node-table state is committed — if all four are already
+bound elsewhere; it never evicts another surface's grid to make room. One
+store per surface (never a single shared slot) is the fix for the same bug
+class that broke Terminal originally, where Display's single-surface
+`terminal_bounds()` first-match let one surface's state stand in for another's.
 
 `MAX_GUI_NODES` rises from 24 to 48 so a Terminal surface can carry its own
 chrome (title, future tab bar) alongside one grid node, with headroom left
@@ -60,6 +66,32 @@ tighter budget now that the retained scene can emit more ops than before.
   budgets together; SCENE-BUDGET coverage for the existing Home, Settings,
   and app scenes is unchanged (they sit well under the new ceiling, as
   before).
+- `MAX_GUI_TEXT_GRIDS` is 4: one store per Terminal session, matching the up
+  to 4 sessions planned in #76 (T3). A 5th concurrent grid is rejected, not
+  silently evicted; host tests cover independent content across two bound
+  surfaces, a released store being reused by a new grid, and a 5th grid
+  being rejected without disturbing the first four.
+
+## Memory cost
+
+Each store is `MAX_GUI_TEXT_GRID_COLUMNS * MAX_GUI_TEXT_GRID_ROWS` (160 x 50 =
+8,000) `Cell`s at `size_of::<Cell>()` = 16 bytes: 128,000 bytes. Four stores
+are 512,000 bytes (500 KiB), always resident in `GuiSurfaceRegistry`
+regardless of how many grids are actually bound (fixed-size arrays, no
+allocator). Measured against ADR-0080's 2048 KiB (2,097,152 byte) service
+image ceiling, built release `logos-display`:
+
+| | Base (before this ADR) | With `MAX_GUI_TEXT_GRIDS = 4` | Delta |
+| --- | ---: | ---: | ---: |
+| ELF file size | 614,336 B | 1,313,320 B | +698,984 B |
+| `text+data+bss` | 560,674 B | 1,259,428 B | +698,754 B |
+
+1,313,320 bytes is 62.6% of the 2,097,152-byte budget, leaving roughly 784 KiB
+of headroom — it fits. The four-store delta (roughly 682 KiB) is larger than
+the raw 500 KiB of cell data alone because `Cell::EMPTY` isn't the all-zero
+pattern (space codepoint, opaque foreground), so the initialized arrays land
+in `.data` rather than zero-filled `.bss`, plus `RenderPlan`'s own growth from
+`MAX_GUI_NODES` (48, ADR-0087) is included in both columns.
 
 ## Consequences
 
