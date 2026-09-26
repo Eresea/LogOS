@@ -461,6 +461,45 @@ function Wait-QmpSystemFramebuffer {
     return $false
 }
 
+function Framebuffer-HasTerminalGlyphs {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $false }
+    # Terminal bounds come from Atrium's scene-published marker (#74); the
+    # content starts below the 32 px chrome (TERMINAL_CHROME_HEIGHT). A
+    # glyph is a bright pixel. The bottom 40 px is excluded so the always-on
+    # white FPS counter (bottom-right) can never false-pass this check.
+    $match = [regex]::Matches((Get-Content $log -Raw), 'app=Terminal scene published surface=\d+/\d+ bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
+    if ($match.Count -eq 0) { return $false }
+    $groups = $match[$match.Count - 1].Groups
+    $left = [int]$groups[1].Value; $top = [int]$groups[2].Value + 32
+    $right = $left + [int]$groups[3].Value
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PpmLayout $bytes
+    $bottom = [Math]::Min([int]$groups[2].Value + [int]$groups[4].Value, $layout.Height - 40)
+    for ($y = [Math]::Max($top, 0); $y -lt $bottom -and $y -lt $layout.Height; $y++) {
+        for ($x = [Math]::Max($left, 0); $x -lt $right -and $x -lt $layout.Width; $x++) {
+            $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
+            if ($bytes[$index] -ge 160 -and $bytes[$index + 1] -ge 160 -and $bytes[$index + 2] -ge 160) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Wait-QmpTerminalFramebuffer {
+    param([hashtable]$Qmp, [string]$Path, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+        if (Framebuffer-HasTerminalGlyphs $Path) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    return $false
+}
+
 function Framebuffer-HasNativeCursor {
     param([string]$Path, [int]$X, [int]$Y)
     if (-not (Test-Path $Path)) { return $false }
@@ -807,6 +846,26 @@ try {
             $systemFrame = Join-Path $repoRoot "target\qemu-system-$PID.ppm"
             if (-not (Wait-QmpSystemFramebuffer $qmp $systemFrame $TimeoutSeconds)) {
                 throw 'System surface did not publish its status bar and service rows.'
+            }
+
+            # #74: Terminal content renders through the retained text-grid
+            # node. Open Terminal, type a command, and assert the reply
+            # reaches Display as `GuiTextGridRow`s that paint real glyph
+            # pixels inside the Terminal surface's own content bounds.
+            $terminalSceneMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium app=Terminal scene published'
+            $terminalRowMarker = Get-ProofMarkerCount 'LogOS vNext: Display text grid row applied'
+            Send-QmpKey $qmp 'ctrl-3'
+            if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium app=Terminal scene published' $terminalSceneMarker $TimeoutSeconds)) {
+                throw 'Terminal did not publish its scene after activation.'
+            }
+            Send-QmpText $qmp 'help'
+            Send-QmpKey $qmp 'ret'
+            if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Display text grid row applied' $terminalRowMarker $TimeoutSeconds)) {
+                throw 'Terminal output did not reach Display as text-grid rows.'
+            }
+            $terminalFrame = Join-Path $repoRoot "target\qemu-terminal-$PID.ppm"
+            if (-not (Wait-QmpTerminalFramebuffer $qmp $terminalFrame $TimeoutSeconds)) {
+                throw 'Terminal surface did not publish glyph pixels inside its content bounds.'
             }
         }
 

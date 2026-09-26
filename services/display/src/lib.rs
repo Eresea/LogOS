@@ -21,7 +21,6 @@ pub use logos_abi::FramebufferFormat as PixelFormat;
 
 pub const GLYPH_WIDTH: usize = 8;
 pub const GLYPH_HEIGHT: usize = 16;
-const TERMINAL_CHROME_HEIGHT: u32 = logos_abi::TERMINAL_CHROME_HEIGHT as u32;
 pub const REPLACEMENT_SCALAR: u32 = 0xfffd;
 const CURSOR_WIDTH: usize = 2;
 const GUI_TILE_SIZE: u32 = 64;
@@ -420,18 +419,6 @@ fn fill_row(row: &mut [u8], pixel: [u8; 4]) {
         row.copy_within(..copy_len, filled);
         filled += copy_len;
     }
-}
-
-fn terminal_cell_rect(surface: GuiRect, row: usize, column: usize) -> GuiRect {
-    GuiRect::new(
-        surface.x.saturating_add((column * GLYPH_WIDTH) as i32),
-        surface
-            .y
-            .saturating_add(TERMINAL_CHROME_HEIGHT as i32)
-            .saturating_add((row * GLYPH_HEIGHT) as i32),
-        GLYPH_WIDTH as u32,
-        GLYPH_HEIGHT as u32,
-    )
 }
 
 fn intersect(left: GuiRect, right: GuiRect) -> GuiRect {
@@ -990,11 +977,7 @@ impl Display {
         if generation != self.generation {
             return Err(DisplayError::StaleGeneration);
         }
-        if let Some((surface, _)) = self.gui.terminal_surface() {
-            if message.surface != surface {
-                return Err(DisplayError::InvalidMessage);
-            }
-        } else if message.surface.is_valid() {
+        if message.surface.is_valid() {
             return Err(DisplayError::InvalidMessage);
         }
         if !matches!(message.kind, MessageKind::RenderCells | MessageKind::FullRedraw) {
@@ -1083,26 +1066,6 @@ impl Display {
                 fill_row(&mut backbuffer[start..start + row_bytes], pixel);
             }
             self.surface_initialized = true;
-        }
-        if let Some(surface) = self.gui.terminal_bounds() {
-            let cell_count = self.rows * MAX_COLUMNS;
-            for (word_index, word) in dirty.iter_mut().enumerate() {
-                let mut bits = *word;
-                while bits != 0 {
-                    let bit = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    let index = word_index * 64 + bit;
-                    if index >= cell_count || index % MAX_COLUMNS >= self.columns {
-                        continue;
-                    }
-                    let row = index / MAX_COLUMNS;
-                    let column = index % MAX_COLUMNS;
-                    self.gui.invalidate_rect(terminal_cell_rect(surface, row, column));
-                    *word &= !(1u64 << bit);
-                    rendered += 1;
-                }
-            }
-            return Ok(rendered);
         }
         let cell_count = self.rows * MAX_COLUMNS;
         for (word_index, word) in dirty.iter_mut().enumerate() {
@@ -1220,118 +1183,6 @@ impl Display {
         &mut self.gui
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_terminal_surface(
-        cells: &[Cell; MAX_COLUMNS * MAX_ROWS],
-        cell_columns: usize,
-        cell_rows: usize,
-        cursor_column: usize,
-        cursor_row: usize,
-        cursor_visible: bool,
-        glyph_cache: &mut GlyphCache,
-        framebuffer: &mut [u8],
-        width: usize,
-        height: usize,
-        stride: usize,
-        format: PixelFormat,
-        surface: GuiRect,
-        damage: &[GuiRect; logos_abi::MAX_GUI_DAMAGE_RECTS],
-        damage_count: usize,
-    ) -> usize {
-        let screen = GuiRect::new(0, 0, width as u32, height as u32);
-        let content = GuiRect::new(
-            surface.x,
-            surface.y.saturating_add(TERMINAL_CHROME_HEIGHT as i32),
-            surface.width,
-            surface.height.saturating_sub(TERMINAL_CHROME_HEIGHT),
-        );
-        let columns = cell_columns.min(surface.width as usize / GLYPH_WIDTH);
-        let rows = cell_rows.min(content.height as usize / GLYPH_HEIGHT);
-        let mut damage_bounds = GuiRect::EMPTY;
-        for damage_rect in damage[..damage_count].iter().copied() {
-            let clipped = intersect(intersect(damage_rect, content), screen);
-            if clipped.is_empty() {
-                continue;
-            }
-            damage_bounds =
-                if damage_bounds.is_empty() { clipped } else { union_rect(damage_bounds, clipped) };
-        }
-        if damage_bounds.is_empty() {
-            return 0;
-        }
-        let local_left = damage_bounds.x.saturating_sub(surface.x).max(0) as usize;
-        let local_top = damage_bounds.y.saturating_sub(content.y).max(0) as usize;
-        let local_right = damage_bounds
-            .x
-            .saturating_add(damage_bounds.width as i32)
-            .saturating_sub(surface.x)
-            .max(0) as usize;
-        let local_bottom = damage_bounds
-            .y
-            .saturating_add(damage_bounds.height as i32)
-            .saturating_sub(content.y)
-            .max(0) as usize;
-        let first_column = (local_left / GLYPH_WIDTH).min(columns);
-        let last_column = local_right.saturating_add(GLYPH_WIDTH - 1) / GLYPH_WIDTH;
-        let first_row = (local_top / GLYPH_HEIGHT).min(rows);
-        let last_row = local_bottom.saturating_add(GLYPH_HEIGHT - 1) / GLYPH_HEIGHT;
-        let mut rendered = 0;
-        for row in first_row..last_row.min(rows) {
-            for column in first_column..last_column.min(columns) {
-                let cell = cells[row * MAX_COLUMNS + column];
-                let cell_rect = terminal_cell_rect(surface, row, column);
-                let is_cursor = row == cursor_row && column == cursor_column;
-                let glyph = glyph_cache.get(cell.codepoint);
-                let foreground = styled_foreground(cell);
-                let background_bytes = pixel_bytes(cell.background, format);
-                let foreground_bytes = pixel_bytes(foreground, format);
-                for damage_rect in damage[..damage_count].iter().copied() {
-                    let clip = intersect(intersect(cell_rect, damage_rect), screen);
-                    if clip.is_empty() {
-                        continue;
-                    }
-                    for y in clip.y..clip.y.saturating_add(clip.height as i32) {
-                        for x in clip.x..clip.x.saturating_add(clip.width as i32) {
-                            let glyph_row = (y - cell_rect.y) as usize;
-                            let glyph_column = (x - cell_rect.x) as usize;
-                            let coverage =
-                                styled_coverage(&glyph, glyph_row, glyph_column, cell.attributes);
-                            let offset = y as usize * stride + x as usize * 4;
-                            let bytes = match coverage {
-                                0 => background_bytes,
-                                u8::MAX => foreground_bytes,
-                                _ => pixel_bytes(
-                                    blend_color(cell.background, foreground, coverage),
-                                    format,
-                                ),
-                            };
-                            framebuffer[offset..offset + 4].copy_from_slice(&bytes);
-                            rendered += 1;
-                        }
-                    }
-                    if is_cursor && cursor_visible {
-                        let cursor_clip = intersect(
-                            clip,
-                            GuiRect::new(cell_rect.x, cell_rect.y + 1, CURSOR_WIDTH as u32, 14),
-                        );
-                        let bytes = pixel_bytes(foreground, format);
-                        for y in
-                            cursor_clip.y..cursor_clip.y.saturating_add(cursor_clip.height as i32)
-                        {
-                            for x in cursor_clip.x
-                                ..cursor_clip.x.saturating_add(cursor_clip.width as i32)
-                            {
-                                let offset = y as usize * stride + x as usize * 4;
-                                framebuffer[offset..offset + 4].copy_from_slice(&bytes);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        rendered
-    }
-
     pub fn render_gui(
         &mut self,
         framebuffer: &mut [u8],
@@ -1370,12 +1221,7 @@ impl Display {
             self.gui_background_pending = false;
             background_filled = true;
             self.surface_initialized = true;
-            if let Some(surface) = self.gui.terminal_bounds() {
-                self.set_all_dirty(true);
-                self.gui.invalidate_rect(surface);
-            } else {
-                self.set_all_dirty(false);
-            }
+            self.set_all_dirty(false);
         }
         if self.gui_damage_count == 0 {
             let (damage, count) = self.gui.take_damage();
@@ -1423,25 +1269,6 @@ impl Display {
                         let start = row * stride + rect.x as usize * 4;
                         fill_row(&mut backbuffer[start..start + row_bytes], pixel);
                     }
-                }
-                if let Some(surface) = self.gui.terminal_bounds() {
-                    rendered += Self::render_terminal_surface(
-                        &self.cells,
-                        self.columns,
-                        self.rows,
-                        self.cursor_column,
-                        self.cursor_row,
-                        self.cursor_visible,
-                        &mut self.glyph_cache,
-                        backbuffer,
-                        width,
-                        height,
-                        stride,
-                        format,
-                        surface,
-                        &priority,
-                        priority_count,
-                    );
                 }
                 rendered += self.gui.render(
                     &mut self.glyph_cache,
@@ -1505,40 +1332,16 @@ impl Display {
         }
         if damage_count != 0 {
             let backbuffer = self.backbuffer.as_mut().unwrap();
-            let terminal = self
-                .gui
-                .terminal_bounds()
-                .map(|surface| {
-                    Self::render_terminal_surface(
-                        &self.cells,
-                        self.columns,
-                        self.rows,
-                        self.cursor_column,
-                        self.cursor_row,
-                        self.cursor_visible,
-                        &mut self.glyph_cache,
-                        backbuffer,
-                        width,
-                        height,
-                        stride,
-                        format,
-                        surface,
-                        &damage,
-                        damage_count,
-                    )
-                })
-                .unwrap_or(0);
-            rendered += terminal
-                + self.gui.render(
-                    &mut self.glyph_cache,
-                    backbuffer,
-                    width,
-                    height,
-                    stride,
-                    format,
-                    &damage,
-                    damage_count,
-                );
+            rendered += self.gui.render(
+                &mut self.glyph_cache,
+                backbuffer,
+                width,
+                height,
+                stride,
+                format,
+                &damage,
+                damage_count,
+            );
         }
         if self.gui_tile_index >= self.gui_damage_count {
             self.present_damage(
@@ -2018,20 +1821,11 @@ mod tests {
     }
 
     #[test]
-    fn terminal_cells_render_inside_the_atrium_surface() {
+    fn terminal_text_grid_renders_inside_the_atrium_surface() {
+        // Terminal content now reaches the framebuffer through a retained
+        // `TextGrid` node in the surface's own scene (ADR-0087, #74),
+        // not the removed single-slot `GUI_SURFACE_FLAG_TERMINAL` hole.
         let mut display = Display::new(1);
-        let mut terminal = RenderMessage::empty(MessageKind::FullRedraw);
-        terminal.columns = 2;
-        terminal.rows = 1;
-        terminal.count = 1;
-        terminal.cells[0] = Cell {
-            codepoint: b'T' as u32,
-            background: 0x102030,
-            foreground: 0xffffff,
-            ..Cell::EMPTY
-        };
-        display.apply(1, &terminal).unwrap();
-
         let mut root =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
         root.bounds = logos_abi::GuiRect::new(0, 0, 64, 64);
@@ -2043,21 +1837,29 @@ mod tests {
 
         let mut terminal_surface =
             logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
-        terminal_surface.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
         terminal_surface.bounds = logos_abi::GuiRect::new(16, 8, 16, 48);
         terminal_surface.z_order = 2;
         let handle = display.gui_mut().create(11, terminal_surface).unwrap().surface;
-        assert_eq!(display.gui().terminal_bounds(), Some(terminal_surface.bounds));
-        let mut chrome = logos_abi::GuiDrawBatch::new(handle, 1, terminal_surface.bounds);
-        assert!(chrome.push(logos_abi::GuiDrawCommand::fill_rect(
-            logos_abi::GuiRect::new(16, 8, 16, 32),
-            0x405060,
-        )));
-        display.gui_mut().update(11, chrome).unwrap();
-        terminal.surface = logos_abi::SurfaceHandle::new(0, 1, 99).unwrap();
-        assert_eq!(display.apply(1, &terminal), Err(DisplayError::InvalidMessage));
-        terminal.surface = handle;
-        display.apply(1, &terminal).unwrap();
+
+        let grid_bounds = logos_abi::GuiRect::new(16, 8, 16, 16);
+        let command = logos_abi::GuiDrawCommand::text_grid(grid_bounds, 2, 1).unwrap();
+        let mut op = logos_abi::GuiSceneOp::upsert(handle, 1, 5, command);
+        display.gui_mut().apply_scene_op(11, op).unwrap();
+        op = logos_abi::GuiSceneOp::commit(handle, 1);
+        display.gui_mut().apply_scene_op(11, op).unwrap();
+
+        let mut row = logos_abi::GuiTextGridRow::EMPTY;
+        row.surface = handle;
+        row.node_id = 5;
+        row.row = 0;
+        row.cell_count = 1;
+        row.cells[0] = Cell {
+            codepoint: b'T' as u32,
+            background: 0x102030,
+            foreground: 0xffffff,
+            ..Cell::EMPTY
+        };
+        display.gui_mut().set_text_grid_row(11, &row).unwrap();
 
         let mut framebuffer = std::vec![0; 64 * 64 * 4];
         loop {
@@ -2067,16 +1869,78 @@ mod tests {
             }
         }
 
-        let title_bar = (8 * 64 + 16) * 4;
-        assert_eq!(&framebuffer[title_bar..title_bar + 4], &[0x60, 0x50, 0x40, 0]);
-        let background = (40 * 64 + 16) * 4;
-        assert_eq!(&framebuffer[background..background + 4], &[0x30, 0x20, 0x10, 0]);
         assert!(
-            framebuffer[(40 * 64 + 16) * 4..(56 * 64 + 32) * 4]
+            framebuffer[(8 * 64 + 16) * 4..(24 * 64 + 24) * 4]
                 .chunks_exact(4)
                 .any(|pixel| pixel[..3] == [0xff, 0xff, 0xff])
         );
         assert!(display.gui().contains(handle));
+    }
+
+    #[test]
+    fn text_grid_row_survives_a_second_commit_of_the_same_scene() {
+        // Atrium republishes a surface's node tree on ordinary events
+        // (focus, unrelated cursor/window activity) with the *same*
+        // TextGrid node id, not only on first admission. A row applied
+        // between two such commits must still be visible after the
+        // second one composes (#74).
+        let mut display = Display::new(1);
+        let mut root =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
+        root.bounds = logos_abi::GuiRect::new(0, 0, 64, 64);
+        let root_handle = display.gui_mut().create(11, root).unwrap().surface;
+        let mut root_batch =
+            logos_abi::GuiDrawBatch::new(root_handle, 1, logos_abi::GuiRect::new(0, 0, 64, 64));
+        assert!(root_batch.push(logos_abi::GuiDrawCommand::fill_surface(0x203040)));
+        display.gui_mut().update(11, root_batch).unwrap();
+
+        let mut terminal_surface =
+            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
+        terminal_surface.bounds = logos_abi::GuiRect::new(16, 8, 16, 48);
+        terminal_surface.z_order = 2;
+        let handle = display.gui_mut().create(11, terminal_surface).unwrap().surface;
+
+        let grid_bounds = logos_abi::GuiRect::new(16, 8, 16, 16);
+        let command = logos_abi::GuiDrawCommand::text_grid(grid_bounds, 2, 1).unwrap();
+        let publish = |display: &mut Display| {
+            let op = logos_abi::GuiSceneOp::upsert(handle, 1, 5, command);
+            display.gui_mut().apply_scene_op(11, op).unwrap();
+            let op = logos_abi::GuiSceneOp::commit(handle, 1);
+            display.gui_mut().apply_scene_op(11, op).unwrap();
+        };
+        publish(&mut display);
+
+        let mut row = logos_abi::GuiTextGridRow::EMPTY;
+        row.surface = handle;
+        row.node_id = 5;
+        row.row = 0;
+        row.cell_count = 1;
+        row.cells[0] = Cell {
+            codepoint: b'T' as u32,
+            background: 0x102030,
+            foreground: 0xffffff,
+            ..Cell::EMPTY
+        };
+        display.gui_mut().set_text_grid_row(11, &row).unwrap();
+
+        // A second commit of the identical scene (same node id) must not
+        // blank the store the first commit bound.
+        publish(&mut display);
+
+        let mut framebuffer = std::vec![0; 64 * 64 * 4];
+        loop {
+            display.render_gui(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
+            if !display.render_pending() {
+                break;
+            }
+        }
+
+        assert!(
+            framebuffer[(8 * 64 + 16) * 4..(24 * 64 + 24) * 4]
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == [0xff, 0xff, 0xff]),
+            "row content did not survive the second scene commit"
+        );
     }
 
     #[test]
@@ -2241,86 +2105,6 @@ mod tests {
         let new_pixel = (8 * 256 + 200) * 4;
         assert_eq!(&framebuffer[old_pixel..old_pixel + 3], &[0x30, 0x20, 0x10]);
         assert_eq!(&framebuffer[new_pixel..new_pixel + 3], &[0xff, 0xff, 0xff]);
-    }
-
-    #[test]
-    fn terminal_chrome_survives_cursor_and_cell_composition() {
-        let mut display = Display::new(1);
-        let mut root =
-            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateRoot, 1);
-        root.bounds = GuiRect::new(0, 0, 64, 64);
-        display.gui_mut().create(11, root).unwrap();
-
-        let mut terminal =
-            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 2);
-        terminal.bounds = root.bounds;
-        terminal.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
-        terminal.z_order = 2;
-        let terminal_handle = display.gui_mut().create(11, terminal).unwrap().surface;
-        let mut chrome = logos_abi::GuiDrawBatch::new(terminal_handle, 1, terminal.bounds);
-        assert!(chrome.push(logos_abi::GuiDrawCommand::fill_surface(0x101820)));
-        assert!(
-            chrome
-                .push(logos_abi::GuiDrawCommand::fill_rect(GuiRect::new(0, 0, 64, 32), 0x182535,))
-        );
-        display.gui_mut().update(11, chrome).unwrap();
-
-        let mut cursor =
-            logos_abi::GuiSurfaceRequest::new(logos_abi::GuiSurfaceOperation::CreateModal, 3);
-        cursor.bounds = root.bounds;
-        cursor.z_order = 3;
-        let cursor_handle = display.gui_mut().create(13, cursor).unwrap().surface;
-        display.register_cursor_surface(13, cursor_handle);
-
-        let mut terminal_update = RenderMessage::empty(MessageKind::RenderCells);
-        terminal_update.surface = terminal_handle;
-        terminal_update.columns = 2;
-        terminal_update.rows = 1;
-        terminal_update.count = 1;
-        terminal_update.cells[0] = Cell {
-            codepoint: b'T' as u32,
-            background: 0x101820,
-            foreground: 0xffffff,
-            ..Cell::EMPTY
-        };
-        display.apply(1, &terminal_update).unwrap();
-
-        let mut framebuffer = std::vec![0; 64 * 64 * 4];
-        display.render(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
-        while display.render_pending() {
-            display.render_gui(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
-        }
-        let samples = [(0, 0), (24, 20), (56, 20)].map(|(x, y)| {
-            let offset = (y * 64 + x) * 4;
-            [
-                framebuffer[offset],
-                framebuffer[offset + 1],
-                framebuffer[offset + 2],
-                framebuffer[offset + 3],
-            ]
-        });
-
-        let cursor = logos_abi::GuiSceneOp::upsert(
-            cursor_handle,
-            1,
-            1,
-            logos_abi::GuiDrawCommand::fill_rect(GuiRect::new(8, 8, 3, 14), 0xffffff),
-        );
-        assert!(display.apply_cursor_scene_op(cursor));
-        let mut cursor = cursor;
-        cursor.frame = 2;
-        cursor.command.x = 40;
-        assert!(display.apply_cursor_scene_op(cursor));
-        display.apply(1, &terminal_update).unwrap();
-        display.render(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
-        while display.render_pending() {
-            display.render_gui(&mut framebuffer, 64, 64, 64 * 4, PixelFormat::Bgr8).unwrap();
-        }
-
-        for ((x, y), before) in [(0, 0), (24, 20), (56, 20)].into_iter().zip(samples) {
-            let offset = (y * 64 + x) * 4;
-            assert_eq!(&framebuffer[offset..offset + 4], &before);
-        }
     }
 
     #[test]

@@ -53,6 +53,11 @@ pub enum UiNodeKind {
     Form = 6,
     Avatar = 7,
     RouteFrame = 8,
+    /// Retained monospace cell grid (ADR-0087). Content is delivered
+    /// separately via `GuiTextGridRow`, addressed by this node's id; the
+    /// tree only carries the node's bounds (exact multiples of the 8x16
+    /// cell size), which `emit_node` turns into the columns/rows.
+    TextGrid = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

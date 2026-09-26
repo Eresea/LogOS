@@ -327,6 +327,7 @@ fn write_node_kind<W: fmt::Write>(output: &mut W, kind: UiNodeKind) -> Result<()
         UiNodeKind::Form => "Form",
         UiNodeKind::Avatar => "Avatar",
         UiNodeKind::RouteFrame => "RouteFrame",
+        UiNodeKind::TextGrid => "TextGrid",
     };
     write!(output, "logos_ui::UiNodeKind::{name}").map_err(|_| UiCodegenError::Output)
 }

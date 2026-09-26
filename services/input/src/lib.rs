@@ -593,9 +593,7 @@ const fn azerty_code(byte: u8) -> KeyCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use logos_abi::{
-        Cell, CompletionResponse, CompletionStatus, DEFAULT_COLUMNS, DEFAULT_ROWS, MAX_COLUMNS,
-    };
+    use logos_abi::{Cell, CompletionResponse, CompletionStatus, DEFAULT_COLUMNS, DEFAULT_ROWS};
     use logos_flow::{FlowOperation, FlowService, SystemOperation};
     use logos_session::{MAX_LINE_BYTES, SessionService, ShellOutput};
     use logos_terminal::TerminalService;
@@ -604,14 +602,13 @@ mod tests {
         terminal: &mut TerminalService,
         screen: &mut [Cell; DEFAULT_COLUMNS * DEFAULT_ROWS],
     ) {
-        while let Some(message) = terminal.next_render() {
-            for index in 0..usize::from(message.count) {
-                let position = usize::from(message.positions[index]);
-                let row = position / MAX_COLUMNS;
-                let column = position % MAX_COLUMNS;
-                if row < DEFAULT_ROWS && column < DEFAULT_COLUMNS {
-                    screen[row * DEFAULT_COLUMNS + column] = message.cells[index];
-                }
+        while let Some(row_update) = terminal.next_grid_row() {
+            let row = usize::from(row_update.row);
+            if row >= DEFAULT_ROWS {
+                continue;
+            }
+            for column in 0..usize::from(row_update.cell_count).min(DEFAULT_COLUMNS) {
+                screen[row * DEFAULT_COLUMNS + column] = row_update.cells[column];
             }
         }
     }
@@ -891,7 +888,7 @@ mod tests {
         let mut output = ShellOutput::new();
         session.command_output(b"LogOS vNext 0.1.0\r\n", &mut output);
         terminal.session_output_bytes(output.as_bytes());
-        assert!(terminal.next_render().is_some());
+        assert!(terminal.next_grid_row().is_some());
     }
 
     #[test]

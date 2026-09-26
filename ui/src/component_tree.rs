@@ -181,7 +181,8 @@ impl UiComponentSlot {
             | UiNodeKind::Label
             | UiNodeKind::Form
             | UiNodeKind::Avatar
-            | UiNodeKind::RouteFrame => Self::Empty,
+            | UiNodeKind::RouteFrame
+            | UiNodeKind::TextGrid => Self::Empty,
         }
     }
 

@@ -26,7 +26,6 @@ pub const MAX_GUI_TEXT_GRID_ROWS: usize = DEFAULT_SCREEN_HEIGHT / DISPLAY_CELL_H
 /// others — never a single shared slot that the next surface can steal.
 pub const MAX_GUI_TEXT_GRIDS: usize = 4;
 pub const GUI_DRAW_FLAG_MORE: u8 = 1 << 0;
-pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_CURSOR: u8 = 1 << 1;
 pub const GUI_TEXT_FLAG_LIGHT: u32 = 1 << 0;
 pub const GUI_TEXT_FLAG_DOUBLE: u32 = 1 << 1;
@@ -165,7 +164,7 @@ impl GuiSurfaceRequest {
 
     pub const fn is_valid(self) -> bool {
         self.request_id != 0
-            && self.flags & !(GUI_SURFACE_FLAG_TERMINAL | GUI_SURFACE_FLAG_CURSOR) == 0
+            && self.flags & !GUI_SURFACE_FLAG_CURSOR == 0
             && self.reserved == 0
             && self.reserved_tail == 0
             && match self.operation {
@@ -1002,8 +1001,6 @@ mod tests {
     #[test]
     fn terminal_surface_flag_is_explicitly_bounded() {
         let mut request = GuiSurfaceRequest::new(GuiSurfaceOperation::CreateModal, 1);
-        request.flags = GUI_SURFACE_FLAG_TERMINAL;
-        assert!(request.is_valid());
         request.flags = GUI_SURFACE_FLAG_CURSOR;
         assert!(request.is_valid());
         request.flags = u8::MAX;

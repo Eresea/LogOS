@@ -6,9 +6,11 @@ mod common;
 
 use logos_abi::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumSurfaceInput, AtriumSurfaceRequest,
-    AtriumSurfaceResponse, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSceneOp,
-    GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, InputMessage,
-    IpcStatus, KeyCode, KeyState, MessageKind, PointerState, RenderMessage, SurfaceHandle,
+    AtriumSurfaceResponse, DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GuiDrawCommand, GuiHook,
+    GuiHookKind, GuiRect, GuiSceneOp, GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest,
+    GuiSurfaceResponse, GuiTextGridRow, InputMessage, IpcStatus, KeyCode, KeyState,
+    MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS, MessageKind, PointerState, RenderMessage,
+    SurfaceHandle, TERMINAL_CHROME_HEIGHT,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -32,13 +34,13 @@ const DISPLAY_DRAW_CAPABILITY: common::CapabilitySpec = common::capability_contr
 const TERMINAL_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
     b"terminal",
-    core::mem::size_of::<RenderMessage>(),
+    core::mem::size_of::<GuiTextGridRow>(),
     logos_abi::IpcRights::Receive,
 );
 const DISPLAY_RENDER_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_RENDER,
     b"display",
-    core::mem::size_of::<RenderMessage>(),
+    core::mem::size_of::<GuiTextGridRow>(),
     logos_abi::IpcRights::Send,
 );
 const DISPLAY_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -160,6 +162,12 @@ static mut APP_SCENE_SEQUENCES: [u32; logos_atrium::MAX_ATRIUM_SURFACES] =
 static mut APP_SCENE_REPORTED: [bool; logos_atrium::MAX_ATRIUM_SURFACES] =
     [false; logos_atrium::MAX_ATRIUM_SURFACES];
 static mut APP_SCENE_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentTree::new();
+/// Node id of the Terminal surface's own `TextGrid` content node, computed
+/// from its position in `APP_SCENE_TREE` whenever `build_app_scene_tree`
+/// rebuilds it. 0 means "not yet published" (`GuiTextGridRow::is_valid`
+/// rejects `node_id == 0`), so a row arriving before the first publish is
+/// simply dropped rather than mis-addressed (#74).
+static mut TERMINAL_GRID_NODE_ID: u32 = 0;
 const APP_SCENE_THEME: logos_ui_graphics::UiSceneTheme = logos_ui_graphics::UiSceneTheme {
     accent: 0x9f3b3b,
     ..logos_ui_graphics::UiSceneTheme::DEFAULT
@@ -205,7 +213,7 @@ fn proof_home_surface_ready(surface: SurfaceHandle) {
 fn proof_home_surface_ready(_surface: SurfaceHandle) {}
 
 #[cfg(feature = "qemu-proof")]
-fn proof_app_scene_published(app: logos_atrium::AppId, surface: SurfaceHandle) {
+fn proof_app_scene_published(app: logos_atrium::AppId, surface: SurfaceHandle, bounds: GuiRect) {
     use core::fmt::Write as _;
 
     struct ProofLine {
@@ -232,14 +240,15 @@ fn proof_app_scene_published(app: logos_atrium::AppId, surface: SurfaceHandle) {
     let mut line = ProofLine { bytes: [0; 112], length: 0 };
     let _ = write!(
         line,
-        "LogOS vNext: Atrium app={title} scene published surface={}/{}",
-        surface.slot, surface.generation,
+        "LogOS vNext: Atrium app={title} scene published surface={}/{} bounds={},{},{},{}",
+        surface.slot, surface.generation, bounds.x, bounds.y, bounds.width, bounds.height,
     );
     common::proof_line(&line.bytes[..line.length]);
 }
 
 #[cfg(not(feature = "qemu-proof"))]
-fn proof_app_scene_published(_app: logos_atrium::AppId, _surface: SurfaceHandle) {}
+fn proof_app_scene_published(_app: logos_atrium::AppId, _surface: SurfaceHandle, _bounds: GuiRect) {
+}
 
 fn settings_route(page: logos_atrium::SettingsPage) -> u8 {
     match page {
@@ -988,7 +997,38 @@ fn build_app_scene_tree(
                 return false;
             }
         }
-        logos_atrium::AppId::Terminal => {}
+        logos_atrium::AppId::Terminal => {
+            // Content below the title bar, sized from the surface bounds
+            // (works in tiled panes and after resize) and clamped to the
+            // node's own bounds (ADR-0087) — same math as Terminal's own
+            // `resize_to_surface`, so both sides agree on the grid shape.
+            let content_y = bounds.y.saturating_add(TERMINAL_CHROME_HEIGHT as i32);
+            let content_height = bounds.height.saturating_sub(TERMINAL_CHROME_HEIGHT as u32);
+            let columns = (bounds.width as usize / DISPLAY_CELL_WIDTH)
+                .clamp(1, MAX_GUI_TEXT_GRID_COLUMNS) as u32;
+            let rows = (content_height as usize / DISPLAY_CELL_HEIGHT)
+                .clamp(1, MAX_GUI_TEXT_GRID_ROWS) as u32;
+            let grid_bounds = GuiRect::new(
+                bounds.x,
+                content_y,
+                columns * DISPLAY_CELL_WIDTH as u32,
+                rows * DISPLAY_CELL_HEIGHT as u32,
+            );
+            let Some(grid) = add_app_scene_node(
+                tree,
+                root,
+                logos_ui::UiNodeKind::TextGrid,
+                grid_bounds,
+                b"",
+                logos_ui::UiStyleList::EMPTY,
+            ) else {
+                return false;
+            };
+            let node_id = (grid.slot as u32).saturating_mul(3).saturating_add(1);
+            unsafe {
+                *core::ptr::addr_of_mut!(TERMINAL_GRID_NODE_ID) = node_id;
+            }
+        }
         _ => return false,
     }
     true
@@ -1079,7 +1119,7 @@ fn render_app_scene(
             let reported = unsafe { &mut (*core::ptr::addr_of_mut!(APP_SCENE_REPORTED))[slot] };
             if !*reported {
                 *reported = true;
-                proof_app_scene_published(surface.app, surface.reference);
+                proof_app_scene_published(surface.app, surface.reference, surface.bounds);
             }
             resuming
         }
@@ -1583,7 +1623,7 @@ pub extern "C" fn _start() -> ! {
     let mut last_terminal_bounds = GuiRect::EMPTY;
     let mut deferred_terminal_revoke: Option<SurfaceHandle> = None;
     let mut deferred_system_revoke: Option<SurfaceHandle> = None;
-    let mut pending_render: Option<RenderMessage> = None;
+    let mut pending_render: Option<GuiTextGridRow> = None;
     let mut pending_draw: Option<GuiSceneOp> = None;
     let mut pending_app_render = false;
     let mut cursor_surface = SurfaceHandle::EMPTY;
@@ -1715,10 +1755,7 @@ pub extern "C" fn _start() -> ! {
             let live = atrium.surface_by_reference(message.surface).is_some_and(|surface| {
                 surface.app == logos_atrium::AppId::Terminal
                     && atrium.owns_surface(message.surface, terminal_client)
-            }) || program_surface_capabilities
-                .iter()
-                .flatten()
-                .any(|caps| atrium.owns_surface(message.surface, caps.client));
+            });
             if !live {
                 pending_render = None;
             } else {
@@ -2049,9 +2086,6 @@ pub extern "C" fn _start() -> ! {
                     );
                     request.bounds = surface_request.bounds();
                     request.z_order = 2;
-                    if app == logos_atrium::AppId::Terminal {
-                        request.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
-                    }
                     if common::ipc_send_handle(display_control, &request) == IpcStatus::Ok {
                         pending_surface = Some((request, Some(surface_request)));
                         pending_surface_for_client = true;
@@ -2215,16 +2249,21 @@ pub extern "C" fn _start() -> ! {
         }
 
         if pending_render.is_none() {
-            let mut render = RenderMessage::empty(MessageKind::RenderCells);
-            while common::ipc_receive_handle(terminal_render, &mut render) == IpcStatus::Ok {
-                let terminal_surface_is_live = render.surface.is_valid()
-                    && matches!(render.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
-                    && atrium.surface_by_reference(render.surface).is_some_and(|surface| {
+            let mut row = GuiTextGridRow::EMPTY;
+            let grid_node_id = unsafe { *core::ptr::addr_of!(TERMINAL_GRID_NODE_ID) };
+            while common::ipc_receive_handle(terminal_render, &mut row) == IpcStatus::Ok {
+                let terminal_surface_is_live = row.surface.is_valid()
+                    && grid_node_id != 0
+                    && atrium.surface_by_reference(row.surface).is_some_and(|surface| {
                         surface.app == logos_atrium::AppId::Terminal
-                            && atrium.owns_surface(render.surface, terminal_client)
+                            && atrium.owns_surface(row.surface, terminal_client)
                     });
                 if terminal_surface_is_live {
-                    pending_render = Some(render);
+                    // Terminal only knows its own surface, not the node id
+                    // Atrium assigned this surface's TextGrid content node
+                    // in `build_app_scene_tree`; fill that in here (#74).
+                    row.node_id = grid_node_id;
+                    pending_render = Some(row);
                     break;
                 }
             }
@@ -2260,23 +2299,12 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        if pending_render.is_none() {
-            for caps in program_surface_capabilities.iter().flatten().copied() {
-                let mut render = RenderMessage::empty(MessageKind::RenderCells);
-                while common::ipc_receive_handle(caps.render, &mut render) == IpcStatus::Ok {
-                    let live =
-                        matches!(render.kind, MessageKind::RenderCells | MessageKind::FullRedraw)
-                            && atrium.owns_surface(render.surface, caps.client);
-                    if live {
-                        pending_render = Some(render);
-                        break;
-                    }
-                }
-                if pending_render.is_some() {
-                    break;
-                }
-            }
-        }
+        // Note: `caps.render` (the generic per-program `RenderMessage` path)
+        // is not drained here. No program ever calls `send_render` — every
+        // current app (Calculator/Files/Settings) draws through its scene
+        // (`caps.draw`) — and once Terminal's own dedicated render channel
+        // is retyped to `GuiTextGridRow` (#74), that generic path can no
+        // longer share `pending_render`'s type.
 
         let mut cursor_sent_in_input = false;
         loop {
@@ -2533,9 +2561,6 @@ pub extern "C" fn _start() -> ! {
                     );
                     request.bounds = surface_request.bounds();
                     request.z_order = 2;
-                    if app == logos_atrium::AppId::Terminal {
-                        request.flags = logos_abi::GUI_SURFACE_FLAG_TERMINAL;
-                    }
                     if common::ipc_send_handle(display_control, &request) == IpcStatus::Ok {
                         pending_surface = Some((request, Some(surface_request)));
                         pending_surface_for_client = matches!(
@@ -2950,5 +2975,63 @@ mod settings_scene_tests {
                 .count(),
             1,
         );
+    }
+}
+
+#[cfg(test)]
+mod terminal_scene_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct CollectingSceneSink {
+        operations: std::vec::Vec<GuiSceneOp>,
+    }
+
+    impl logos_ui_graphics::UiSceneSink for CollectingSceneSink {
+        fn send(&mut self, operation: &GuiSceneOp) -> IpcStatus {
+            self.operations.push(*operation);
+            IpcStatus::Ok
+        }
+    }
+
+    /// The first (untiled) surface always gets `DESKTOP_SURFACE_BOUNDS`
+    /// (`Atrium::initial_surface_bounds`) -- the worst-case, largest
+    /// Terminal content region.
+    fn terminal_surface() -> logos_atrium::Surface {
+        let mut atrium = logos_atrium::Atrium::new();
+        atrium.authenticate();
+        let client = logos_abi::ServiceHandle::new(1, 1).unwrap();
+        let request = atrium.request_surface(logos_atrium::AppId::Terminal, client).unwrap();
+        let reference = SurfaceHandle::new(0, 1, 7).unwrap();
+        atrium.spawn_surface(request, reference).unwrap()
+    }
+
+    /// SCENE-BUDGET (#69/#74): the Terminal scene now carries its chrome
+    /// (title bar, close control) plus one `TextGrid` content node. At the
+    /// worst-case (full desktop) surface size this must still fit
+    /// `MAX_GUI_NODES`/`MAX_UI_SCENE_OPS` and publish within
+    /// `MAX_UI_SCENE_PUBLISHER_BYTES`, matching the existing Settings/Home
+    /// scene budget tests.
+    #[test]
+    fn terminal_scene_with_text_grid_fits_the_scene_budget() {
+        let surface = terminal_surface();
+        let calculator = logos_atrium::Calculator::new();
+        assert!(build_app_scene_tree(surface, &calculator));
+
+        let tree = unsafe { &mut *core::ptr::addr_of_mut!(APP_SCENE_TREE) };
+        assert!(tree.tree().len() <= logos_ui::MAX_UI_NODES);
+
+        let mut publisher = logos_ui_graphics::UiScenePublisher::new();
+        let mut sink = CollectingSceneSink::default();
+        let (status, sent) = publisher
+            .publish(surface.reference, 1, tree, APP_SCENE_THEME, None, &mut sink)
+            .unwrap();
+        assert_eq!(status, IpcStatus::Ok);
+        assert!(sent <= logos_ui_graphics::MAX_UI_SCENE_OPS);
+
+        let node_id = unsafe { *core::ptr::addr_of!(TERMINAL_GRID_NODE_ID) };
+        assert_ne!(node_id, 0);
+        assert!(sink.operations.iter().any(|operation| operation.node_id == node_id
+            && operation.command.kind == logos_abi::GuiDrawKind::TextGrid));
     }
 }

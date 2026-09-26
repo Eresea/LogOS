@@ -1,10 +1,9 @@
 use logos_abi::{
-    Cell, DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_TERMINAL,
-    GUI_TEXT_FLAG_DOUBLE, GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind,
-    GuiMaterialSymbol, GuiNodeOperation, GuiRect, GuiSceneOp, GuiStatus, GuiSurfaceOperation,
-    GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
-    MAX_GUI_SURFACES, MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS, MAX_GUI_TEXT_GRIDS,
-    SurfaceHandle,
+    Cell, DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GUI_DRAW_FLAG_MORE, GUI_TEXT_FLAG_DOUBLE,
+    GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiMaterialSymbol,
+    GuiNodeOperation, GuiRect, GuiSceneOp, GuiStatus, GuiSurfaceOperation, GuiSurfaceRequest,
+    GuiSurfaceResponse, GuiTextGridRow, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES,
+    MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS, MAX_GUI_TEXT_GRIDS, SurfaceHandle,
 };
 
 use super::TextFont;
@@ -216,7 +215,6 @@ struct SurfaceSlot {
     legacy_last_batch: Option<GuiDrawBatch>,
     z_order: i16,
     order: u32,
-    terminal: bool,
     active_nodes: [Option<RenderNode>; MAX_GUI_NODES],
     staged_nodes: [Option<RenderNode>; MAX_GUI_NODES],
     active_node_count: u8,
@@ -234,7 +232,6 @@ impl SurfaceSlot {
         legacy_last_batch: None,
         z_order: 0,
         order: 0,
-        terminal: false,
         active_nodes: [RenderNode::EMPTY; MAX_GUI_NODES],
         staged_nodes: [RenderNode::EMPTY; MAX_GUI_NODES],
         active_node_count: 0,
@@ -361,16 +358,6 @@ impl GuiSurfaceRegistry {
         ) {
             return Err(GuiRegistryError::InvalidRequest);
         }
-        if request.flags & GUI_SURFACE_FLAG_TERMINAL != 0
-            && !matches!(request.operation, GuiSurfaceOperation::CreateModal)
-        {
-            return Err(GuiRegistryError::InvalidRequest);
-        }
-        if request.flags & GUI_SURFACE_FLAG_TERMINAL != 0
-            && self.slots.iter().any(|slot| slot.occupied() && slot.terminal)
-        {
-            return Err(GuiRegistryError::Capacity);
-        }
         if matches!(request.operation, GuiSurfaceOperation::CreateModal) && !root_exists {
             return Err(GuiRegistryError::NotFound);
         }
@@ -395,7 +382,6 @@ impl GuiSurfaceRegistry {
                 request.z_order.max(1)
             },
             order: self.order,
-            terminal: request.flags & GUI_SURFACE_FLAG_TERMINAL != 0,
             active_nodes: [RenderNode::EMPTY; MAX_GUI_NODES],
             staged_nodes: [RenderNode::EMPTY; MAX_GUI_NODES],
             active_node_count: 0,
@@ -641,14 +627,14 @@ impl GuiSurfaceRegistry {
         else {
             return Err(GuiRegistryError::NotFound);
         };
-        if update.row as usize >= store.rows as usize
-            || update.cell_count as usize > store.columns as usize
-        {
+        if update.row as usize >= store.rows as usize {
             return Err(GuiRegistryError::InvalidRequest);
         }
         let base = update.row as usize * MAX_GUI_TEXT_GRID_COLUMNS;
-        let cell_count = update.cell_count as usize;
         let columns = store.columns as usize;
+        // ponytail: rows wider than the grid (Terminal in a narrow tiled pane) are clipped to
+        // the grid width; Terminal reflow to its pane size lands with #75.
+        let cell_count = (update.cell_count as usize).min(columns);
         store.cells[base..base + cell_count].copy_from_slice(&update.cells[..cell_count]);
         for cell in store.cells[base + cell_count..base + columns].iter_mut() {
             *cell = Cell::EMPTY;
@@ -783,17 +769,6 @@ impl GuiSurfaceRegistry {
 
     pub fn contains(&self, handle: SurfaceHandle) -> bool {
         self.lookup(handle).is_ok()
-    }
-
-    pub fn terminal_bounds(&self) -> Option<GuiRect> {
-        self.terminal_surface().map(|(_, bounds)| bounds)
-    }
-
-    pub fn terminal_surface(&self) -> Option<(SurfaceHandle, GuiRect)> {
-        self.slots
-            .iter()
-            .find(|slot| slot.occupied() && slot.terminal)
-            .map(|slot| (slot.handle, slot.bounds))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3323,25 +3298,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn terminal_marker_is_modal_and_singleton() {
-        let mut registry = GuiSurfaceRegistry::new();
-        registry
-            .create(7, request(GuiSurfaceOperation::CreateRoot, 1, GuiRect::new(0, 0, 10, 10)))
-            .unwrap();
-        let mut terminal = request(GuiSurfaceOperation::CreateModal, 2, GuiRect::new(0, 0, 10, 10));
-        terminal.flags = GUI_SURFACE_FLAG_TERMINAL;
-        assert!(registry.create(7, terminal).is_ok());
-        terminal.request_id = 3;
-        assert_eq!(registry.create(7, terminal), Err(GuiRegistryError::Capacity));
-
-        let mut root_terminal =
-            request(GuiSurfaceOperation::CreateRoot, 4, GuiRect::new(0, 0, 10, 10));
-        root_terminal.flags = GUI_SURFACE_FLAG_TERMINAL;
-        let mut fresh = GuiSurfaceRegistry::new();
-        assert_eq!(fresh.create(7, root_terminal), Err(GuiRegistryError::InvalidRequest));
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn publish_text_grid(
         registry: &mut GuiSurfaceRegistry,
@@ -3432,10 +3388,10 @@ mod tests {
             Err(GuiRegistryError::InvalidRequest)
         );
 
-        // More cells than the node's own column count is rejected.
+        // More cells than the node's own column count are clipped to the grid width.
         let mut too_wide = row;
         too_wide.cell_count = 11;
-        assert_eq!(registry.set_text_grid_row(7, &too_wide), Err(GuiRegistryError::InvalidRequest));
+        assert!(registry.set_text_grid_row(7, &too_wide).is_ok());
 
         // An unknown attribute bit fails ABI-level validation before
         // authorization is even checked.
