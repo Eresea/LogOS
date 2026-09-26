@@ -13,6 +13,7 @@ use core::{
 
 mod atrium;
 mod device_api;
+mod font;
 mod graphics;
 mod package_ipc;
 mod runtime_abi;
@@ -29,14 +30,18 @@ pub use device_api::{
     DEVICE_ABI_VERSION, DeviceKind, DeviceOperation, DeviceRecord, DeviceRequest, DeviceResponse,
     DeviceState, DeviceStatus, MAX_DEVICES,
 };
+pub use font::{
+    INTER_ASCII_FIRST, INTER_ASCII_LAST, INTER_BODY_CELL, INTER_GLYPH_COUNT, INTER_TITLE_CELL,
+    InterStyle, inter_glyph_advance, inter_glyph_index, inter_text_width,
+};
 pub use graphics::{
     GUI_DRAW_FLAG_MORE, GUI_SURFACE_FLAG_CURSOR, GUI_SURFACE_FLAG_TERMINAL, GUI_TEXT_FLAG_DOUBLE,
-    GUI_TEXT_FLAG_LIGHT, GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind,
-    GuiMaterialSymbol, GuiNodeOperation, GuiRect, GuiSceneOp, GuiSessionContext, GuiStatus,
-    GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, GuiTransform,
-    MAX_GUI_BATCH_FRAGMENTS, MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES,
-    MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES, MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS,
-    MAX_GUI_TEXT_GRIDS, SurfaceHandle,
+    GUI_TEXT_FLAG_FONT_INTER_BODY, GUI_TEXT_FLAG_FONT_INTER_TITLE, GUI_TEXT_FLAG_LIGHT,
+    GuiDrawBatch, GuiDrawCommand, GuiDrawKind, GuiHook, GuiHookKind, GuiMaterialSymbol,
+    GuiNodeOperation, GuiRect, GuiSceneOp, GuiSessionContext, GuiStatus, GuiSurfaceOperation,
+    GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow, GuiTransform, MAX_GUI_BATCH_FRAGMENTS,
+    MAX_GUI_COMMANDS, MAX_GUI_DAMAGE_RECTS, MAX_GUI_NODES, MAX_GUI_SURFACES, MAX_GUI_TEXT_BYTES,
+    MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS, MAX_GUI_TEXT_GRIDS, SurfaceHandle,
 };
 
 pub use package_ipc::{

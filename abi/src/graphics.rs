@@ -30,6 +30,15 @@ pub const GUI_SURFACE_FLAG_TERMINAL: u8 = 1 << 0;
 pub const GUI_SURFACE_FLAG_CURSOR: u8 = 1 << 1;
 pub const GUI_TEXT_FLAG_LIGHT: u32 = 1 << 0;
 pub const GUI_TEXT_FLAG_DOUBLE: u32 = 1 << 1;
+/// Select the offline Inter body atlas (14 px, ADR-0088) instead of the
+/// default JetBrains Mono glyph run. Mutually exclusive with
+/// [`GUI_TEXT_FLAG_FONT_INTER_TITLE`].
+pub const GUI_TEXT_FLAG_FONT_INTER_BODY: u32 = 1 << 2;
+/// Select the offline Inter title atlas (20 px, ADR-0088) instead of the
+/// default JetBrains Mono glyph run. Mutually exclusive with
+/// [`GUI_TEXT_FLAG_FONT_INTER_BODY`].
+pub const GUI_TEXT_FLAG_FONT_INTER_TITLE: u32 = 1 << 3;
+const GUI_TEXT_FLAG_FONT_MASK: u32 = GUI_TEXT_FLAG_FONT_INTER_BODY | GUI_TEXT_FLAG_FONT_INTER_TITLE;
 pub const MAX_GUI_CORNER_RADIUS: u8 = 32;
 pub const MAX_GUI_STROKE_WIDTH: u8 = 8;
 pub const MAX_GUI_LINE_WIDTH: u8 = 8;
@@ -427,7 +436,7 @@ impl GuiDrawCommand {
         if text.len() > MAX_GUI_TEXT_BYTES {
             return None;
         }
-        if text_flags & !(GUI_TEXT_FLAG_LIGHT | GUI_TEXT_FLAG_DOUBLE) != 0 {
+        if !valid_text_flags(text_flags) {
             return None;
         }
         let mut command = Self::empty(GuiDrawKind::GlyphRun);
@@ -497,10 +506,7 @@ impl GuiDrawCommand {
                         && (self.width != 0 || self.height != 0)
                         && self.auxiliary <= MAX_GUI_LINE_WIDTH as u32
                 }
-                GuiDrawKind::GlyphRun => {
-                    self.text_len != 0
-                        && self.auxiliary & !(GUI_TEXT_FLAG_LIGHT | GUI_TEXT_FLAG_DOUBLE) == 0
-                }
+                GuiDrawKind::GlyphRun => self.text_len != 0 && valid_text_flags(self.auxiliary),
                 GuiDrawKind::FillRoundedRect => {
                     self.text_len == 0
                         && self.auxiliary >> 8 == 0
@@ -560,6 +566,11 @@ const fn valid_corner_radius(width: u32, height: u32, radius: u8) -> bool {
 
 const fn min_u32(left: u32, right: u32) -> u32 {
     if left < right { left } else { right }
+}
+
+const fn valid_text_flags(flags: u32) -> bool {
+    flags & !(GUI_TEXT_FLAG_LIGHT | GUI_TEXT_FLAG_DOUBLE | GUI_TEXT_FLAG_FONT_MASK) == 0
+        && flags & GUI_TEXT_FLAG_FONT_MASK != GUI_TEXT_FLAG_FONT_MASK
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -967,7 +978,25 @@ mod tests {
         assert_eq!(regular.auxiliary, 0);
         assert_eq!(light.auxiliary, GUI_TEXT_FLAG_LIGHT);
         assert!(light.is_valid());
-        assert!(GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, 1 << 2, b"A").is_none());
+        let body =
+            GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, GUI_TEXT_FLAG_FONT_INTER_BODY, b"A")
+                .unwrap();
+        assert!(body.is_valid());
+        let title =
+            GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, GUI_TEXT_FLAG_FONT_INTER_TITLE, b"A")
+                .unwrap();
+        assert!(title.is_valid());
+        assert!(GuiDrawCommand::glyph_run_styled(0, 0, 0xffffff, 1 << 4, b"A").is_none());
+        assert!(
+            GuiDrawCommand::glyph_run_styled(
+                0,
+                0,
+                0xffffff,
+                GUI_TEXT_FLAG_FONT_INTER_BODY | GUI_TEXT_FLAG_FONT_INTER_TITLE,
+                b"A",
+            )
+            .is_none()
+        );
     }
 
     #[test]
