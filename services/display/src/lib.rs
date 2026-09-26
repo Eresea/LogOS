@@ -852,7 +852,7 @@ impl Display {
         self.surface_initialized = false;
         self.surface_background = 0;
         self.cursor_visible = true;
-        self.gui = GuiSurfaceRegistry::new();
+        self.gui.reset();
         self.gui_background = None;
         self.gui_background_pending = false;
         self.gui_damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];

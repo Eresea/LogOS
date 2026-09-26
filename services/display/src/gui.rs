@@ -49,6 +49,22 @@ impl RenderPlan {
             valid: false,
         }
     }
+
+    /// Clears every field in place rather than building a fresh `Self` by
+    /// value (`MAX_GUI_SURFACES * MAX_GUI_NODES` entries and occluders,
+    /// ADR-0087): `ensure_plan` calls this on every scene change, so it
+    /// must stay cheap on a bounded service stack.
+    fn reset(&mut self) {
+        for entry in self.entries.iter_mut() {
+            *entry = None;
+        }
+        self.entry_count = 0;
+        for occluder in self.occluders.iter_mut() {
+            *occluder = GuiRect::EMPTY;
+        }
+        self.occluder_count = 0;
+        self.valid = false;
+    }
 }
 
 pub trait GuiRenderBackend {
@@ -297,6 +313,34 @@ impl GuiSurfaceRegistry {
         }
     }
 
+    /// Returns this registry to its `new()` state without ever building a
+    /// fresh `Self` by value: at `MAX_GUI_TEXT_GRIDS` full text-grid
+    /// buffers, that whole-struct construction is large enough on its own
+    /// to threaten a bounded service stack (see ADR-0087) when called at
+    /// runtime (unlike a `const` initializer, which the compiler bakes
+    /// into static data at zero runtime cost). Each field is cleared in
+    /// place instead, so no single step needs more stack than that field's
+    /// own assignment.
+    pub fn reset(&mut self) {
+        for slot in self.slots.iter_mut() {
+            *slot = SurfaceSlot::EMPTY;
+        }
+        self.generations = [0; MAX_GUI_SURFACES];
+        self.damage = [GuiRect::EMPTY; MAX_GUI_DAMAGE_RECTS];
+        self.damage_count = 0;
+        self.focused = SurfaceHandle::EMPTY;
+        self.order = 0;
+        self.plan.reset();
+        for store in self.text_grids.iter_mut() {
+            store.surface = SurfaceHandle::EMPTY;
+            store.node_id = 0;
+            store.bounds = GuiRect::EMPTY;
+            store.columns = 0;
+            store.rows = 0;
+            store.cells.fill(Cell::EMPTY);
+        }
+    }
+
     pub fn create(
         &mut self,
         owner: u32,
@@ -535,40 +579,40 @@ impl GuiSurfaceRegistry {
                 let bounds = GuiRect::new(command.x, command.y, command.width, command.height);
                 let columns = command.text_grid_columns();
                 let rows = command.text_grid_rows();
-                if let Some(store) =
+                let store = if let Some(store) =
                     self.text_grids.iter_mut().find(|store| store.surface == surface)
                 {
-                    if store.node_id == node_id {
-                        store.bounds = bounds;
-                        store.columns = columns;
-                        store.rows = rows;
-                    } else {
-                        *store = TextGridStore {
-                            surface,
-                            node_id,
-                            bounds,
-                            columns,
-                            rows,
-                            cells: [Cell::EMPTY;
-                                MAX_GUI_TEXT_GRID_COLUMNS * MAX_GUI_TEXT_GRID_ROWS],
-                        };
-                    }
+                    store
                 } else if let Some(free) = self.text_grids.iter_mut().find(|store| !store.bound()) {
-                    *free = TextGridStore {
-                        surface,
-                        node_id,
-                        bounds,
-                        columns,
-                        rows,
-                        cells: [Cell::EMPTY; MAX_GUI_TEXT_GRID_COLUMNS * MAX_GUI_TEXT_GRID_ROWS],
-                    };
+                    free
+                } else {
+                    return;
+                };
+                let rebind = store.node_id != node_id;
+                store.surface = surface;
+                store.node_id = node_id;
+                store.bounds = bounds;
+                store.columns = columns;
+                store.rows = rows;
+                if rebind {
+                    // Never build a fresh `TextGridStore` (its 128,000-byte
+                    // `cells` array) as a stack value to assign wholesale:
+                    // that construction is large enough on its own to blow
+                    // a bounded service stack. Clear the existing storage
+                    // in place instead.
+                    store.cells.fill(Cell::EMPTY);
                 }
             }
             None => {
                 if let Some(store) =
                     self.text_grids.iter_mut().find(|store| store.surface == surface)
                 {
-                    *store = TextGridStore::EMPTY;
+                    store.surface = SurfaceHandle::EMPTY;
+                    store.node_id = 0;
+                    store.bounds = GuiRect::EMPTY;
+                    store.columns = 0;
+                    store.rows = 0;
+                    store.cells.fill(Cell::EMPTY);
                 }
             }
         }
@@ -812,7 +856,7 @@ impl GuiSurfaceRegistry {
         if self.plan.valid {
             return;
         }
-        self.plan = RenderPlan::new();
+        self.plan.reset();
         let mut order = [usize::MAX; MAX_GUI_SURFACES];
         let mut count = 0;
         while count < MAX_GUI_SURFACES {

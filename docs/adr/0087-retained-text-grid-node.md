@@ -105,8 +105,32 @@ in `.data` rather than zero-filled `.bss`, plus `RenderPlan`'s own growth from
   `UiScenePublisher` by value (roughly in proportion to 48/32 or 48/24).
   STACK-CHECK shows this growth concentrated in Atrium's and LockScreen's own
   `build_*`/`UiComponentTree`/`UiTree` construction functions (tens of KB,
-  matching the raised tree/op capacity), not in Display: no Display function
-  crosses the 2 KiB STACK-CHECK threshold from this change.
+  matching the raised tree/op capacity).
+- `GuiSurfaceRegistry`/`RenderPlan`/`Display` must never be reconstructed by
+  value at runtime once `MAX_GUI_TEXT_GRIDS` stores are part of the struct:
+  `GuiSurfaceRegistry::new()`/`Display::new()` stay `const fn` (the one
+  `static mut DISPLAY: Display = Display::new(1)` use is compile-time
+  const-evaluated into static data — zero runtime cost), but a *runtime*
+  call that rebuilt the whole value from scratch, such as
+  `Display::replace_generation`'s prior `self.gui =
+  GuiSurfaceRegistry::new();` or `ensure_plan`'s prior `self.plan =
+  RenderPlan::new();`, forced the compiler to materialize the entire
+  ~600 KiB struct (`MAX_GUI_SURFACES * MAX_GUI_NODES` render-plan entries
+  plus four 128,000-byte text-grid buffers) as a stack value before the
+  move-assignment — measured at 616,104 bytes for `replace_generation` and
+  43,416 for `ensure_plan` in the release `x86_64-unknown-none` binary,
+  against a 1,048,576-byte (`MAX_SERVICE_STACK_PAGES`, 256 pages) total
+  per-service stack ceiling. `ensure_plan` runs on every scene change, not a
+  rare path. Both now call a `reset()` method that clears each field in
+  place (array elements and cells via `.fill()`/loops, never a fresh
+  struct literal mixing runtime fields with a large const array), dropping
+  `replace_generation` to 4,360 bytes and `ensure_plan` to 4,040 bytes —
+  both now below their own *pre-ADR-0087* baselines (52,520 and 20,480).
+  No Display function crosses the 2 KiB STACK-CHECK threshold from this ADR
+  once `reset()` is used; `GuiSurfaceRegistry::create` (unrelated to text
+  grids) grows from 7,336 to 14,632 bytes, proportional to `MAX_GUI_NODES`
+  doubling the per-surface node arrays it initializes, and stays well under
+  the per-service ceiling.
 - No new runtime, allocator, or IPC transport is introduced: `GuiTextGridRow`
   reuses the existing "large compatibility struct passed directly, not over
   the small IPC ring" shape already established by `RenderMessage`.
