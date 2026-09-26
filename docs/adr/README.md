@@ -86,4 +86,5 @@
 | [0083](0083-bounded-dynamic-tiling-workspace.md) | Accepted | Atrium-owned fixed-capacity binary split tree for dynamic vertical and horizontal tiled workspace layout |
 | [0084](0084-bounded-material-symbols.md) | Accepted | Bounded native Material Symbols through one retained UI button paint fragment |
 | [0085](0085-live-input-settings.md) | Accepted | Fixed live Atrium→Input keyboard-layout and mouse-acceleration settings control |
+| [0086](0086-wall-clock-time-source.md) | Accepted | Core-owned RTC-anchored wall clock exposed to services through one bounded read-only syscall |
 | [0087](0087-retained-text-grid-node.md) | Accepted | Retained bounded TextGrid scene node with dirty-row cell delivery, and a 24 -> 48 `MAX_GUI_NODES` budget |
