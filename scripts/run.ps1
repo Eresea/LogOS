@@ -483,7 +483,7 @@ function Framebuffer-SettingsCategorySelected {
     # Sample each row's left padding, clear of its icon and label: the
     # selected row carries the focus fill (0x4b82f2), idle rows show the
     # navigation pane (0x182535) through their transparent fill.
-    for ($row = 0; $row -lt 3; $row++) {
+    for ($row = 0; $row -lt 4; $row++) {
         $x = [int]$groups[1].Value + 36
         $y = [int]$groups[2].Value + 164 + 48 * $row + 22
         $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
@@ -984,6 +984,12 @@ try {
             $settingsAppearanceFrame = Join-Path $repoRoot "target\qemu-settings-appearance-$PID.ppm"
             if (-not (Wait-QmpSettingsCategory $qmp $settingsAppearanceFrame 2 $TimeoutSeconds)) {
                 throw 'Down did not move the Settings selection to the Appearance category.'
+            }
+            # #80: the About page (version and service list, read-only).
+            Send-QmpKey $qmp 'down'
+            $settingsAboutFrame = Join-Path $repoRoot "target\qemu-settings-about-$PID.ppm"
+            if (-not (Wait-QmpSettingsCategory $qmp $settingsAboutFrame 3 $TimeoutSeconds)) {
+                throw 'Down did not move the Settings selection to the About category.'
             }
             Send-QmpKey $qmp 'esc'
             Start-Sleep -Milliseconds 300
