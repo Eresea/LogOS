@@ -1,8 +1,10 @@
 #![no_std]
 
 mod home_scene;
+mod settings_scene;
 
 pub use home_scene::build_home_scene;
+pub use settings_scene::build_settings_scene;
 
 #[cfg(test)]
 extern crate std;
@@ -174,33 +176,54 @@ pub const SIDEBAR_MENU_OPTION_HEIGHT: u32 = 40;
 pub const SIDEBAR_MENU_MAX_HEIGHT: u32 = 120;
 pub const SIDEBAR_ACCOUNT_MENU_LABELS: [&[u8]; 1] = [b"Disconnect"];
 pub const SIDEBAR_MENU_LABELS: [&[u8]; 3] = [b"Shutdown", b"Restart", b"Settings"];
-pub const SETTINGS_SELECT_BOUNDS: GuiRect = GuiRect::new(280, 180, 360, 48);
+pub const SETTINGS_SELECT_BOUNDS: GuiRect = GuiRect::new(296, 172, 360, 48);
 pub const SETTINGS_SELECT_OPTION_HEIGHT: u32 = 48;
 pub const SETTINGS_SELECT_MAX_HEIGHT: u32 = 192;
-pub const SETTINGS_SEARCH_BOUNDS: GuiRect = GuiRect::new(32, 112, 196, 44);
-pub const SETTINGS_CARD_BOUNDS: GuiRect = GuiRect::new(32, 168, 196, 88);
-pub const SETTINGS_CARD_GAP: i32 = 12;
-pub const SETTINGS_BACK_BOUNDS: GuiRect = GuiRect::new(280, 76, 160, 56);
+/// Settings layout, relative to the Settings surface. The category list sits
+/// in the left navigation pane; the selected page fills the pane on the right.
+pub const SETTINGS_NAV_LEFT: i32 = 20;
+pub const SETTINGS_NAV_WIDTH: u32 = 232;
+pub const SETTINGS_PANE_TOP: i32 = 52;
+pub const SETTINGS_PAGE_LEFT: i32 = 272;
+pub const SETTINGS_SEARCH_BOUNDS: GuiRect = GuiRect::new(32, 108, 208, 44);
+pub const SETTINGS_CATEGORY_BOUNDS: GuiRect = GuiRect::new(32, 164, 208, 44);
+pub const SETTINGS_CATEGORY_GAP: i32 = 4;
 
+/// One Settings category. Adding a page means adding a variant here, its
+/// entry in [`SettingsPage::ALL`], and its page content in `settings_scene`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsPage {
-    Overview,
     Keyboard,
     Mouse,
 }
 
-pub const SETTINGS_CARD_PAGES: [SettingsPage; 2] = [SettingsPage::Keyboard, SettingsPage::Mouse];
-pub const SETTINGS_CARD_LABELS: [&[u8]; 2] = [b"Keyboard", b"Mouse"];
-pub const SETTINGS_CARD_DESCRIPTIONS: [&[u8]; 2] = [b"Keyboard layout", b"Pointer behavior"];
+impl SettingsPage {
+    pub const ALL: [SettingsPage; 2] = [SettingsPage::Keyboard, SettingsPage::Mouse];
 
-pub const fn settings_card_bounds(index: usize) -> GuiRect {
+    pub const fn label(self) -> &'static [u8] {
+        match self {
+            SettingsPage::Keyboard => b"Keyboard",
+            SettingsPage::Mouse => b"Mouse",
+        }
+    }
+
+    pub const fn icon(self) -> logos_ui::UiIcon {
+        match self {
+            SettingsPage::Keyboard => logos_ui::UiIcon::Keyboard,
+            SettingsPage::Mouse => logos_ui::UiIcon::Mouse,
+        }
+    }
+}
+
+/// Bounds of the `index`th visible category row.
+pub const fn settings_category_bounds(index: usize) -> GuiRect {
     GuiRect::new(
-        SETTINGS_CARD_BOUNDS.x,
-        SETTINGS_CARD_BOUNDS.y.saturating_add(
-            (SETTINGS_CARD_BOUNDS.height as i32 + SETTINGS_CARD_GAP) * index as i32,
+        SETTINGS_CATEGORY_BOUNDS.x,
+        SETTINGS_CATEGORY_BOUNDS.y.saturating_add(
+            (SETTINGS_CATEGORY_BOUNDS.height as i32 + SETTINGS_CATEGORY_GAP) * index as i32,
         ),
-        SETTINGS_CARD_BOUNDS.width,
-        SETTINGS_CARD_BOUNDS.height,
+        SETTINGS_CATEGORY_BOUNDS.width,
+        SETTINGS_CATEGORY_BOUNDS.height,
     )
 }
 
@@ -376,7 +399,7 @@ pub struct Atrium {
     settings_page: SettingsPage,
     settings_search: logos_ui::UiInput,
     settings_search_active: bool,
-    settings_card_hover: u8,
+    settings_category_hover: Option<SettingsPage>,
     keyboard_layout: KeyboardLayout,
     keyboard_select: logos_ui::UiSelect,
     mouse_acceleration: MouseAcceleration,
@@ -406,10 +429,10 @@ impl Atrium {
             next_focus_order: 1,
             home_surface: SurfaceHandle::EMPTY,
             lock_surface: SurfaceHandle::EMPTY,
-            settings_page: SettingsPage::Overview,
+            settings_page: SettingsPage::Keyboard,
             settings_search: logos_ui::UiInput::new(),
             settings_search_active: false,
-            settings_card_hover: 0,
+            settings_category_hover: None,
             keyboard_layout: KeyboardLayout::Azerty,
             keyboard_select: logos_ui::UiSelect::with_selection(2, Some(0)),
             mouse_acceleration: MouseAcceleration::Medium,
@@ -543,16 +566,12 @@ impl Atrium {
         self.settings_search_active
     }
 
-    pub const fn settings_card_hover(&self) -> u8 {
-        self.settings_card_hover
+    pub const fn settings_category_hover(&self) -> Option<SettingsPage> {
+        self.settings_category_hover
     }
 
-    pub fn settings_card_visible(&self, page: SettingsPage) -> bool {
-        let Some(index) = SETTINGS_CARD_PAGES.iter().position(|candidate| *candidate == page)
-        else {
-            return false;
-        };
-        query_matches(SETTINGS_CARD_LABELS[index], self.settings_search.value().as_bytes())
+    pub fn settings_category_visible(&self, page: SettingsPage) -> bool {
+        query_matches(page.label(), self.settings_search.value().as_bytes())
     }
 
     pub const fn keyboard_layout(&self) -> KeyboardLayout {
@@ -583,18 +602,77 @@ impl Atrium {
             && output.pop().is_some()
     }
 
-    fn settings_card_page_at(&self, x: i32, y: i32) -> Option<SettingsPage> {
+    fn settings_category_at(&self, x: i32, y: i32) -> Option<SettingsPage> {
         let mut visible_index = 0;
-        for page in SETTINGS_CARD_PAGES {
-            if !self.settings_card_visible(page) {
+        for page in SettingsPage::ALL {
+            if !self.settings_category_visible(page) {
                 continue;
             }
-            if settings_card_bounds(visible_index).contains(x, y) {
+            if settings_category_bounds(visible_index).contains(x, y) {
                 return Some(page);
             }
             visible_index += 1;
         }
         None
+    }
+
+    fn select_settings_page(&mut self, page: SettingsPage) -> bool {
+        self.keyboard_select.close();
+        self.mouse_select.close();
+        let changed = self.settings_page != page;
+        self.settings_page = page;
+        changed
+    }
+
+    /// Moves the selection to the previous or next visible category.
+    fn step_settings_page(&mut self, forward: bool) -> bool {
+        let current = SettingsPage::ALL.iter().position(|page| *page == self.settings_page);
+        let Some(current) = current else { return false };
+        let mut index = current;
+        loop {
+            index = if forward {
+                index + 1
+            } else {
+                let Some(previous) = index.checked_sub(1) else { return false };
+                previous
+            };
+            let Some(page) = SettingsPage::ALL.get(index).copied() else { return false };
+            if self.settings_category_visible(page) {
+                return self.select_settings_page(page);
+            }
+        }
+    }
+
+    fn settings_select(&mut self) -> &mut logos_ui::UiSelect {
+        match self.settings_page {
+            SettingsPage::Keyboard => &mut self.keyboard_select,
+            SettingsPage::Mouse => &mut self.mouse_select,
+        }
+    }
+
+    /// Applies option `index` of the current page's select to its setting.
+    fn apply_settings_option(&mut self, index: u8) {
+        match self.settings_page {
+            SettingsPage::Keyboard => {
+                self.keyboard_layout =
+                    if index == 0 { KeyboardLayout::Azerty } else { KeyboardLayout::Qwerty };
+            }
+            SettingsPage::Mouse => {
+                self.mouse_acceleration = match index {
+                    0 => MouseAcceleration::Off,
+                    1 => MouseAcceleration::Low,
+                    2 => MouseAcceleration::Medium,
+                    _ => MouseAcceleration::High,
+                };
+            }
+        }
+    }
+
+    pub fn settings_select_popover(&self, viewport: GuiRect) -> logos_ui::UiPopoverLayout {
+        match self.settings_page {
+            SettingsPage::Keyboard => self.keyboard_select_popover(viewport),
+            SettingsPage::Mouse => self.mouse_select_popover(viewport),
+        }
     }
 
     fn settings_search_input(&mut self, input: &InputMessage) -> bool {
@@ -813,115 +891,66 @@ impl Atrium {
         if self.settings_search_input(input) {
             return true;
         }
+        if input.kind == MessageKind::Key && input.state != KeyState::Released {
+            let code = KeyCode::from_raw(input.code);
+            if self.settings_select().is_open() {
+                return code == KeyCode::ESCAPE && self.settings_select().close();
+            }
+            // Modified arrows stay window-management shortcuts.
+            if input.modifiers & (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_META) != 0 {
+                return false;
+            }
+            return match code {
+                KeyCode::UP => self.step_settings_page(false),
+                KeyCode::DOWN => self.step_settings_page(true),
+                _ => false,
+            };
+        }
         let Some(pointer) = input.pointer_event() else { return false };
         let x = i32::from(pointer.x);
         let y = i32::from(pointer.y);
         if pointer.state == PointerState::Move {
-            let hover = self
-                .settings_card_page_at(x, y)
-                .map_or(0, |page| if page == SettingsPage::Keyboard { 1 } else { 2 });
-            let card_changed = self.settings_card_hover != hover;
-            self.settings_card_hover = hover;
-            return match self.settings_page {
-                SettingsPage::Overview => card_changed,
-                SettingsPage::Keyboard => {
-                    let select_changed = if self.keyboard_select_open() {
-                        let layout = self.keyboard_select_popover(FULLSCREEN_SURFACE_BOUNDS);
-                        self.keyboard_select.set_option_hovered(layout.option_at(x, y))
-                    } else {
-                        self.keyboard_select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
-                    };
-                    card_changed || select_changed
-                }
-                SettingsPage::Mouse => {
-                    let select_changed = if self.mouse_select_open() {
-                        let layout = self.mouse_select_popover(FULLSCREEN_SURFACE_BOUNDS);
-                        self.mouse_select.set_option_hovered(layout.option_at(x, y))
-                    } else {
-                        self.mouse_select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
-                    };
-                    card_changed || select_changed
-                }
+            let hover = self.settings_category_at(x, y);
+            let category_changed = self.settings_category_hover != hover;
+            self.settings_category_hover = hover;
+            let select_changed = if self.settings_select().is_open() {
+                let layout = self.settings_select_popover(FULLSCREEN_SURFACE_BOUNDS);
+                self.settings_select().set_option_hovered(layout.option_at(x, y))
+            } else {
+                self.settings_select().set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
             };
+            return category_changed || select_changed;
         }
         if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
             return false;
+        }
+        if self.settings_select().is_open() {
+            let layout = self.settings_select_popover(FULLSCREEN_SURFACE_BOUNDS);
+            if let Some(index) = layout.option_at(x, y) {
+                if self.settings_select().select(index) {
+                    self.apply_settings_option(index);
+                }
+                return true;
+            }
+            // Any other click dismisses the list first; it is not also
+            // treated as a click on what lies underneath.
+            self.settings_select().close();
+            return true;
         }
         if SETTINGS_SEARCH_BOUNDS.contains(x, y) {
             self.settings_search_active = true;
             let _ = self.settings_search_event(logos_ui::UiInputEvent::Focus);
             return true;
         }
-        if let Some(page) = self.settings_card_page_at(x, y) {
-            self.settings_page = page;
+        if let Some(page) = self.settings_category_at(x, y) {
             self.settings_search_active = false;
-            self.settings_card_hover = if page == SettingsPage::Keyboard { 1 } else { 2 };
-            self.keyboard_select.close();
-            self.mouse_select.close();
+            self.select_settings_page(page);
             return true;
         }
-        match self.settings_page {
-            SettingsPage::Overview => false,
-            SettingsPage::Keyboard if SETTINGS_BACK_BOUNDS.contains(x, y) => {
-                self.settings_page = SettingsPage::Overview;
-                self.keyboard_select.close();
-                true
-            }
-            SettingsPage::Mouse if SETTINGS_BACK_BOUNDS.contains(x, y) => {
-                self.settings_page = SettingsPage::Overview;
-                self.mouse_select.close();
-                true
-            }
-            SettingsPage::Keyboard => {
-                if self.keyboard_select.is_open() {
-                    let layout = self.keyboard_select_popover(FULLSCREEN_SURFACE_BOUNDS);
-                    if let Some(index) = layout.option_at(x, y) {
-                        if self.keyboard_select.select(index) {
-                            self.keyboard_layout = if index == 0 {
-                                KeyboardLayout::Azerty
-                            } else {
-                                KeyboardLayout::Qwerty
-                            };
-                        }
-                        return true;
-                    }
-                    if SETTINGS_SELECT_BOUNDS.contains(x, y) {
-                        self.keyboard_select.close();
-                        return true;
-                    }
-                    return self.keyboard_select.close();
-                }
-                if SETTINGS_SELECT_BOUNDS.contains(x, y) {
-                    return self.keyboard_select.open();
-                }
-                false
-            }
-            SettingsPage::Mouse => {
-                if self.mouse_select.is_open() {
-                    let layout = self.mouse_select_popover(FULLSCREEN_SURFACE_BOUNDS);
-                    if let Some(index) = layout.option_at(x, y) {
-                        if self.mouse_select.select(index) {
-                            self.mouse_acceleration = match index {
-                                0 => MouseAcceleration::Off,
-                                1 => MouseAcceleration::Low,
-                                2 => MouseAcceleration::Medium,
-                                _ => MouseAcceleration::High,
-                            };
-                        }
-                        return true;
-                    }
-                    if SETTINGS_SELECT_BOUNDS.contains(x, y) {
-                        self.mouse_select.close();
-                        return true;
-                    }
-                    return self.mouse_select.close();
-                }
-                if SETTINGS_SELECT_BOUNDS.contains(x, y) {
-                    return self.mouse_select.open();
-                }
-                false
-            }
+        if SETTINGS_SELECT_BOUNDS.contains(x, y) {
+            return self.settings_select().open();
         }
+        false
     }
 
     pub fn focused_surface(&self) -> Option<Surface> {
@@ -1315,7 +1344,10 @@ impl Atrium {
                 return action;
             }
         }
-        if self.home_grid_showing() && input.modifiers == 0 {
+        // Lock keys (Num Lock is on by default) must not disable the grid.
+        if self.home_grid_showing()
+            && input.modifiers & (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_META) == 0
+        {
             let last = HOME_GRID_APPS.len() as u8 - 1;
             match code {
                 KeyCode::LEFT if self.home_grid_focus > 0 => {
@@ -2665,9 +2697,9 @@ mod tests {
         atrium.authenticate();
         assert!(Atrium::sidebar_contains(40, 40));
         assert!(Atrium::sidebar_settings_contains(40, 760));
-        assert_eq!(atrium.settings_page(), SettingsPage::Overview);
+        assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
 
-        let keyboard_card = settings_card_bounds(0);
+        let keyboard_card = settings_category_bounds(0);
         let open_keyboard = InputMessage::pointer(
             (keyboard_card.x + 10) as i16,
             (keyboard_card.y + 10) as i16,
@@ -2694,7 +2726,7 @@ mod tests {
         atrium.authenticate();
         assert_eq!(atrium.mouse_acceleration(), MouseAcceleration::Medium);
 
-        let mouse_card = settings_card_bounds(1);
+        let mouse_card = settings_category_bounds(1);
         assert!(
             atrium.settings_input(
                 &InputMessage::pointer(
@@ -2726,8 +2758,8 @@ mod tests {
     fn settings_tabs_remain_available_on_child_pages() {
         let mut atrium = Atrium::new();
         atrium.authenticate();
-        let keyboard = settings_card_bounds(0);
-        let mouse = settings_card_bounds(1);
+        let keyboard = settings_category_bounds(0);
+        let mouse = settings_category_bounds(1);
         assert!(
             atrium.settings_input(
                 &InputMessage::pointer(
@@ -2771,9 +2803,9 @@ mod tests {
             )
         );
         assert!(atrium.settings_input(&InputMessage::text(b"mouse").unwrap()));
-        assert!(!atrium.settings_card_visible(SettingsPage::Keyboard));
-        assert!(atrium.settings_card_visible(SettingsPage::Mouse));
-        let filtered_mouse_card = settings_card_bounds(0);
+        assert!(!atrium.settings_category_visible(SettingsPage::Keyboard));
+        assert!(atrium.settings_category_visible(SettingsPage::Mouse));
+        let filtered_mouse_card = settings_category_bounds(0);
         assert!(
             atrium.settings_input(
                 &InputMessage::pointer(
@@ -2786,6 +2818,94 @@ mod tests {
             )
         );
         assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+    }
+
+    #[test]
+    fn home_grid_keys_work_with_lock_modifiers_on() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let locks = logos_abi::MOD_NUM_LOCK | logos_abi::MOD_CAPS_LOCK;
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::RIGHT, KeyState::Pressed, locks)),
+            AtriumAction::LauncherChanged
+        );
+        assert_eq!(atrium.home_grid_focus(), 1);
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::ENTER, KeyState::Pressed, locks)),
+            AtriumAction::Launch(HOME_GRID_APPS[1])
+        );
+    }
+
+    #[test]
+    fn settings_categories_navigate_by_keyboard_and_keep_their_selection() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let key = |code| InputMessage::key(code, KeyState::Pressed, 0);
+        assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
+        assert!(!atrium.settings_input(&key(KeyCode::UP)), "no category above the first");
+        assert!(atrium.settings_input(&key(KeyCode::DOWN)));
+        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+        assert!(!atrium.settings_input(&key(KeyCode::DOWN)), "no category below the last");
+        assert!(
+            !atrium.settings_input(&InputMessage::key(KeyCode::UP, KeyState::Pressed, MOD_CTRL)),
+            "Ctrl+Up stays a window shortcut"
+        );
+        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+
+        // Unrelated pointer traffic and page interactions keep the selection.
+        let _ =
+            atrium.settings_input(&InputMessage::pointer(900, 600, 0, PointerState::Move).unwrap());
+        let _ =
+            atrium.settings_input(&InputMessage::pointer(900, 600, 1, PointerState::Down).unwrap());
+        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+
+        // An open select takes the keys: arrows do not switch pages, Escape
+        // closes the list first.
+        assert!(
+            atrium.settings_input(&InputMessage::pointer(300, 200, 1, PointerState::Down).unwrap())
+        );
+        assert!(atrium.mouse_select_open());
+        assert!(!atrium.settings_input(&key(KeyCode::UP)));
+        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+        assert!(atrium.settings_input(&key(KeyCode::ESCAPE)));
+        assert!(!atrium.mouse_select_open());
+        assert!(atrium.settings_input(&key(KeyCode::UP)));
+        assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
+
+        // Keyboard steps skip categories the search filter hides.
+        let search = SETTINGS_SEARCH_BOUNDS;
+        let focus = InputMessage::pointer(
+            (search.x + 4) as i16,
+            (search.y + 4) as i16,
+            1,
+            PointerState::Down,
+        )
+        .unwrap();
+        assert!(atrium.settings_input(&focus));
+        assert!(atrium.settings_input(&InputMessage::text(b"key").unwrap()));
+        assert!(atrium.settings_input(&key(KeyCode::ESCAPE)));
+        assert!(!atrium.settings_input(&key(KeyCode::DOWN)));
+        assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
+    }
+
+    #[test]
+    fn settings_category_hover_tracks_the_pointer() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let mouse = settings_category_bounds(1);
+        let over = InputMessage::pointer(
+            (mouse.x + 4) as i16,
+            (mouse.y + 4) as i16,
+            0,
+            PointerState::Move,
+        )
+        .unwrap();
+        assert!(atrium.settings_input(&over));
+        assert_eq!(atrium.settings_category_hover(), Some(SettingsPage::Mouse));
+        assert!(
+            atrium.settings_input(&InputMessage::pointer(900, 600, 0, PointerState::Move).unwrap())
+        );
+        assert_eq!(atrium.settings_category_hover(), None);
     }
 
     #[test]

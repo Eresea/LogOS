@@ -471,6 +471,61 @@ function Wait-QmpSystemFramebuffer {
     return $false
 }
 
+function Framebuffer-SettingsCategorySelected {
+    param([string]$Path, [int]$Selected)
+    if (-not (Test-Path $Path)) { return $false }
+    $match = [regex]::Matches((Get-Content $log -Raw), 'app=Settings scene published surface=\d+/\d+ bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
+    if ($match.Count -eq 0) { return $false }
+    $groups = $match[$match.Count - 1].Groups
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PpmLayout $bytes
+    # Category rows start at surface (32, 164) and step 48 px (44 + 4 gap).
+    # Sample each row's left padding, clear of its icon and label: the
+    # selected row carries the focus fill (0x4b82f2), idle rows show the
+    # navigation pane (0x182535) through their transparent fill.
+    for ($row = 0; $row -lt 2; $row++) {
+        $x = [int]$groups[1].Value + 36
+        $y = [int]$groups[2].Value + 164 + 48 * $row + 22
+        $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
+        $accent = $bytes[$index] -eq 75 -and $bytes[$index + 1] -eq 130 -and $bytes[$index + 2] -eq 242
+        $pane = $bytes[$index] -eq 24 -and $bytes[$index + 1] -eq 37 -and $bytes[$index + 2] -eq 53
+        if (($row -eq $Selected -and -not $accent) -or ($row -ne $Selected -and -not $pane)) {
+            return $false
+        }
+    }
+    # The selected row's label must stay painted above its fill.
+    $top = [int]$groups[2].Value + 164 + 48 * $Selected
+    for ($y = $top + 8; $y -lt $top + 36; $y++) {
+        for ($x = [int]$groups[1].Value + 80; $x -lt [int]$groups[1].Value + 200; $x++) {
+            $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
+            if ($bytes[$index] -gt 200 -and $bytes[$index + 1] -gt 200 -and $bytes[$index + 2] -gt 200) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Wait-QmpSettingsCategory {
+    param([hashtable]$Qmp, [string]$Path, [int]$Selected, [int]$TimeoutSeconds)
+    # Require the matching frame twice in a row so the whole page update,
+    # not only the category row, has landed before the screendump is kept.
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $previousHash = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+        if (Framebuffer-SettingsCategorySelected $Path $Selected) {
+            $hash = (Get-FileHash $Path).Hash
+            if ($hash -eq $previousHash) { return $true }
+            $previousHash = $hash
+        } else {
+            $previousHash = $null
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
 function Framebuffer-HasTerminalGlyphs {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
@@ -902,6 +957,35 @@ try {
             throw 'Post-login home surface did not publish its popover pixels.'
         }
         if ($SystemProof) {
+            # #78: Settings opens on its category list. Settings is the last
+            # Home tile (index 4); Down moves the selection to Mouse. Escape
+            # closes Settings and Left x4 returns grid focus to Calculator so
+            # the System step below starts from its usual tile.
+            $settingsSceneMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium app=Settings scene published'
+            1..4 | ForEach-Object {
+                Send-QmpKey $qmp 'right'
+                Start-Sleep -Milliseconds 100
+            }
+            Send-QmpKey $qmp 'ret'
+            if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium app=Settings scene published' $settingsSceneMarker $TimeoutSeconds)) {
+                throw 'Settings did not publish its scene after activation.'
+            }
+            $settingsFrame = Join-Path $repoRoot "target\qemu-settings-$PID.ppm"
+            if (-not (Wait-QmpSettingsCategory $qmp $settingsFrame 0 $TimeoutSeconds)) {
+                throw 'Settings did not open with the Keyboard category selected.'
+            }
+            Send-QmpKey $qmp 'down'
+            $settingsMouseFrame = Join-Path $repoRoot "target\qemu-settings-mouse-$PID.ppm"
+            if (-not (Wait-QmpSettingsCategory $qmp $settingsMouseFrame 1 $TimeoutSeconds)) {
+                throw 'Down did not move the Settings selection to the Mouse category.'
+            }
+            Send-QmpKey $qmp 'esc'
+            Start-Sleep -Milliseconds 300
+            1..4 | ForEach-Object {
+                Send-QmpKey $qmp 'left'
+                Start-Sleep -Milliseconds 100
+            }
+
             $systemSceneMarker = Get-ProofMarkerCount 'LogOS vNext: System scene built'
             # H1: Home's default view is the header + icon tile grid (arrow
             # keys move focus across tiles, Enter opens); System sits at tile
