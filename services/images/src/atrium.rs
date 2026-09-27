@@ -8,8 +8,8 @@ use logos_abi::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumSurfaceInput, AtriumSurfaceRequest,
     AtriumSurfaceResponse, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSceneOp,
     GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow,
-    InputMessage, IpcStatus, KeyCode, KeyState, MessageKind, PointerState, RenderMessage,
-    SurfaceHandle,
+    InputMessage, IpcStatus, KeyCode, KeyState, ManagerOperation, ManagerRequest, ManagerResponse,
+    ManagerStatus, MessageKind, PointerState, RenderMessage, ServiceManagerRecord, SurfaceHandle,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -564,6 +564,35 @@ fn unbind_app_scene_publisher(surface: SurfaceHandle) {
     }
 }
 
+/// Snapshots the service list for Settings' About page via the same
+/// service-manager query the System surface already uses (`system.rs`'s
+/// `refresh_status`); no new ABI, no duplicated syscall path.
+fn about_services_snapshot() -> [ServiceManagerRecord; logos_atrium::MAX_ABOUT_SERVICES] {
+    let mut records = [ServiceManagerRecord::EMPTY; logos_atrium::MAX_ABOUT_SERVICES];
+    let mut count = 0usize;
+    let mut cursor = 0u64;
+    let mut request_id = 1u32;
+    while count < records.len() {
+        let request =
+            ManagerRequest { cursor, ..ManagerRequest::new(ManagerOperation::List, request_id) };
+        let mut response =
+            ManagerResponse::new(ManagerOperation::List, ManagerStatus::Malformed, request_id);
+        if common::manager_call(&request, &mut response) != IpcStatus::Ok
+            || response.status != ManagerStatus::Ok
+        {
+            break;
+        }
+        records[count] = response.record;
+        count += 1;
+        request_id = request_id.wrapping_add(1).max(1);
+        if response.cursor == u64::MAX || response.cursor <= cursor {
+            break;
+        }
+        cursor = response.cursor;
+    }
+    records
+}
+
 fn render_app_scene(
     display: logos_abi::CapabilityHandle,
     surface: logos_atrium::Surface,
@@ -586,7 +615,13 @@ fn render_app_scene(
     };
     let tree = if surface.app == logos_atrium::AppId::Settings {
         let tree = unsafe { &mut *core::ptr::addr_of_mut!(SETTINGS_TREE) };
-        if !logos_atrium::build_settings_scene(tree, surface.bounds, atrium) {
+        // Only query the manager while About is open; other pages never show it.
+        let about_services = if atrium.settings_page() == logos_atrium::SettingsPage::About {
+            about_services_snapshot()
+        } else {
+            [ServiceManagerRecord::EMPTY; logos_atrium::MAX_ABOUT_SERVICES]
+        };
+        if !logos_atrium::build_settings_scene(tree, surface.bounds, atrium, &about_services) {
             return false;
         }
         tree

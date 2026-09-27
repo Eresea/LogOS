@@ -223,17 +223,23 @@ pub enum SettingsPage {
     Keyboard,
     Mouse,
     Appearance,
+    About,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 3] =
-        [SettingsPage::Keyboard, SettingsPage::Mouse, SettingsPage::Appearance];
+    pub const ALL: [SettingsPage; 4] = [
+        SettingsPage::Keyboard,
+        SettingsPage::Mouse,
+        SettingsPage::Appearance,
+        SettingsPage::About,
+    ];
 
     pub const fn label(self) -> &'static [u8] {
         match self {
             SettingsPage::Keyboard => b"Keyboard",
             SettingsPage::Mouse => b"Mouse",
             SettingsPage::Appearance => b"Appearance",
+            SettingsPage::About => b"About",
         }
     }
 
@@ -242,9 +248,16 @@ impl SettingsPage {
             SettingsPage::Keyboard => logos_ui::UiIcon::Keyboard,
             SettingsPage::Mouse => logos_ui::UiIcon::Mouse,
             SettingsPage::Appearance => logos_ui::UiIcon::Palette,
+            SettingsPage::About => logos_ui::UiIcon::Info,
         }
     }
 }
+
+/// Rows the About page's service list can hold in one frame. Fixed at the
+/// select popover's option capacity (`MAX_OPTIONS` in `settings_scene.rs`):
+/// About reuses those otherwise-idle node slots to stay inside
+/// `MAX_GUI_NODES` (see that module for the mapping).
+pub const MAX_ABOUT_SERVICES: usize = 4;
 
 /// Accent colour choices; each indexes `logos_ui_graphics::UI_ACCENTS`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -753,7 +766,7 @@ impl Atrium {
         match self.settings_page {
             SettingsPage::Keyboard => Some(&mut self.keyboard_select),
             SettingsPage::Mouse => Some(&mut self.mouse_select),
-            SettingsPage::Appearance => None,
+            SettingsPage::Appearance | SettingsPage::About => None,
         }
     }
 
@@ -795,7 +808,7 @@ impl Atrium {
                     _ => MouseAcceleration::High,
                 };
             }
-            SettingsPage::Appearance => {}
+            SettingsPage::Appearance | SettingsPage::About => {}
         }
     }
 
@@ -803,7 +816,7 @@ impl Atrium {
         match self.settings_page {
             SettingsPage::Keyboard => self.keyboard_select_popover(viewport),
             SettingsPage::Mouse => self.mouse_select_popover(viewport),
-            SettingsPage::Appearance => logos_ui::UiPopoverLayout::EMPTY,
+            SettingsPage::Appearance | SettingsPage::About => logos_ui::UiPopoverLayout::EMPTY,
         }
     }
 
@@ -2986,7 +2999,11 @@ mod tests {
         assert!(atrium.settings_input(&key(KeyCode::DOWN)));
         assert!(atrium.settings_input(&key(KeyCode::DOWN)));
         assert_eq!(atrium.settings_page(), SettingsPage::Appearance);
+        assert!(atrium.settings_input(&key(KeyCode::DOWN)));
+        assert_eq!(atrium.settings_page(), SettingsPage::About);
         assert!(!atrium.settings_input(&key(KeyCode::DOWN)), "no category below the last");
+        assert!(atrium.settings_input(&key(KeyCode::UP)));
+        assert_eq!(atrium.settings_page(), SettingsPage::Appearance);
         assert!(atrium.settings_input(&key(KeyCode::UP)));
         assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
         assert!(

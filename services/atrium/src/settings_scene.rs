@@ -1,15 +1,19 @@
-use logos_abi::GuiRect;
+use logos_abi::{GuiRect, ManagerState, ServiceManagerRecord};
 use logos_ui::{UiBlueprint, UiComponentTree, UiIcon, UiNodeKind, UiStyle, UiStyleList, UiText};
 
 use crate::{
-    Accent, Atrium, KeyboardLayout, MouseAcceleration, SETTINGS_NAV_LEFT, SETTINGS_NAV_WIDTH,
-    SETTINGS_PAGE_LEFT, SETTINGS_PANE_TOP, SETTINGS_SEARCH_BOUNDS, SETTINGS_SELECT_BOUNDS,
-    SETTINGS_TOGGLE_LABELS, STATUS_BAR_BOUNDS, SettingsPage, settings_category_bounds,
-    settings_swatch_bounds, settings_toggle_row_bounds, surface_close_bounds,
+    Accent, Atrium, KeyboardLayout, MAX_ABOUT_SERVICES, MouseAcceleration, SETTINGS_NAV_LEFT,
+    SETTINGS_NAV_WIDTH, SETTINGS_PAGE_LEFT, SETTINGS_PANE_TOP, SETTINGS_SEARCH_BOUNDS,
+    SETTINGS_SELECT_BOUNDS, SETTINGS_TOGGLE_LABELS, STATUS_BAR_BOUNDS, SettingsPage,
+    settings_category_bounds, settings_swatch_bounds, settings_toggle_row_bounds,
+    surface_close_bounds,
 };
 
 const PAGES: usize = SettingsPage::ALL.len();
 const MAX_OPTIONS: usize = 4;
+// About reuses the select popover's option slots for its service rows (see
+// `build_about`), so it cannot show more rows than that popover has slots.
+const _: () = assert!(MAX_ABOUT_SERVICES <= MAX_OPTIONS);
 
 // Node indices follow blueprint push order in `mount`.
 const ROOT: usize = 0;
@@ -75,6 +79,12 @@ fn page_content(page: SettingsPage, atrium: &Atrium) -> PageContent {
         },
         SettingsPage::Appearance => PageContent {
             field: b"Accent colour",
+            select: false,
+            value: b"",
+            options: [b""; MAX_OPTIONS],
+        },
+        SettingsPage::About => PageContent {
+            field: b"Version",
             select: false,
             value: b"",
             options: [b""; MAX_OPTIONS],
@@ -194,8 +204,16 @@ fn offset(bounds: GuiRect, rect: GuiRect) -> GuiRect {
 }
 
 /// Updates the retained Settings tree for a surface at `bounds`: a category
-/// list on the left and the selected page on the right.
-pub fn build_settings_scene(tree: &mut UiComponentTree, bounds: GuiRect, atrium: &Atrium) -> bool {
+/// list on the left and the selected page on the right. `about_services` is
+/// a snapshot of the service-manager query (see
+/// `services/images/src/system.rs`, which the caller reuses rather than
+/// duplicating), shown only while the About page is open.
+pub fn build_settings_scene(
+    tree: &mut UiComponentTree,
+    bounds: GuiRect,
+    atrium: &Atrium,
+    about_services: &[ServiceManagerRecord],
+) -> bool {
     if tree.tree().len() != NODE_COUNT && !mount(tree) {
         return false;
     }
@@ -335,7 +353,7 @@ pub fn build_settings_scene(tree: &mut UiComponentTree, bounds: GuiRect, atrium:
             atrium.mouse_select_hovered(),
             atrium.mouse_select_hovered_option(),
         ),
-        SettingsPage::Appearance => (false, false, None),
+        SettingsPage::Appearance | SettingsPage::About => (false, false, None),
     };
     if !build_appearance(tree, bounds, atrium, current == SettingsPage::Appearance) {
         return false;
@@ -388,6 +406,79 @@ pub fn build_settings_scene(tree: &mut UiComponentTree, bounds: GuiRect, atrium:
         };
         if !set_bounds(tree, OPTION_BASE + index, open_rect(rect))
             || !set_text(tree, OPTION_BASE + index, option)
+        {
+            return false;
+        }
+    }
+    build_about(tree, bounds, current == SettingsPage::About, about_services)
+}
+
+/// Renders one `NAME: state` service row, truncated to fit a label's text
+/// budget. Returns the number of bytes written.
+fn about_service_line(buffer: &mut [u8], record: &ServiceManagerRecord) -> usize {
+    let name_len = usize::from(record.name_len).min(record.name.len());
+    let name = &record.name[..name_len];
+    let state: &[u8] = match record.state {
+        ManagerState::Vacant => b"vacant",
+        ManagerState::Disabled => b"disabled",
+        ManagerState::Stopped => b"stopped",
+        ManagerState::Starting => b"starting",
+        ManagerState::Running => b"running",
+        ManagerState::Stopping => b"stopping",
+        ManagerState::Failed => b"failed",
+        ManagerState::Exited => b"exited",
+        ManagerState::Faulted => b"faulted",
+    };
+    let mut len = name.len().min(buffer.len());
+    buffer[..len].copy_from_slice(&name[..len]);
+    if len + 2 <= buffer.len() {
+        buffer[len] = b':';
+        buffer[len + 1] = b' ';
+        len += 2;
+        let state_len = state.len().min(buffer.len() - len);
+        buffer[len..len + state_len].copy_from_slice(&state[..state_len]);
+        len += state_len;
+    }
+    len
+}
+
+/// Lays out the About page: the version line and up to `MAX_ABOUT_SERVICES`
+/// service rows, or hides them on other pages. Both reuse node slots that
+/// belong to the select/popover machinery (`SELECT_VALUE`, `OPTION_BASE..`):
+/// About never opens a select, so those slots are otherwise idle, and reusing
+/// them keeps the shared tree inside `MAX_GUI_NODES` instead of growing it
+/// per Settings page.
+fn build_about(
+    tree: &mut UiComponentTree,
+    bounds: GuiRect,
+    shown: bool,
+    services: &[ServiceManagerRecord],
+) -> bool {
+    // Other pages own these slots for their own select/popover (already laid
+    // out above); touch nothing so their bounds stand.
+    if !shown {
+        return true;
+    }
+    if !set_bounds(tree, SELECT_VALUE, offset(bounds, SETTINGS_SELECT_BOUNDS))
+        || !set_text(tree, SELECT_VALUE, logos_abi::LOGOS_VERSION)
+    {
+        return false;
+    }
+    for index in 0..MAX_OPTIONS {
+        let mut line = [0u8; 32];
+        let len = services
+            .get(index)
+            .filter(|record| record.name_len > 0)
+            .map_or(0, |record| about_service_line(&mut line, record));
+        let row = GuiRect::new(
+            SETTINGS_SELECT_BOUNDS.x,
+            SETTINGS_SELECT_BOUNDS.y + 76 + index as i32 * 28,
+            360,
+            24,
+        );
+        let row_bounds = if len > 0 { offset(bounds, row) } else { GuiRect::EMPTY };
+        if !set_bounds(tree, OPTION_BASE + index, row_bounds)
+            || !set_text(tree, OPTION_BASE + index, &line[..len])
         {
             return false;
         }
@@ -490,6 +581,21 @@ mod tests {
             .settings_input(&InputMessage::pointer(x as i16, y as i16, buttons, state).unwrap());
     }
 
+    /// A full, near-worst-case service list for the About page's scene
+    /// budget: `MAX_ABOUT_SERVICES` rows, each with a long name and the
+    /// longest state label (`starting`).
+    fn about_worst_services() -> [ServiceManagerRecord; MAX_ABOUT_SERVICES] {
+        let mut records = [ServiceManagerRecord::EMPTY; MAX_ABOUT_SERVICES];
+        for (index, record) in records.iter_mut().enumerate() {
+            let name = format!("service-worst-case-{index}");
+            let len = name.len().min(record.name.len());
+            record.name[..len].copy_from_slice(&name.as_bytes()[..len]);
+            record.name_len = len as u8;
+            record.state = ManagerState::Starting;
+        }
+        records
+    }
+
     #[test]
     fn settings_scene_states_stay_within_the_scene_budget() {
         let surface = logos_abi::SurfaceHandle::new(1, 1, 13).unwrap();
@@ -498,8 +604,9 @@ mod tests {
         let mut publisher = UiScenePublisher::new();
         let mut frame = 0;
         let mut sink = ClearCountingSink(0);
+        let about = about_worst_services();
         let mut check = |atrium: &Atrium, state: &str| {
-            assert!(build_settings_scene(&mut tree, bounds, atrium), "{state}: build");
+            assert!(build_settings_scene(&mut tree, bounds, atrium, &about), "{state}: build");
             let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT)
                 .unwrap_or_else(|error| panic!("{state}: {error:?}"));
             let upserts = scene
@@ -576,7 +683,7 @@ mod tests {
         atrium.authenticate();
         let mouse = settings_category_bounds(1);
         pointer(&mut atrium, mouse.x + 4, mouse.y + 4, false);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
         let state = |tree: &UiComponentTree, index: usize| {
             let node = tree.tree().node(tree.tree().handle_at(index).unwrap()).unwrap();
             (node.interaction.is_focused(), node.interaction.is_hovered())
@@ -588,7 +695,7 @@ mod tests {
         assert_eq!(state(&tree, mouse_row), (false, true));
 
         pointer(&mut atrium, 900, 600, false);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
         assert_eq!(state(&tree, mouse_row), (false, false));
     }
 
@@ -611,7 +718,7 @@ mod tests {
         atrium.authenticate();
         let row = settings_category_bounds(2);
         pointer(&mut atrium, row.x + 4, row.y + 4, true);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
         let blue = Accent::Blue.colors().focus;
         assert_eq!(fill_color_of(&tree, atrium.app_theme(), CATEGORY_BASE + 6), blue);
 
@@ -624,7 +731,7 @@ mod tests {
         assert_eq!(atrium.home_theme().accent, Accent::Teal.colors().accent);
         assert_eq!(atrium.app_theme().accent, 0x9f3b3b, "close control stays red");
         // The next Settings frame paints the selected row in the new accent.
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
         assert_eq!(fill_color_of(&tree, atrium.app_theme(), CATEGORY_BASE + 6), teal_focus);
         // The swatch fills are the fixed palette, independent of the theme.
         assert_eq!(
@@ -654,7 +761,7 @@ mod tests {
         assert!(!atrium.fps_overlay());
         assert!(atrium.reduced_motion());
         assert_eq!(atrium.appearance_flags(), logos_abi::APPEARANCE_REDUCED_MOTION);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
         assert!(tree.animator().reduced_motion());
         assert!(crate::build_home_scene(&mut home, &atrium, 0, wall));
         assert!(home.animator().reduced_motion());
@@ -662,5 +769,50 @@ mod tests {
         let motion_track = tree.tree().handle_at(TOGGLE_BASE + 4).unwrap();
         assert!(!tree.tree().node(fps_track).unwrap().interaction.is_focused());
         assert!(tree.tree().node(motion_track).unwrap().interaction.is_focused());
+    }
+
+    fn text_of(tree: &UiComponentTree, index: usize) -> std::vec::Vec<u8> {
+        let node = tree.tree().node(tree.tree().handle_at(index).unwrap()).unwrap();
+        node.text.as_bytes().to_vec()
+    }
+
+    #[test]
+    fn about_page_shows_version_and_service_rows_with_fixed_inputs() {
+        let mut tree = UiComponentTree::new();
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let row = settings_category_bounds(3);
+        pointer(&mut atrium, row.x + 4, row.y + 4, true);
+        assert_eq!(atrium.settings_page(), SettingsPage::About);
+
+        let mut services = [ServiceManagerRecord::EMPTY; MAX_ABOUT_SERVICES];
+        services[0].name[..5].copy_from_slice(b"input");
+        services[0].name_len = 5;
+        services[0].state = ManagerState::Running;
+        services[1].name[..7].copy_from_slice(b"display");
+        services[1].name_len = 7;
+        services[1].state = ManagerState::Starting;
+        // services[2..] stay empty: fewer than MAX_ABOUT_SERVICES services
+        // must leave their rows hidden, not stale text.
+
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &services));
+        assert_eq!(text_of(&tree, SELECT_VALUE), logos_abi::LOGOS_VERSION);
+        assert_eq!(text_of(&tree, OPTION_BASE), b"input: running");
+        assert_eq!(text_of(&tree, OPTION_BASE + 1), b"display: starting");
+        for index in 2..MAX_ABOUT_SERVICES {
+            let handle = tree.tree().handle_at(OPTION_BASE + index).unwrap();
+            assert!(tree.tree().node(handle).unwrap().bounds.is_empty(), "row {index} hidden");
+        }
+
+        // Leaving About hides the version line (Keyboard shows its own select
+        // value there instead) and every service row.
+        let keyboard_row = settings_category_bounds(0);
+        pointer(&mut atrium, keyboard_row.x + 4, keyboard_row.y + 4, true);
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &services));
+        assert_ne!(text_of(&tree, SELECT_VALUE), logos_abi::LOGOS_VERSION);
+        for index in 0..MAX_ABOUT_SERVICES {
+            let handle = tree.tree().handle_at(OPTION_BASE + index).unwrap();
+            assert!(tree.tree().node(handle).unwrap().bounds.is_empty(), "row {index} hidden");
+        }
     }
 }

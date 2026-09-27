@@ -77,6 +77,10 @@ pub use user_api::{
 pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
 pub const ABI_VERSION: u16 = 7;
+/// The product version/build string shown by the Terminal `version` command
+/// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
+/// release; it is not tied to `ABI_VERSION`.
+pub const LOGOS_VERSION: &[u8] = b"LogOS vNext 0.1.0";
 pub const MAX_TEXT_BYTES: usize = 64;
 pub const MAX_RENDER_CELLS: usize = 128;
 pub const MAX_COLUMNS: usize = 160;
