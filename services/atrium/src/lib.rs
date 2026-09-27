@@ -259,6 +259,16 @@ impl SettingsPage {
 /// `MAX_GUI_NODES` (see that module for the mapping).
 pub const MAX_ABOUT_SERVICES: usize = 4;
 
+/// Counts behind the About page's summary line: how many services the
+/// manager reports in total, and how many of those are `Running`. Kept
+/// separate from the row snapshot itself since the row list is capped at
+/// `MAX_ABOUT_SERVICES` but these counts cover every service.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AboutSummary {
+    pub total: u16,
+    pub running: u16,
+}
+
 /// Accent colour choices; each indexes `logos_ui_graphics::UI_ACCENTS`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Accent {

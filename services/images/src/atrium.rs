@@ -9,7 +9,8 @@ use logos_abi::{
     AtriumSurfaceResponse, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSceneOp,
     GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow,
     InputMessage, IpcStatus, KeyCode, KeyState, ManagerOperation, ManagerRequest, ManagerResponse,
-    ManagerStatus, MessageKind, PointerState, RenderMessage, ServiceManagerRecord, SurfaceHandle,
+    ManagerState, ManagerStatus, MessageKind, PointerState, RenderMessage, ServiceManagerRecord,
+    SurfaceHandle,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -564,15 +565,25 @@ fn unbind_app_scene_publisher(surface: SurfaceHandle) {
     }
 }
 
+/// Hard bound on service-manager `List` pages walked in one snapshot, on top
+/// of the existing cursor/status/IPC-error guards below. Comfortably above
+/// any realistic service count, so a misbehaving manager cannot make this
+/// walk unbounded.
+const ABOUT_SERVICES_WALK_CAP: usize = 64;
+
 /// Snapshots the service list for Settings' About page via the same
 /// service-manager query the System surface already uses (`system.rs`'s
-/// `refresh_status`); no new ABI, no duplicated syscall path.
-fn about_services_snapshot() -> [ServiceManagerRecord; logos_atrium::MAX_ABOUT_SERVICES] {
+/// `refresh_status`); no new ABI, no duplicated syscall path. Walks the
+/// whole `List` cursor to total every service and count how many are
+/// `Running` (the About page's summary line), while keeping only the first
+/// `MAX_ABOUT_SERVICES` records for its rows.
+fn about_services_snapshot()
+-> ([ServiceManagerRecord; logos_atrium::MAX_ABOUT_SERVICES], logos_atrium::AboutSummary) {
     let mut records = [ServiceManagerRecord::EMPTY; logos_atrium::MAX_ABOUT_SERVICES];
-    let mut count = 0usize;
+    let mut summary = logos_atrium::AboutSummary::default();
     let mut cursor = 0u64;
     let mut request_id = 1u32;
-    while count < records.len() {
+    for _ in 0..ABOUT_SERVICES_WALK_CAP {
         let request =
             ManagerRequest { cursor, ..ManagerRequest::new(ManagerOperation::List, request_id) };
         let mut response =
@@ -582,15 +593,20 @@ fn about_services_snapshot() -> [ServiceManagerRecord; logos_atrium::MAX_ABOUT_S
         {
             break;
         }
-        records[count] = response.record;
-        count += 1;
+        if let Some(slot) = records.get_mut(usize::from(summary.total)) {
+            *slot = response.record;
+        }
+        summary.total = summary.total.saturating_add(1);
+        if response.record.state == ManagerState::Running {
+            summary.running = summary.running.saturating_add(1);
+        }
         request_id = request_id.wrapping_add(1).max(1);
         if response.cursor == u64::MAX || response.cursor <= cursor {
             break;
         }
         cursor = response.cursor;
     }
-    records
+    (records, summary)
 }
 
 fn render_app_scene(
@@ -616,12 +632,22 @@ fn render_app_scene(
     let tree = if surface.app == logos_atrium::AppId::Settings {
         let tree = unsafe { &mut *core::ptr::addr_of_mut!(SETTINGS_TREE) };
         // Only query the manager while About is open; other pages never show it.
-        let about_services = if atrium.settings_page() == logos_atrium::SettingsPage::About {
-            about_services_snapshot()
-        } else {
-            [ServiceManagerRecord::EMPTY; logos_atrium::MAX_ABOUT_SERVICES]
-        };
-        if !logos_atrium::build_settings_scene(tree, surface.bounds, atrium, &about_services) {
+        let (about_services, about_summary) =
+            if atrium.settings_page() == logos_atrium::SettingsPage::About {
+                about_services_snapshot()
+            } else {
+                (
+                    [ServiceManagerRecord::EMPTY; logos_atrium::MAX_ABOUT_SERVICES],
+                    logos_atrium::AboutSummary::default(),
+                )
+            };
+        if !logos_atrium::build_settings_scene(
+            tree,
+            surface.bounds,
+            atrium,
+            &about_services,
+            about_summary,
+        ) {
             return false;
         }
         tree
