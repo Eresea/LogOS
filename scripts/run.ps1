@@ -989,7 +989,9 @@ try {
         }
 
         $homeMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium home surface ready'
-        Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'quit' } | Out-Null
+        # Linux QEMU may close the QMP socket before replying to quit;
+        # the WaitForExit below is the real check.
+        try { Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'quit' } | Out-Null } catch { }
         if (-not $process.WaitForExit(5000)) {
             Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
             throw 'First proof QEMU did not exit before the persisted boot.'
