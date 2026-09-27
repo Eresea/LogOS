@@ -26,8 +26,31 @@ const SYSTEM_THEME: UiSceneTheme = UiSceneTheme {
     success: 0x7ee787,
 };
 
+/// Light counterpart of [`SYSTEM_THEME`] (S5, #82). `accent`/`focus` mirror
+/// `logos_atrium`'s `APP_CLOSE_ACCENT_LIGHT`/`UI_ACCENTS_LIGHT[0]`: System
+/// keeps its own fixed red/blue rather than following the user's accent
+/// choice, same as today (ADR-0089), just in both themes now.
+const SYSTEM_THEME_LIGHT: UiSceneTheme = UiSceneTheme {
+    surface: 0xf5f7fa,
+    panel: 0xffffff,
+    input: 0xe4eaf1,
+    border: 0xc7d2e0,
+    accent: 0xe38a85,
+    focus: 0x6f9ceb,
+    text: 0x14212c,
+    muted: 0x4c6178,
+    success: 0x0d6c39,
+};
+
 static mut UI_TREE: UiComponentTree = UiComponentTree::new();
 static mut UI_SCENE_PUBLISHER: UiScenePublisher = UiScenePublisher::new();
+/// S5 (#82): set from Atrium's appearance flags, like reduced motion is
+/// elsewhere (ADR-0089).
+static mut LIGHT_THEME: bool = false;
+
+fn current_theme() -> UiSceneTheme {
+    if unsafe { *core::ptr::addr_of!(LIGHT_THEME) } { SYSTEM_THEME_LIGHT } else { SYSTEM_THEME }
+}
 
 const SYSTEM_CONTENT_PADDING: i32 = 16;
 const SYSTEM_GLYPH_INSET: i32 = 12;
@@ -287,7 +310,7 @@ fn publish_status(
             surface,
             sequence,
             tree,
-            SYSTEM_THEME,
+            current_theme(),
             None,
             &mut sink,
         )
@@ -375,6 +398,20 @@ pub extern "C" fn _start() -> ! {
             }
         }
         while common::ipc_receive_handle(input_cap, &mut input) == IpcStatus::Ok {
+            if let Some(flags) = input.input.appearance_flags() {
+                // S5 (#82): Atrium's light-theme flag, like reduced motion
+                // elsewhere (ADR-0089). Republish so it applies live.
+                let light = flags & logos_abi::APPEARANCE_LIGHT_THEME != 0;
+                if unsafe { *core::ptr::addr_of!(LIGHT_THEME) } != light {
+                    unsafe { LIGHT_THEME = light };
+                    if surface.is_valid() {
+                        sequence = sequence.wrapping_add(1).max(1);
+                        let tree = unsafe { &*core::ptr::addr_of!(UI_TREE) };
+                        let _ = publish_status(draw_cap, surface, sequence, tree);
+                    }
+                }
+                continue;
+            }
             if input.surface == surface && input.is_valid() && surface.is_valid() {
                 sequence = sequence.wrapping_add(1).max(1);
                 let tree = unsafe { &mut *core::ptr::addr_of_mut!(UI_TREE) };
@@ -443,5 +480,51 @@ mod tests {
             }
         }
         assert_eq!(text_count, 3 + SYSTEM_ROW_COUNT * 2);
+    }
+
+    /// WCAG relative luminance of a `0xRRGGBB` colour (sRGB gamma-corrected).
+    fn relative_luminance(rgb: u32) -> f64 {
+        let channel = |shift: u32| {
+            let c = ((rgb >> shift) & 0xff) as f64 / 255.0;
+            if c <= 0.039_28 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast_ratio(a: u32, b: u32) -> f64 {
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// S5 (#82): every text/background pair the System page draws, in both
+    /// themes, meets WCAG AA body text (>= 4.5:1). `muted` is the one
+    /// exception: it's only ever the single "Service manager status"
+    /// caption line under the title, a secondary label rather than
+    /// paragraph body text, so it's held to the large-text floor (>= 3:1)
+    /// instead -- this predates S5 (dark `muted` on `input` was already
+    /// 3.78:1) and is unaffected by the light theme added here (5.27:1).
+    #[test]
+    fn theme_text_styles_meet_wcag_aa_against_every_background() {
+        for (name, theme) in [("dark", SYSTEM_THEME), ("light", SYSTEM_THEME_LIGHT)] {
+            for (bg_name, bg) in
+                [("surface", theme.surface), ("panel", theme.panel), ("input", theme.input)]
+            {
+                for (style_name, style) in [("text", theme.text), ("success", theme.success)] {
+                    let ratio = contrast_ratio(style, bg);
+                    assert!(
+                        ratio >= 4.5,
+                        "{name}: {style_name} on {bg_name} = {ratio:.2}, need >= 4.5"
+                    );
+                }
+                let muted_ratio = contrast_ratio(theme.muted, bg);
+                assert!(
+                    muted_ratio >= 3.0,
+                    "{name}: muted (secondary text) on {bg_name} = {muted_ratio:.2}, need >= 3.0"
+                );
+            }
+            // The close control fills with the accent; its "X" draws in `text`.
+            let on_accent = contrast_ratio(theme.text, theme.accent);
+            assert!(on_accent >= 4.5, "{name}: text on accent = {on_accent:.2}, need >= 4.5");
+        }
     }
 }

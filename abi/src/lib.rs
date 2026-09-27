@@ -77,7 +77,7 @@ pub use user_api::{
 };
 pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
-pub const ABI_VERSION: u16 = 8;
+pub const ABI_VERSION: u16 = 9;
 /// The product version/build string shown by the Terminal `version` command
 /// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
 /// release; it is not tied to `ABI_VERSION`.
@@ -1396,7 +1396,12 @@ impl MessageKind {
 
 /// Reduced motion: settle ADR-0082 motion at once and do not blink.
 pub const APPEARANCE_REDUCED_MOTION: u16 = 1 << 0;
-pub const APPEARANCE_FLAGS_MASK: u16 = APPEARANCE_REDUCED_MOTION;
+/// Light theme (S5, #82): the receiver swaps its dark theme for its light
+/// one. ABI_VERSION 9 widens `APPEARANCE_FLAGS_MASK` to accept this bit;
+/// see `appearance_flags`/`GuiHook::appearance_flags`, whose validation of
+/// the existing `modifiers`/`deadline` field changes accordingly.
+pub const APPEARANCE_LIGHT_THEME: u16 = 1 << 1;
+pub const APPEARANCE_FLAGS_MASK: u16 = APPEARANCE_REDUCED_MOTION | APPEARANCE_LIGHT_THEME;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

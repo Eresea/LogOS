@@ -5,8 +5,8 @@ use crate::{
     Accent, Atrium, KeyboardLayout, MAX_ABOUT_SERVICES, MouseAcceleration, SETTINGS_NAV_LEFT,
     SETTINGS_NAV_WIDTH, SETTINGS_PAGE_LEFT, SETTINGS_PANE_TOP, SETTINGS_SEARCH_BOUNDS,
     SETTINGS_SELECT_BOUNDS, SETTINGS_TOGGLE_LABELS, STATUS_BAR_BOUNDS, SettingsPage,
-    settings_category_bounds, settings_swatch_bounds, settings_toggle_row_bounds,
-    surface_close_bounds,
+    settings_category_bounds, settings_light_theme_row_bounds, settings_swatch_bounds,
+    settings_toggle_row_bounds, surface_close_bounds,
 };
 
 const PAGES: usize = SettingsPage::ALL.len();
@@ -496,7 +496,11 @@ fn build_appearance(
     let show = |rect: GuiRect| if shown { offset(bounds, rect) } else { GuiRect::EMPTY };
     // Invisible (pane colour, no shadow) but painted first: Display merges
     // every control's damage into it instead of counting each separately
-    // against `MAX_GUI_DAMAGE_RECTS`, as Home's grid container does.
+    // against `MAX_GUI_DAMAGE_RECTS`, as Home's grid container does. Stops
+    // at the two real toggle rows, not the light-theme row below: that row
+    // reuses `SELECT`/`SELECT_VALUE` (S5, #82), whose node indices sit
+    // *before* this card's in paint order, so if the card's bounds reached
+    // that row it would paint over -- hide -- that label and track.
     let last_row = settings_toggle_row_bounds(SETTINGS_TOGGLE_LABELS.len() - 1);
     // Starts just under the field label's text (it would cover it) while
     // still overlapping the label box, so the label's damage merges too.
@@ -545,6 +549,34 @@ fn build_appearance(
             )
             || !set_bounds(tree, base + 1, show(track))
             || !set_bounds(tree, base + 2, show(knob))
+        {
+            return false;
+        }
+    }
+    // Light theme (S5, #82): a fourth row that reuses the select trigger's
+    // node slots (`SELECT` as its track, `SELECT_VALUE` as its label)
+    // instead of growing the tree with a third toggle's own three nodes --
+    // the shared Settings tree has no node to spare. Both slots are only
+    // ever real select controls on Keyboard/Mouse and idle everywhere else
+    // (see `build_about`'s reuse of the same pair), so they must be left
+    // untouched here when Appearance isn't the page being shown.
+    let Ok(select_handle) = tree.tree().handle_at(SELECT) else { return false };
+    if tree.tree_mut().set_focused(select_handle, shown && atrium.light_theme()).is_err() {
+        return false;
+    }
+    if shown {
+        let row = settings_light_theme_row_bounds();
+        let track = GuiRect::new(row.x + row.width as i32 - 52, row.y + 8, 52, 28);
+        if !set_bounds(tree, SELECT, offset(bounds, track))
+            || !set_bounds(
+                tree,
+                SELECT_VALUE,
+                offset(
+                    bounds,
+                    GuiRect::new(row.x, row.y, row.width.saturating_sub(64), row.height),
+                ),
+            )
+            || !set_text(tree, SELECT_VALUE, b"Light theme")
         {
             return false;
         }
@@ -769,11 +801,68 @@ mod tests {
         let motion_track = tree.tree().handle_at(TOGGLE_BASE + 4).unwrap();
         assert!(!tree.tree().node(fps_track).unwrap().interaction.is_focused());
         assert!(tree.tree().node(motion_track).unwrap().interaction.is_focused());
+
+        // Light theme (S5, #82): reuses SELECT/SELECT_VALUE instead of its
+        // own nodes, applies live, and reaches LockScreen/System/Terminal
+        // as one more `APPEARANCE_*` flag.
+        assert!(!atrium.light_theme());
+        let light_row = crate::settings_light_theme_row_bounds();
+        pointer(&mut atrium, light_row.x + 4, light_row.y + 4, true);
+        assert!(atrium.light_theme());
+        assert_eq!(
+            atrium.appearance_flags(),
+            logos_abi::APPEARANCE_REDUCED_MOTION | logos_abi::APPEARANCE_LIGHT_THEME
+        );
+        assert_eq!(atrium.app_theme().surface, UiSceneTheme::LIGHT.surface);
+        assert_eq!(atrium.home_theme().surface, UiSceneTheme::LIGHT.surface);
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert_eq!(text_of(&tree, SELECT_VALUE), b"Light theme");
+        let select_track = tree.tree().handle_at(SELECT).unwrap();
+        assert!(tree.tree().node(select_track).unwrap().interaction.is_focused());
+        assert_eq!(tree.tree().node(select_track).unwrap().bounds, {
+            let track =
+                GuiRect::new(light_row.x + light_row.width as i32 - 52, light_row.y + 8, 52, 28);
+            logos_ui::UiRect::new(track.x, track.y, track.width, track.height)
+        });
+
+        // Switching away and back leaves Keyboard's own select untouched:
+        // the reused slots are idle everywhere but the Appearance page.
+        let keyboard_row = settings_category_bounds(0);
+        pointer(&mut atrium, keyboard_row.x + 4, keyboard_row.y + 4, true);
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert_eq!(text_of(&tree, SELECT_VALUE), b"AZERTY");
+        assert!(!tree.tree().node(select_track).unwrap().interaction.is_focused());
     }
 
     fn text_of(tree: &UiComponentTree, index: usize) -> std::vec::Vec<u8> {
         let node = tree.tree().node(tree.tree().handle_at(index).unwrap()).unwrap();
         node.text.as_bytes().to_vec()
+    }
+
+    /// S5 (#82) regression: `APPEARANCE_CARD` paints at a *later* node index
+    /// than `SELECT`/`SELECT_VALUE` (`SWATCH_BASE`/`TOGGLE_BASE` are higher
+    /// still, which is why those controls show fine over the card), so if
+    /// its bounds reached the light-theme row, the card's opaque fill would
+    /// paint over -- hide -- that row's label and track. It must stop at
+    /// the two real toggle rows and leave the light-theme row outside it.
+    #[test]
+    fn appearance_card_does_not_paint_over_the_reused_light_theme_row() {
+        let mut tree = UiComponentTree::new();
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let appearance_row = settings_category_bounds(2);
+        pointer(&mut atrium, appearance_row.x + 4, appearance_row.y + 4, true);
+        assert_eq!(atrium.settings_page(), SettingsPage::Appearance);
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+
+        let card = tree.tree().node(tree.tree().handle_at(APPEARANCE_CARD).unwrap()).unwrap();
+        let card_bottom = card.bounds.y + card.bounds.height as i32;
+        let row = crate::settings_light_theme_row_bounds();
+        assert!(
+            card_bottom <= row.y,
+            "card bottom {card_bottom} reaches into the light-theme row at y={}",
+            row.y
+        );
     }
 
     #[test]

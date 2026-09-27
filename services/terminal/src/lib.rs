@@ -6,9 +6,10 @@
 extern crate std;
 
 use logos_abi::{
-    APPEARANCE_REDUCED_MOTION, CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell,
-    DEFAULT_COLUMNS, DEFAULT_ROWS, GuiRect, GuiTextGridRow, InputMessage, IpcBytes, KeyCode,
-    KeyState, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, terminal_grid_metrics,
+    APPEARANCE_LIGHT_THEME, APPEARANCE_REDUCED_MOTION, CELL_ATTR_BOLD, CELL_ATTR_DIM,
+    CELL_ATTR_UNDERLINE, Cell, DEFAULT_COLUMNS, DEFAULT_ROWS, GuiRect, GuiTextGridRow,
+    InputMessage, IpcBytes, KeyCode, KeyState, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT,
+    MessageKind, terminal_grid_metrics,
 };
 
 const MAX_PARAMS: usize = 16;
@@ -20,8 +21,16 @@ pub const CURSOR_BLINK_TICKS: u64 = 50;
 /// Like GTK's cursor-blink-timeout: after 10 s without activity the cursor
 /// stays solid, so an idle Terminal stops repainting.
 pub const CURSOR_BLINK_IDLE_TICKS: u64 = 1_000;
-const DEFAULT_FOREGROUND: u32 = 0x00d7_e3f4;
-const DEFAULT_BACKGROUND: u32 = 0x000b_1020;
+const DEFAULT_FOREGROUND_DARK: u32 = 0x00d7_e3f4;
+const DEFAULT_BACKGROUND_DARK: u32 = 0x000b_1020;
+/// S5 (#82): the reset (SGR 39/49) colours when the light theme is on,
+/// matching `logos_ui_graphics::UiSceneTheme::LIGHT`'s `text`/`surface`. The
+/// numbered ANSI colours (`ANSI_COLORS`/`ANSI_BRIGHT_COLORS`) stay fixed in
+/// both themes, like a real terminal's palette does.
+const DEFAULT_FOREGROUND_LIGHT: u32 = 0x0014_212c;
+const DEFAULT_BACKGROUND_LIGHT: u32 = 0x00f5_f7fa;
+const DEFAULT_FOREGROUND: u32 = DEFAULT_FOREGROUND_DARK;
+const DEFAULT_BACKGROUND: u32 = DEFAULT_BACKGROUND_DARK;
 const ANSI_COLORS: [u32; 8] = [
     0x000b_1020,
     0x00ff_6b6b,
@@ -131,6 +140,7 @@ pub struct TerminalState<const CELL_COUNT: usize> {
     scrollback_len: usize,
     view_offset: usize,
     reduced_motion: bool,
+    light_theme: bool,
     cursor_hidden: bool,
     blink_restart: bool,
     blink_anchor: u64,
@@ -333,6 +343,17 @@ impl TerminalService {
     /// the tab bar's own new-tab button and per-tab close control),
     /// instead of reaching the shell.
     pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
+        // Applies to every tab, not just the active one: reduced motion and
+        // the light theme (S5, #82) are desktop-wide, so a session the user
+        // switches to later must already match instead of showing its old
+        // appearance until it next redraws.
+        if let Some(flags) = event.appearance_flags() {
+            for session in &mut self.sessions {
+                session.terminal.set_reduced_motion(flags & APPEARANCE_REDUCED_MOTION != 0);
+                session.terminal.set_light_theme(flags & APPEARANCE_LIGHT_THEME != 0);
+            }
+            return None;
+        }
         if event.kind == MessageKind::Key
             && matches!(event.state, KeyState::Pressed | KeyState::Repeat)
             && event.modifiers & MOD_CTRL != 0
@@ -457,6 +478,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             scrollback_len: 0,
             view_offset: 0,
             reduced_motion: false,
+            light_theme: false,
             cursor_hidden: false,
             blink_restart: true,
             blink_anchor: 0,
@@ -467,6 +489,43 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub fn set_reduced_motion(&mut self, reduced: bool) {
         self.reduced_motion = reduced;
         self.restart_blink();
+    }
+
+    /// S5 (#82): recolours every cell still at the reset (SGR 39/49) colour
+    /// -- the default text a program never styled -- to the new theme's
+    /// default, and forces a full redraw. Text a program explicitly coloured
+    /// (an ANSI colour, or a previous theme's default it happens to match
+    /// after this call) is left alone, like a real terminal's theme switch.
+    pub fn set_light_theme(&mut self, light: bool) {
+        if self.light_theme == light {
+            return;
+        }
+        let (old_fg, old_bg) = self.default_colors();
+        self.light_theme = light;
+        let (new_fg, new_bg) = self.default_colors();
+        for cell in self.screen.iter_mut().chain(self.scrollback.iter_mut()) {
+            if cell.foreground == old_fg {
+                cell.foreground = new_fg;
+            }
+            if cell.background == old_bg {
+                cell.background = new_bg;
+            }
+        }
+        if self.foreground == old_fg {
+            self.foreground = new_fg;
+        }
+        if self.background == old_bg {
+            self.background = new_bg;
+        }
+        self.mark_all_dirty();
+    }
+
+    const fn default_colors(&self) -> (u32, u32) {
+        if self.light_theme {
+            (DEFAULT_FOREGROUND_LIGHT, DEFAULT_BACKGROUND_LIGHT)
+        } else {
+            (DEFAULT_FOREGROUND_DARK, DEFAULT_BACKGROUND_DARK)
+        }
     }
 
     /// Shows the cursor and restarts its blink phase on the next `blink`.
@@ -973,6 +1032,7 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
         if let Some(flags) = event.appearance_flags() {
             self.set_reduced_motion(flags & APPEARANCE_REDUCED_MOTION != 0);
+            self.set_light_theme(flags & APPEARANCE_LIGHT_THEME != 0);
             return None;
         }
         if event.kind != MessageKind::Pointer {
@@ -1409,6 +1469,65 @@ mod tests {
         terminal.blink(10 * CURSOR_BLINK_TICKS);
         terminal.blink(11 * CURSOR_BLINK_TICKS);
         assert_eq!(cursor_cell_inverted(&mut terminal), Some(false), "blinks again");
+    }
+
+    #[test]
+    fn light_theme_appearance_recolors_default_cells_but_not_explicit_ansi_colors() {
+        let mut terminal = Terminal::new();
+        drain(&mut terminal);
+        terminal.feed(b"\x1b[31mred\x1b[0m plain");
+        assert_eq!(terminal.screen[0].foreground, ANSI_COLORS[1], "explicit red");
+        assert_eq!(terminal.screen[4].foreground, DEFAULT_FOREGROUND_DARK, "plain text");
+        assert_eq!(terminal.screen[4].background, DEFAULT_BACKGROUND_DARK);
+
+        assert!(terminal.input(&InputMessage::appearance(APPEARANCE_LIGHT_THEME)).is_none());
+        assert_eq!(terminal.screen[0].foreground, ANSI_COLORS[1], "still explicit red");
+        assert_eq!(terminal.screen[4].foreground, DEFAULT_FOREGROUND_LIGHT, "recoloured");
+        assert_eq!(terminal.screen[4].background, DEFAULT_BACKGROUND_LIGHT);
+        // New output keeps using the theme that's now current.
+        terminal.feed(b" more");
+        let more = usize::from(b' ') + 4; // just past "red plain"
+        assert_eq!(terminal.screen[more + 1].foreground, DEFAULT_FOREGROUND_LIGHT);
+
+        assert!(terminal.input(&InputMessage::appearance(0)).is_none());
+        assert_eq!(terminal.screen[4].foreground, DEFAULT_FOREGROUND_DARK, "back to dark");
+        assert_eq!(terminal.screen[0].foreground, ANSI_COLORS[1], "red is untouched throughout");
+    }
+
+    #[test]
+    fn light_theme_appearance_reaches_every_tab_not_just_the_active_one() {
+        let mut service = TerminalService::new();
+        service.open_tab();
+        assert!(
+            service.input(&InputMessage::appearance(APPEARANCE_LIGHT_THEME)).is_none(),
+            "appearance never reaches a session's own output"
+        );
+        assert!(service.sessions[0].terminal.light_theme);
+        assert!(service.sessions[1].terminal.light_theme, "background tab is themed too");
+    }
+
+    /// WCAG relative luminance of a `0x00RRGGBB` colour (sRGB gamma-corrected).
+    fn relative_luminance(rgb: u32) -> f64 {
+        let channel = |shift: u32| {
+            let c = ((rgb >> shift) & 0xff) as f64 / 255.0;
+            if c <= 0.039_28 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast_ratio(a: u32, b: u32) -> f64 {
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// S5 (#82): the reset foreground/background pair meets WCAG AA body
+    /// text (>= 4.5:1) in both themes.
+    #[test]
+    fn default_terminal_colors_meet_wcag_aa_in_both_themes() {
+        let dark = contrast_ratio(DEFAULT_FOREGROUND_DARK, DEFAULT_BACKGROUND_DARK);
+        assert!(dark >= 4.5, "dark: {dark:.2}");
+        let light = contrast_ratio(DEFAULT_FOREGROUND_LIGHT, DEFAULT_BACKGROUND_LIGHT);
+        assert!(light >= 4.5, "light: {light:.2}");
     }
 
     #[test]

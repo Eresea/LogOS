@@ -307,6 +307,39 @@ function Send-QmpPointerWalk {
     }
 }
 
+# Two-axis version of Send-QmpPointerWalk: the PS/2 decoder reads each
+# packet's delta as a signed byte (services/input/src/lib.rs PointerDecoder,
+# `self.packet[1] as i8`), so a single large motion (a would-be "clamp to
+# (0, 0)" or "jump straight to the target" shortcut) does not travel nearly
+# as far as requested -- every motion must walk in small steps, same as
+# Send-QmpPointerWalk already does for Y alone.
+function Send-QmpPointerWalk2 {
+    param([hashtable]$Qmp, [int]$DeltaX, [int]$DeltaY)
+    while ($DeltaX -ne 0 -or $DeltaY -ne 0) {
+        $stepX = [Math]::Sign($DeltaX) * [Math]::Min([Math]::Abs($DeltaX), 2)
+        $stepY = [Math]::Sign($DeltaY) * [Math]::Min([Math]::Abs($DeltaY), 2)
+        Send-QmpPointerMotion -Qmp $Qmp -X $stepX -Y $stepY -DelayMilliseconds 15
+        $DeltaX -= $stepX
+        $DeltaY -= $stepY
+    }
+}
+
+# At each 2-unit step the PS/2 decoder's acceleration is fixed at 256
+# (services/input/src/lib.rs MouseAcceleration::gain: "magnitude <= 2" always
+# uses 256, regardless of the mouse acceleration setting), so a raw delta of
+# 2 becomes exactly `2 * 224 * 256 / 65536` = 1.75 screen pixels on average
+# (the 65536 = POINTER_SCALE remainder carries the .75 to the next step):
+# over any multiple of 4 steps (8 raw units), 7 pixels of actual movement.
+# Requesting raw = pixels * 8/7 (rounded to the nearest multiple of 8, so
+# the remainder cycle divides evenly and this is exact, not asymptotic)
+# reaches the intended pixel offset.
+function Send-QmpPointerWalkPixels {
+    param([hashtable]$Qmp, [int]$PixelsX, [int]$PixelsY)
+    $rawX = [Math]::Round(($PixelsX * 8.0 / 7.0) / 8.0) * 8
+    $rawY = [Math]::Round(($PixelsY * 8.0 / 7.0) / 8.0) * 8
+    Send-QmpPointerWalk2 $Qmp $rawX $rawY
+}
+
 function Send-QmpPointerButton {
     param([hashtable]$Qmp, [bool]$Down)
     Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{
@@ -467,6 +500,41 @@ function Wait-QmpSystemFramebuffer {
             return $true
         }
         Start-Sleep -Milliseconds 100
+    }
+    return $false
+}
+
+function Framebuffer-PixelIsWhite {
+    # S5 (#82): `UiSceneTheme::LIGHT.panel` and `SYSTEM_THEME_LIGHT.panel`
+    # (ui-graphics/src/lib.rs, services/images/src/system.rs) are both pure
+    # white, so any known dark-theme `panel` sample point (already used by
+    # Framebuffer-HasHomePanel/HasSystemStatusBar/SettingsCategorySelected)
+    # doubles as a one-pixel light-theme check.
+    param([string]$Path, [int]$X, [int]$Y)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PpmLayout $bytes
+    if ($X -ge $layout.Width -or $Y -ge $layout.Height) { return $false }
+    $index = $layout.Offset + (($Y * $layout.Width + $X) * 3)
+    return $bytes[$index] -eq 255 -and $bytes[$index + 1] -eq 255 -and $bytes[$index + 2] -eq 255
+}
+
+function Wait-QmpPixelIsWhite {
+    # Requires the match twice in a row, like Wait-QmpSettingsCategory,
+    # so a screendump caught mid-repaint doesn't pass on a stale frame.
+    param([hashtable]$Qmp, [string]$Path, [int]$X, [int]$Y, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $previousHash = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+        if (Framebuffer-PixelIsWhite $Path $X $Y) {
+            $hash = (Get-FileHash $Path).Hash
+            if ($hash -eq $previousHash) { return $true }
+            $previousHash = $hash
+        } else {
+            $previousHash = $null
+        }
+        Start-Sleep -Milliseconds 250
     }
     return $false
 }
@@ -1123,6 +1191,112 @@ try {
             }
             if (Test-BytesEqual $tabOneContentAfterSwitch $tabTwoContent) {
                 throw 'The first tab shows the second tab''s content after switching back.'
+            }
+
+            # S5 (#82): the light theme. Everything above ran in the dark
+            # theme (default) and its pixel checks are dark-coded, so the
+            # switch happens last, after them, not before. Both Terminal
+            # and System are still open (System was never closed after its
+            # own check, and opening Terminal with Ctrl+3 does not close
+            # it): Escape closes only the focused surface, so send it twice
+            # to close Terminal then System and return to the home grid,
+            # then reset grid focus to Calculator's tile the same way the
+            # Settings-close step above does, before reopening Settings.
+            Send-QmpKey $qmp 'esc'
+            Start-Sleep -Milliseconds 300
+            Send-QmpKey $qmp 'esc'
+            Start-Sleep -Milliseconds 300
+            1..4 | ForEach-Object {
+                Send-QmpKey $qmp 'left'
+                Start-Sleep -Milliseconds 100
+            }
+            1..4 | ForEach-Object {
+                Send-QmpKey $qmp 'right'
+                Start-Sleep -Milliseconds 100
+            }
+            $settingsReopenMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium app=Settings scene published'
+            Send-QmpKey $qmp 'ret'
+            if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium app=Settings scene published' $settingsReopenMarker $TimeoutSeconds)) {
+                throw 'Settings did not publish its scene after reopening for the light-theme check.'
+            }
+            # Settings tiles inside the desktop area (it excludes the 60px
+            # shell rail), so read its actual surface origin from the log
+            # rather than assuming (0, 0), the same way
+            # Framebuffer-SettingsCategorySelected does.
+            $settingsMatch = [regex]::Matches((Get-Content $log -Raw), 'app=Settings scene published surface=\d+/\d+ bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
+            if ($settingsMatch.Count -eq 0) {
+                throw 'Could not find the Settings surface bounds in the proof log.'
+            }
+            $settingsGroups = $settingsMatch[$settingsMatch.Count - 1].Groups
+            $settingsOriginX = [int]$settingsGroups[1].Value
+            $settingsOriginY = [int]$settingsGroups[2].Value
+            # Settings keeps its category across close/reopen (it's Atrium
+            # state, not reset on launch): the very first open above walked
+            # Down to About (index 3, the last category), which would still
+            # be selected now. Click the Appearance row directly
+            # (services/atrium/src/lib.rs settings_category_bounds(2))
+            # instead of walking Up/Down from an assumed start -- it selects
+            # Appearance regardless of where the category was left. Walk far
+            # up-left first to pin the cursor at (0, 0) regardless of where
+            # it was left (services/input/src/lib.rs clamps to the screen
+            # bounds; -3000/-2000 raw is comfortably past the screen size
+            # even from the far corner, see Send-QmpPointerWalkPixels for
+            # the raw-to-pixel ratio), so every walk below is relative to a
+            # known origin.
+            Send-QmpPointerWalk2 $qmp -3000 -2000
+            Send-QmpPointerWalkPixels $qmp ($settingsOriginX + 136) ($settingsOriginY + 282)
+            Start-Sleep -Milliseconds 150
+            Send-QmpPointerButton $qmp $true
+            Send-QmpPointerButton $qmp $false
+            $settingsAppearanceDarkFrame = Join-Path $repoRoot "target\qemu-settings-appearance-predark-$PID.ppm"
+            if (-not (Wait-QmpSettingsCategory $qmp $settingsAppearanceDarkFrame 2 $TimeoutSeconds)) {
+                throw 'Settings did not reopen on the Appearance category before the light-theme click.'
+            }
+            # Click the Light theme row (services/atrium/src/lib.rs
+            # settings_light_theme_row_bounds; it reuses the select
+            # trigger's node slots, see settings_scene.rs build_appearance,
+            # instead of its own three nodes -- MAX_GUI_NODES has no spare
+            # node for a third toggle). Re-clamp to (0, 0) first since the
+            # category click above already moved the cursor.
+            Send-QmpPointerWalk2 $qmp -3000 -2000
+            Send-QmpPointerWalkPixels $qmp ($settingsOriginX + 630) ($settingsOriginY + 378)
+            Start-Sleep -Milliseconds 150
+            Send-QmpPointerButton $qmp $true
+            Send-QmpPointerButton $qmp $false
+            # Row 0 (Keyboard) is unselected and idle, so its pane pixel
+            # reads the theme's `panel` colour directly -- white in
+            # `UiSceneTheme::LIGHT`, unlike the accent- or focus-filled
+            # pixels `Framebuffer-SettingsCategorySelected` samples.
+            $settingsAppearanceLightFrame = Join-Path $repoRoot "target\qemu-settings-appearance-light-$PID.ppm"
+            if (-not (Wait-QmpPixelIsWhite $qmp $settingsAppearanceLightFrame ($settingsOriginX + 36) ($settingsOriginY + 186) $TimeoutSeconds)) {
+                throw 'Settings did not switch to the light theme after the toggle click.'
+            }
+
+            Send-QmpKey $qmp 'esc'
+            $homeLightFrame = Join-Path $repoRoot "target\qemu-home-light-$PID.ppm"
+            # (30, 400) is inside the shell rail, clear of its controls --
+            # the same point `Framebuffer-HasHomePanel` samples for the
+            # dark theme's `panel` colour.
+            if (-not (Wait-QmpPixelIsWhite $qmp $homeLightFrame 30 400 $TimeoutSeconds)) {
+                throw 'Home did not switch to the light theme after Settings closed.'
+            }
+
+            1..4 | ForEach-Object {
+                Send-QmpKey $qmp 'left'
+                Start-Sleep -Milliseconds 100
+            }
+            1..3 | ForEach-Object {
+                Send-QmpKey $qmp 'right'
+                Start-Sleep -Milliseconds 100
+            }
+            Send-QmpKey $qmp 'ret'
+            $systemLightFrame = Join-Path $repoRoot "target\qemu-system-light-$PID.ppm"
+            # (100, 20) is System's status bar, sampled by
+            # `Framebuffer-HasSystemStatusBar` for the dark theme's `panel`
+            # colour; `SYSTEM_THEME_LIGHT.panel` (services/images/src/system.rs)
+            # is white too.
+            if (-not (Wait-QmpPixelIsWhite $qmp $systemLightFrame 100 20 $TimeoutSeconds)) {
+                throw 'System did not switch to the light theme.'
             }
         }
 
