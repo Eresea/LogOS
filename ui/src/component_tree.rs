@@ -322,7 +322,9 @@ impl UiComponentTree {
         self.hovered = UiNodeHandle::EMPTY;
         self.pressed = UiNodeHandle::EMPTY;
         self.route_states = [UiRouteState::EMPTY; MAX_UI_COMPONENTS];
+        let reduced_motion = self.animator.reduced_motion();
         self.animator = UiAnimator::new();
+        self.animator.set_reduced_motion(reduced_motion);
         self.clock_ticks = 0;
         Ok(())
     }
@@ -341,7 +343,9 @@ impl UiComponentTree {
         self.hovered = UiNodeHandle::EMPTY;
         self.pressed = UiNodeHandle::EMPTY;
         self.route_states.fill(UiRouteState::EMPTY);
+        let reduced_motion = self.animator.reduced_motion();
         self.animator = UiAnimator::new();
+        self.animator.set_reduced_motion(reduced_motion);
         self.clock_ticks = 0;
         Ok(())
     }
@@ -513,6 +517,12 @@ impl UiComponentTree {
 
     pub const fn pressed(&self) -> UiNodeHandle {
         self.pressed
+    }
+
+    /// Reduced motion (ADR-0082 transitions and animations settle at once);
+    /// survives tree resets.
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.animator.set_reduced_motion(reduced);
     }
 
     pub const fn animator(&self) -> &UiAnimator {

@@ -190,6 +190,7 @@ pub fn build_home_scene(
         };
         *tree = new_tree;
     }
+    tree.set_reduced_motion(atrium.reduced_motion());
     let set_bounds = |tree: &mut UiComponentTree, index: u16, bounds: GuiRect| {
         let Some(handle) = tree.tree().handle_at(usize::from(index)).ok() else { return false };
         tree.tree_mut()

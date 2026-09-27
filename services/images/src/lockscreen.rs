@@ -657,6 +657,16 @@ pub extern "C" fn _start() -> ! {
             pending_cursor_surface = request_cursor_surface(display_control, &mut next_request);
         }
         while common::ipc_receive_handle(section, &mut hook) == IpcStatus::Ok {
+            if let Some(flags) = hook.appearance_flags() {
+                // ADR-0089: reduced motion settles the splash and form motion.
+                let reduced = flags & logos_abi::APPEARANCE_REDUCED_MOTION != 0;
+                splash_animator.set_reduced_motion(reduced);
+                unsafe { (*core::ptr::addr_of_mut!(UI_TREE)).set_reduced_motion(reduced) };
+                continue;
+            }
+            if hook.kind != GuiHookKind::Section {
+                continue;
+            }
             let should_show = hook.deadline != 0;
             if should_show && !visible {
                 visible = true;

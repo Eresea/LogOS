@@ -173,10 +173,6 @@ static mut APP_SCENE_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentTree
 /// rejects `node_id == 0`), so a row arriving before the first publish is
 /// simply dropped rather than mis-addressed (#74).
 static mut TERMINAL_GRID_NODE_ID: u32 = 0;
-const APP_SCENE_THEME: logos_ui_graphics::UiSceneTheme = logos_ui_graphics::UiSceneTheme {
-    accent: 0x9f3b3b,
-    ..logos_ui_graphics::UiSceneTheme::DEFAULT
-};
 
 #[cfg(feature = "qemu-proof")]
 fn proof_line(message: &[u8]) {
@@ -602,7 +598,7 @@ fn render_app_scene(
     };
     let publisher = unsafe { &mut (*core::ptr::addr_of_mut!(APP_SCENE_PUBLISHERS))[slot] };
     let mut sink = AppSceneSink(display);
-    match publisher.publish(surface.reference, frame, tree, APP_SCENE_THEME, None, &mut sink) {
+    match publisher.publish(surface.reference, frame, tree, atrium.app_theme(), None, &mut sink) {
         Ok((IpcStatus::Ok, _)) => {
             let reported = unsafe { &mut (*core::ptr::addr_of_mut!(APP_SCENE_REPORTED))[slot] };
             if !*reported {
@@ -640,7 +636,7 @@ fn publish_home_scene(
             surface,
             sequence,
             tree,
-            logos_ui_graphics::UiSceneTheme::DEFAULT,
+            atrium.home_theme(),
             None,
             &mut sink,
         )
@@ -1127,6 +1123,9 @@ pub extern "C" fn _start() -> ! {
     let mut cursor_y = (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i16;
     let mut cursor_sequence = 1u32;
     let mut pending_cursor_draw: Option<GuiSceneOp> = None;
+    // LockScreen and Terminal start with default appearance (no flags).
+    let mut lockscreen_appearance = 0u16;
+    let mut terminal_appearance: Option<(SurfaceHandle, u16)> = None;
     let mut pending_input_settings: Option<logos_abi::InputSettings> =
         Some(atrium.input_settings());
     let mut surface_commands = SurfaceCommandQueue::new();
@@ -1841,6 +1840,7 @@ pub extern "C" fn _start() -> ! {
                 }
             }
             if is_fps_toggle(&event) {
+                atrium.toggle_fps_overlay();
                 queue_fps_toggle(&mut surface_commands, &mut next_request);
                 surface_commands.flush(display_control);
                 continue;
@@ -1998,7 +1998,12 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         let routed = AtriumSurfaceInput::new(surface.reference, local);
                         if surface.app == logos_atrium::AppId::Settings {
+                            let fps_overlay = atrium.fps_overlay();
                             if atrium.settings_input(&local) {
+                                if atrium.fps_overlay() != fps_overlay {
+                                    queue_fps_toggle(&mut surface_commands, &mut next_request);
+                                    surface_commands.flush(display_control);
+                                }
                                 let settings = atrium.input_settings();
                                 if pending_input_settings != Some(settings) {
                                     pending_input_settings = Some(settings);
@@ -2291,6 +2296,28 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
+        // ADR-0089: deliver appearance changes to LockScreen and to the
+        // current Terminal surface (including a newly opened one).
+        let flags = atrium.appearance_flags();
+        if lockscreen_appearance != flags
+            && common::ipc_send_handle(
+                lockscreen_control,
+                &GuiHook::appearance(next_request_id(&mut next_request), flags),
+            ) == IpcStatus::Ok
+        {
+            lockscreen_appearance = flags;
+        }
+        if let Some(surface) = atrium.surface_for_app(logos_atrium::AppId::Terminal) {
+            let target = (surface.reference, flags);
+            if terminal_appearance != Some(target)
+                && common::ipc_send_handle(
+                    terminal,
+                    &AtriumSurfaceInput::new(surface.reference, InputMessage::appearance(flags)),
+                ) == IpcStatus::Ok
+            {
+                terminal_appearance = Some(target);
+            }
+        }
         let now_ticks = common::current_ticks();
         let menu_motion_active = unsafe {
             (&*core::ptr::addr_of!(COMMAND_MENU_TREE)).next_deadline(now_ticks).is_some()
@@ -2421,7 +2448,14 @@ mod terminal_scene_tests {
         let mut publisher = logos_ui_graphics::UiScenePublisher::new();
         let mut sink = CollectingSceneSink::default();
         let (status, sent) = publisher
-            .publish(surface.reference, 1, tree, APP_SCENE_THEME, None, &mut sink)
+            .publish(
+                surface.reference,
+                1,
+                tree,
+                logos_atrium::Atrium::new().app_theme(),
+                None,
+                &mut sink,
+            )
             .unwrap();
         assert_eq!(status, IpcStatus::Ok);
         assert!(sent <= logos_ui_graphics::MAX_UI_SCENE_OPS);

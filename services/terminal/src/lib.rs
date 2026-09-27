@@ -6,15 +6,20 @@
 extern crate std;
 
 use logos_abi::{
-    CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell, DEFAULT_COLUMNS, DEFAULT_ROWS,
-    GuiRect, GuiTextGridRow, InputMessage, IpcBytes, KeyCode, KeyState, MOD_ALT, MOD_CAPS_LOCK,
-    MOD_CTRL, MOD_SHIFT, MessageKind, terminal_grid_metrics,
+    APPEARANCE_REDUCED_MOTION, CELL_ATTR_BOLD, CELL_ATTR_DIM, CELL_ATTR_UNDERLINE, Cell,
+    DEFAULT_COLUMNS, DEFAULT_ROWS, GuiRect, GuiTextGridRow, InputMessage, IpcBytes, KeyCode,
+    KeyState, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MessageKind, terminal_grid_metrics,
 };
 
 const MAX_PARAMS: usize = 16;
 const REPLACEMENT_SCALAR: u32 = 0xfffd;
 /// Service-local storage cap; the ABI maximum is a protocol-wide ceiling.
 pub const TERMINAL_SCROLLBACK_LINES: usize = 64;
+/// Half a blink period in timer ticks (100 Hz): 500 ms on, 500 ms off.
+pub const CURSOR_BLINK_TICKS: u64 = 50;
+/// Like GTK's cursor-blink-timeout: after 10 s without activity the cursor
+/// stays solid, so an idle Terminal stops repainting.
+pub const CURSOR_BLINK_IDLE_TICKS: u64 = 1_000;
 const DEFAULT_FOREGROUND: u32 = 0x00d7_e3f4;
 const DEFAULT_BACKGROUND: u32 = 0x000b_1020;
 const ANSI_COLORS: [u32; 8] = [
@@ -125,6 +130,10 @@ pub struct TerminalState<const CELL_COUNT: usize> {
     scrollback_start: usize,
     scrollback_len: usize,
     view_offset: usize,
+    reduced_motion: bool,
+    cursor_hidden: bool,
+    blink_restart: bool,
+    blink_anchor: u64,
 }
 
 pub struct TerminalService {
@@ -167,6 +176,10 @@ impl TerminalService {
     pub fn next_grid_row(&mut self) -> Option<GuiTextGridRow> {
         self.terminal.next_grid_row()
     }
+
+    pub fn blink(&mut self, now_ticks: u64) {
+        self.terminal.blink(now_ticks);
+    }
 }
 
 impl Default for TerminalService {
@@ -201,6 +214,45 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             scrollback_start: 0,
             scrollback_len: 0,
             view_offset: 0,
+            reduced_motion: false,
+            cursor_hidden: false,
+            blink_restart: true,
+            blink_anchor: 0,
+        }
+    }
+
+    /// Reduced motion keeps the cursor solid (ADR-0089).
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.reduced_motion = reduced;
+        self.restart_blink();
+    }
+
+    /// Shows the cursor and restarts its blink phase on the next `blink`.
+    fn restart_blink(&mut self) {
+        self.blink_restart = true;
+        if self.cursor_hidden {
+            self.cursor_hidden = false;
+            self.mark_cell_dirty(self.cursor_column, self.cursor_row);
+        }
+    }
+
+    /// Advances the cursor blink: visible for `CURSOR_BLINK_TICKS`, hidden
+    /// for as long, restarting visible after any activity and settling
+    /// visible once idle. Reduced motion and a scrolled-back view keep it
+    /// steady.
+    pub fn blink(&mut self, now_ticks: u64) {
+        if self.blink_restart {
+            self.blink_restart = false;
+            self.blink_anchor = now_ticks;
+        }
+        let elapsed = now_ticks.saturating_sub(self.blink_anchor);
+        let hidden = !self.reduced_motion
+            && self.view_offset == 0
+            && elapsed < CURSOR_BLINK_IDLE_TICKS
+            && (elapsed / CURSOR_BLINK_TICKS) % 2 == 1;
+        if hidden != self.cursor_hidden {
+            self.cursor_hidden = hidden;
+            self.mark_cell_dirty(self.cursor_column, self.cursor_row);
         }
     }
 
@@ -226,6 +278,8 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         self.scrollback_start = 0;
         self.scrollback_len = 0;
         self.view_offset = 0;
+        self.cursor_hidden = false;
+        self.blink_restart = true;
         self.screen.fill(blank_cell());
         self.mark_all_dirty();
     }
@@ -251,6 +305,9 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         }
         let moved = cursor != (self.cursor_column, self.cursor_row);
         self.cursor_dirty |= moved;
+        if moved {
+            self.restart_blink();
+        }
         if moved {
             // The cursor is drawn by inverting a cell's colors in
             // `next_grid_row`, not stored in `screen`, so a cursor-only move
@@ -640,14 +697,15 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
             message.row = row as u16;
             message.cell_count = self.columns as u16;
             let cursor_column =
-                (self.view_offset == 0 && row == self.cursor_row).then_some(self.cursor_column);
+                (self.view_offset == 0 && !self.cursor_hidden && row == self.cursor_row)
+                    .then_some(self.cursor_column);
             for column in 0..self.columns {
                 let index = Self::index(column, row);
                 let mut cell = self.visible_cell(row, column);
                 if Some(column) == cursor_column {
                     // Solid block cursor: invert the cell's own colors so it
                     // reads correctly against any foreground/background the
-                    // program set there (S2 adds blink/reduced-motion).
+                    // program set there; `blink` hides it every other phase.
                     core::mem::swap(&mut cell.foreground, &mut cell.background);
                 }
                 message.cells[column] = cell;
@@ -661,6 +719,13 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
     }
 
     pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
+        if let Some(flags) = event.appearance_flags() {
+            self.set_reduced_motion(flags & APPEARANCE_REDUCED_MOTION != 0);
+            return None;
+        }
+        if event.kind != MessageKind::Pointer {
+            self.restart_blink();
+        }
         if event.kind == MessageKind::Key
             && matches!(event.state, KeyState::Pressed | KeyState::Repeat)
             && event.modifiers & MOD_SHIFT != 0
@@ -1025,6 +1090,72 @@ mod tests {
         assert_eq!(row.cells[2].codepoint, b'l' as u32);
         assert_eq!(row.cells[2].foreground, DEFAULT_FOREGROUND);
         assert!(terminal.next_grid_row().is_none());
+    }
+
+    fn cursor_cell_inverted(terminal: &mut Terminal) -> Option<bool> {
+        let (column, cursor_row) = terminal.cursor();
+        let mut inverted = None;
+        while let Some(row) = terminal.next_grid_row() {
+            if usize::from(row.row) == cursor_row {
+                inverted = Some(row.cells[column].background == DEFAULT_FOREGROUND);
+            }
+        }
+        inverted
+    }
+
+    #[test]
+    fn cursor_blinks_and_restarts_visible_on_activity() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"ab");
+        terminal.blink(1_000);
+        drain(&mut terminal);
+        terminal.blink(1_000 + CURSOR_BLINK_TICKS - 1);
+        assert_eq!(cursor_cell_inverted(&mut terminal), None, "still in the visible phase");
+        terminal.blink(1_000 + CURSOR_BLINK_TICKS);
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(false), "hidden phase repaints");
+        terminal.blink(1_000 + 2 * CURSOR_BLINK_TICKS);
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(true), "visible again");
+        terminal.blink(1_000 + 3 * CURSOR_BLINK_TICKS);
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(false));
+        // Typing shows the cursor at once and restarts the phase.
+        let key = InputMessage::key(KeyCode::Left, KeyState::Pressed, 0);
+        let _ = terminal.input(&key);
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(true));
+        terminal.blink(5_000);
+        terminal.blink(5_000 + CURSOR_BLINK_TICKS - 1);
+        assert_eq!(cursor_cell_inverted(&mut terminal), None);
+        // Idle long enough and the cursor settles visible for good.
+        terminal.blink(5_000 + CURSOR_BLINK_IDLE_TICKS - CURSOR_BLINK_TICKS);
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(false));
+        terminal.blink(5_000 + CURSOR_BLINK_IDLE_TICKS);
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(true));
+        for later in 1..4 {
+            terminal.blink(5_000 + CURSOR_BLINK_IDLE_TICKS + later * CURSOR_BLINK_TICKS);
+            assert_eq!(cursor_cell_inverted(&mut terminal), None, "idle, no repaints");
+        }
+    }
+
+    #[test]
+    fn reduced_motion_appearance_keeps_the_cursor_solid() {
+        let mut terminal = Terminal::new();
+        terminal.feed(b"ab");
+        terminal.blink(0);
+        drain(&mut terminal);
+        terminal.blink(CURSOR_BLINK_TICKS);
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(false));
+        assert!(
+            terminal.input(&InputMessage::appearance(APPEARANCE_REDUCED_MOTION)).is_none(),
+            "appearance never reaches the session"
+        );
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(true), "shown immediately");
+        for phase in 1..6 {
+            terminal.blink(phase * CURSOR_BLINK_TICKS);
+            assert_eq!(cursor_cell_inverted(&mut terminal), None, "phase {phase}");
+        }
+        let _ = terminal.input(&InputMessage::appearance(0));
+        terminal.blink(10 * CURSOR_BLINK_TICKS);
+        terminal.blink(11 * CURSOR_BLINK_TICKS);
+        assert_eq!(cursor_cell_inverted(&mut terminal), Some(false), "blinks again");
     }
 
     #[test]

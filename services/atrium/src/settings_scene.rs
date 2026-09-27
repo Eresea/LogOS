@@ -2,9 +2,10 @@ use logos_abi::GuiRect;
 use logos_ui::{UiBlueprint, UiComponentTree, UiIcon, UiNodeKind, UiStyle, UiStyleList, UiText};
 
 use crate::{
-    Atrium, KeyboardLayout, MouseAcceleration, SETTINGS_NAV_LEFT, SETTINGS_NAV_WIDTH,
+    Accent, Atrium, KeyboardLayout, MouseAcceleration, SETTINGS_NAV_LEFT, SETTINGS_NAV_WIDTH,
     SETTINGS_PAGE_LEFT, SETTINGS_PANE_TOP, SETTINGS_SEARCH_BOUNDS, SETTINGS_SELECT_BOUNDS,
-    STATUS_BAR_BOUNDS, SettingsPage, settings_category_bounds, surface_close_bounds,
+    SETTINGS_TOGGLE_LABELS, STATUS_BAR_BOUNDS, SettingsPage, settings_category_bounds,
+    settings_swatch_bounds, settings_toggle_row_bounds, surface_close_bounds,
 };
 
 const PAGES: usize = SettingsPage::ALL.len();
@@ -31,12 +32,21 @@ const POPOVER: usize = PAGE + 6;
 const HIGHLIGHT: usize = PAGE + 7;
 const OPTION_BASE: usize = PAGE + 8;
 const SCROLLBAR: usize = OPTION_BASE + MAX_OPTIONS;
-const NODE_COUNT: usize = SCROLLBAR + 1;
+/// Appearance: a backing card, a two-disc ring behind the selected swatch,
+/// the swatches, then a label, track and knob per on/off row.
+const APPEARANCE_CARD: usize = SCROLLBAR + 1;
+const RING: usize = APPEARANCE_CARD + 1;
+const RING_GAP: usize = RING + 1;
+const SWATCH_BASE: usize = RING_GAP + 1;
+const TOGGLE_BASE: usize = SWATCH_BASE + Accent::ALL.len();
+const NODE_COUNT: usize = TOGGLE_BASE + SETTINGS_TOGGLE_LABELS.len() * 3;
 
-/// What a Settings page shows in the page pane: a title and one labelled
-/// select. Adding a page adds its arm here.
+/// What a Settings page shows in the page pane under its title: a field
+/// label, then either one select or the Appearance controls. Adding a page
+/// adds its arm here.
 struct PageContent {
     field: &'static [u8],
+    select: bool,
     value: &'static [u8],
     options: [&'static [u8]; MAX_OPTIONS],
 }
@@ -45,6 +55,7 @@ fn page_content(page: SettingsPage, atrium: &Atrium) -> PageContent {
     match page {
         SettingsPage::Keyboard => PageContent {
             field: b"Keyboard layout",
+            select: true,
             value: match atrium.keyboard_layout() {
                 KeyboardLayout::Azerty => b"AZERTY",
                 KeyboardLayout::Qwerty => b"QWERTY",
@@ -53,6 +64,7 @@ fn page_content(page: SettingsPage, atrium: &Atrium) -> PageContent {
         },
         SettingsPage::Mouse => PageContent {
             field: b"Pointer acceleration",
+            select: true,
             value: match atrium.mouse_acceleration() {
                 MouseAcceleration::Off => b"Off",
                 MouseAcceleration::Low => b"Low",
@@ -60,6 +72,12 @@ fn page_content(page: SettingsPage, atrium: &Atrium) -> PageContent {
                 MouseAcceleration::High => b"High",
             },
             options: [b"Off", b"Low", b"Medium", b"High"],
+        },
+        SettingsPage::Appearance => PageContent {
+            field: b"Accent colour",
+            select: false,
+            value: b"",
+            options: [b""; MAX_OPTIONS],
         },
     }
 }
@@ -115,6 +133,24 @@ fn mount(tree: &mut UiComponentTree) -> bool {
         *node = (UiNodeKind::Label, UiStyleList::EMPTY, b"", UiIcon::None);
     }
     nodes[SCROLLBAR] = (UiNodeKind::Panel, rounded, b"", UiIcon::None);
+    let full = styles(&[UiStyle::RoundedFull]);
+    nodes[APPEARANCE_CARD] = (UiNodeKind::Panel, UiStyleList::EMPTY, b"", UiIcon::None);
+    nodes[RING] = (UiNodeKind::Button, full, b"", UiIcon::None);
+    nodes[RING_GAP] = (UiNodeKind::Panel, full, b"", UiIcon::None);
+    for (index, accent) in Accent::ALL.into_iter().enumerate() {
+        nodes[SWATCH_BASE + index] = (
+            UiNodeKind::Panel,
+            styles(&[UiStyle::RoundedFull, UiStyle::Swatch(accent.index() as u8)]),
+            b"",
+            UiIcon::None,
+        );
+    }
+    for (index, label) in SETTINGS_TOGGLE_LABELS.into_iter().enumerate() {
+        let base = TOGGLE_BASE + index * 3;
+        nodes[base] = (UiNodeKind::Label, UiStyleList::EMPTY, label, UiIcon::None);
+        nodes[base + 1] = (UiNodeKind::Button, full, b"", UiIcon::None);
+        nodes[base + 2] = (UiNodeKind::Panel, full, b"", UiIcon::None);
+    }
     for (index, (kind, node_styles, text, icon)) in nodes.into_iter().enumerate().skip(1) {
         let Ok(node) = blueprint.push_child(kind, root, 1 + index as u16) else { return false };
         if usize::from(node) != index
@@ -163,6 +199,7 @@ pub fn build_settings_scene(tree: &mut UiComponentTree, bounds: GuiRect, atrium:
     if tree.tree().len() != NODE_COUNT && !mount(tree) {
         return false;
     }
+    tree.set_reduced_motion(atrium.reduced_motion());
     let pane_height = bounds.height.saturating_sub(SETTINGS_PANE_TOP as u32 + 20);
     let close = surface_close_bounds(bounds);
     if !set_bounds(tree, ROOT, bounds)
@@ -243,7 +280,9 @@ pub fn build_settings_scene(tree: &mut UiComponentTree, bounds: GuiRect, atrium:
 
     let content = page_content(current, atrium);
     let page_width = bounds.width.saturating_sub(SETTINGS_PAGE_LEFT as u32 + 20);
-    let select = offset(bounds, SETTINGS_SELECT_BOUNDS);
+    let select =
+        if content.select { offset(bounds, SETTINGS_SELECT_BOUNDS) } else { GuiRect::EMPTY };
+    let inside = |rect: GuiRect| if select.is_empty() { GuiRect::EMPTY } else { rect };
     if !set_bounds(
         tree,
         PAGE,
@@ -269,29 +308,38 @@ pub fn build_settings_scene(tree: &mut UiComponentTree, bounds: GuiRect, atrium:
         || !set_bounds(
             tree,
             SELECT_VALUE,
-            GuiRect::new(select.x + 16, select.y, select.width.saturating_sub(48), select.height),
+            inside(GuiRect::new(
+                select.x + 16,
+                select.y,
+                select.width.saturating_sub(48),
+                select.height,
+            )),
         )
         || !set_text(tree, SELECT_VALUE, content.value)
         || !set_bounds(
             tree,
             SELECT_CHEVRON,
-            GuiRect::new(select.x + select.width as i32 - 28, select.y, 16, select.height),
+            inside(GuiRect::new(select.x + select.width as i32 - 28, select.y, 16, select.height)),
         )
     {
         return false;
     }
-    let select_open = match current {
-        SettingsPage::Keyboard => atrium.keyboard_select_open(),
-        SettingsPage::Mouse => atrium.mouse_select_open(),
+    let (select_open, select_hovered, hovered_option) = match current {
+        SettingsPage::Keyboard => (
+            atrium.keyboard_select_open(),
+            atrium.keyboard_select_hovered(),
+            atrium.keyboard_select_hovered_option(),
+        ),
+        SettingsPage::Mouse => (
+            atrium.mouse_select_open(),
+            atrium.mouse_select_hovered(),
+            atrium.mouse_select_hovered_option(),
+        ),
+        SettingsPage::Appearance => (false, false, None),
     };
-    let select_hovered = match current {
-        SettingsPage::Keyboard => atrium.keyboard_select_hovered(),
-        SettingsPage::Mouse => atrium.mouse_select_hovered(),
-    };
-    let hovered_option = match current {
-        SettingsPage::Keyboard => atrium.keyboard_select_hovered_option(),
-        SettingsPage::Mouse => atrium.mouse_select_hovered_option(),
-    };
+    if !build_appearance(tree, bounds, atrium, current == SettingsPage::Appearance) {
+        return false;
+    }
     let select_styles = if select_hovered || select_open {
         styles(&[UiStyle::RoundedLarge, UiStyle::BackgroundAccent])
     } else {
@@ -340,6 +388,72 @@ pub fn build_settings_scene(tree: &mut UiComponentTree, bounds: GuiRect, atrium:
         };
         if !set_bounds(tree, OPTION_BASE + index, open_rect(rect))
             || !set_text(tree, OPTION_BASE + index, option)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Lays out the Appearance controls, or hides them on other pages.
+fn build_appearance(
+    tree: &mut UiComponentTree,
+    bounds: GuiRect,
+    atrium: &Atrium,
+    shown: bool,
+) -> bool {
+    let show = |rect: GuiRect| if shown { offset(bounds, rect) } else { GuiRect::EMPTY };
+    // Invisible (pane colour, no shadow) but painted first: Display merges
+    // every control's damage into it instead of counting each separately
+    // against `MAX_GUI_DAMAGE_RECTS`, as Home's grid container does.
+    let last_row = settings_toggle_row_bounds(SETTINGS_TOGGLE_LABELS.len() - 1);
+    // Starts just under the field label's text (it would cover it) while
+    // still overlapping the label box, so the label's damage merges too.
+    let card_top = crate::SETTINGS_SWATCH_BOUNDS.y - 10;
+    let card = GuiRect::new(
+        SETTINGS_SELECT_BOUNDS.x - 12,
+        card_top,
+        last_row.width + 24,
+        (last_row.y + last_row.height as i32 + 12 - card_top) as u32,
+    );
+    if !set_bounds(tree, APPEARANCE_CARD, show(card)) {
+        return false;
+    }
+    let selected = settings_swatch_bounds(atrium.accent().index());
+    let grow = |rect: GuiRect, by: i32| {
+        GuiRect::new(
+            rect.x - by,
+            rect.y - by,
+            rect.width + 2 * by as u32,
+            rect.height + 2 * by as u32,
+        )
+    };
+    let Ok(ring) = tree.tree().handle_at(RING) else { return false };
+    if tree.tree_mut().set_focused(ring, true).is_err()
+        || !set_bounds(tree, RING, show(grow(selected, 6)))
+        || !set_bounds(tree, RING_GAP, show(grow(selected, 3)))
+    {
+        return false;
+    }
+    for index in 0..Accent::ALL.len() {
+        if !set_bounds(tree, SWATCH_BASE + index, show(settings_swatch_bounds(index))) {
+            return false;
+        }
+    }
+    for (index, on) in [atrium.fps_overlay(), atrium.reduced_motion()].into_iter().enumerate() {
+        let base = TOGGLE_BASE + index * 3;
+        let row = settings_toggle_row_bounds(index);
+        let track = GuiRect::new(row.x + row.width as i32 - 52, row.y + 8, 52, 28);
+        let knob = GuiRect::new(track.x + if on { 28 } else { 4 }, track.y + 4, 20, 20);
+        let Ok(track_handle) = tree.tree().handle_at(base + 1) else { return false };
+        if tree.tree_mut().set_focused(track_handle, on).is_err()
+            || !set_bounds(
+                tree,
+                base,
+                show(GuiRect::new(row.x, row.y, row.width.saturating_sub(64), row.height)),
+            )
+            || !set_bounds(tree, base + 1, show(track))
+            || !set_bounds(tree, base + 2, show(knob))
         {
             return false;
         }
@@ -427,6 +541,23 @@ mod tests {
             }
         }
 
+        let mut appearance = Atrium::new();
+        appearance.authenticate();
+        let row = settings_category_bounds(2);
+        pointer(&mut appearance, row.x + 4, row.y + 4, true);
+        assert_eq!(appearance.settings_page(), SettingsPage::Appearance);
+        check(&appearance, "Appearance idle");
+        for index in 0..Accent::ALL.len() {
+            let swatch = crate::settings_swatch_bounds(index);
+            pointer(&mut appearance, swatch.x + 20, swatch.y + 20, true);
+            check(&appearance, &format!("Appearance accent={index}"));
+        }
+        for index in 0..SETTINGS_TOGGLE_LABELS.len() {
+            let toggle = crate::settings_toggle_row_bounds(index);
+            pointer(&mut appearance, toggle.x + 4, toggle.y + 4, true);
+            check(&appearance, &format!("Appearance toggle={index} flipped"));
+        }
+
         let mut filtered = Atrium::new();
         filtered.authenticate();
         let search = crate::SETTINGS_SEARCH_BOUNDS;
@@ -459,5 +590,77 @@ mod tests {
         pointer(&mut atrium, 900, 600, false);
         assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
         assert_eq!(state(&tree, mouse_row), (false, false));
+    }
+
+    fn fill_color_of(tree: &UiComponentTree, theme: UiSceneTheme, index: usize) -> u32 {
+        let surface = logos_abi::SurfaceHandle::new(1, 1, 13).unwrap();
+        let scene = emit(surface, 1, tree, theme).unwrap();
+        let fill_id = (index as u32) * 3 + 2;
+        scene
+            .as_slice()
+            .iter()
+            .find(|operation| operation.node_id == fill_id)
+            .map(|operation| operation.command.color_rgb())
+            .unwrap()
+    }
+
+    #[test]
+    fn appearance_page_updates_accent_theme_and_toggles_on_the_next_frame() {
+        let mut tree = UiComponentTree::new();
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let row = settings_category_bounds(2);
+        pointer(&mut atrium, row.x + 4, row.y + 4, true);
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        let blue = Accent::Blue.colors().focus;
+        assert_eq!(fill_color_of(&tree, atrium.app_theme(), CATEGORY_BASE + 6), blue);
+
+        let teal = crate::settings_swatch_bounds(Accent::Teal.index());
+        pointer(&mut atrium, teal.x + 20, teal.y + 20, true);
+        assert_eq!(atrium.accent(), Accent::Teal);
+        let teal_focus = Accent::Teal.colors().focus;
+        assert_eq!(atrium.app_theme().focus, teal_focus);
+        assert_eq!(atrium.home_theme().focus, teal_focus);
+        assert_eq!(atrium.home_theme().accent, Accent::Teal.colors().accent);
+        assert_eq!(atrium.app_theme().accent, 0x9f3b3b, "close control stays red");
+        // The next Settings frame paints the selected row in the new accent.
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert_eq!(fill_color_of(&tree, atrium.app_theme(), CATEGORY_BASE + 6), teal_focus);
+        // The swatch fills are the fixed palette, independent of the theme.
+        assert_eq!(
+            fill_color_of(&tree, atrium.app_theme(), SWATCH_BASE + Accent::Orange.index()),
+            Accent::Orange.colors().focus
+        );
+
+        // Home's focused tile follows the accent too.
+        let mut home = UiComponentTree::new();
+        let wall =
+            logos_abi::WallTime { year: 2026, month: 9, day: 27, hour: 9, minute: 0, second: 0 };
+        assert!(crate::build_home_scene(&mut home, &atrium, 0, wall));
+        let surface = logos_abi::SurfaceHandle::new(1, 1, 13).unwrap();
+        let scene = emit(surface, 1, &home, atrium.home_theme()).unwrap();
+        assert!(
+            scene.as_slice().iter().any(|operation| operation.command.color_rgb() == teal_focus),
+            "Home paints its focused tile in the chosen accent"
+        );
+
+        // Toggles flip on click and reach the tree on the next build.
+        assert!(atrium.fps_overlay());
+        assert!(!atrium.reduced_motion());
+        for index in 0..SETTINGS_TOGGLE_LABELS.len() {
+            let toggle = crate::settings_toggle_row_bounds(index);
+            pointer(&mut atrium, toggle.x + 4, toggle.y + 4, true);
+        }
+        assert!(!atrium.fps_overlay());
+        assert!(atrium.reduced_motion());
+        assert_eq!(atrium.appearance_flags(), logos_abi::APPEARANCE_REDUCED_MOTION);
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium));
+        assert!(tree.animator().reduced_motion());
+        assert!(crate::build_home_scene(&mut home, &atrium, 0, wall));
+        assert!(home.animator().reduced_motion());
+        let fps_track = tree.tree().handle_at(TOGGLE_BASE + 1).unwrap();
+        let motion_track = tree.tree().handle_at(TOGGLE_BASE + 4).unwrap();
+        assert!(!tree.tree().node(fps_track).unwrap().interaction.is_focused());
+        assert!(tree.tree().node(motion_track).unwrap().interaction.is_focused());
     }
 }

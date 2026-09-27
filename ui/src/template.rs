@@ -272,6 +272,9 @@ pub enum UiStyle {
     Ease(UiEasing),
     Animation(UiAnimationPreset),
     Transparent,
+    /// Fills a panel or button with accent swatch `n` of the renderer's
+    /// fixed accent palette (Settings > Appearance).
+    Swatch(u8),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

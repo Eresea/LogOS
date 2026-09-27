@@ -483,7 +483,7 @@ function Framebuffer-SettingsCategorySelected {
     # Sample each row's left padding, clear of its icon and label: the
     # selected row carries the focus fill (0x4b82f2), idle rows show the
     # navigation pane (0x182535) through their transparent fill.
-    for ($row = 0; $row -lt 2; $row++) {
+    for ($row = 0; $row -lt 3; $row++) {
         $x = [int]$groups[1].Value + 36
         $y = [int]$groups[2].Value + 164 + 48 * $row + 22
         $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
@@ -958,9 +958,9 @@ try {
         }
         if ($SystemProof) {
             # #78: Settings opens on its category list. Settings is the last
-            # Home tile (index 4); Down moves the selection to Mouse. Escape
-            # closes Settings and Left x4 returns grid focus to Calculator so
-            # the System step below starts from its usual tile.
+            # Home tile (index 4); Down moves the selection to Mouse, then
+            # Appearance. Escape closes Settings and Left x4 returns grid
+            # focus to Calculator so the System step starts from its tile.
             $settingsSceneMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium app=Settings scene published'
             1..4 | ForEach-Object {
                 Send-QmpKey $qmp 'right'
@@ -978,6 +978,12 @@ try {
             $settingsMouseFrame = Join-Path $repoRoot "target\qemu-settings-mouse-$PID.ppm"
             if (-not (Wait-QmpSettingsCategory $qmp $settingsMouseFrame 1 $TimeoutSeconds)) {
                 throw 'Down did not move the Settings selection to the Mouse category.'
+            }
+            # #79: the Appearance page (accent swatches, FPS and motion rows).
+            Send-QmpKey $qmp 'down'
+            $settingsAppearanceFrame = Join-Path $repoRoot "target\qemu-settings-appearance-$PID.ppm"
+            if (-not (Wait-QmpSettingsCategory $qmp $settingsAppearanceFrame 2 $TimeoutSeconds)) {
+                throw 'Down did not move the Settings selection to the Appearance category.'
             }
             Send-QmpKey $qmp 'esc'
             Start-Sleep -Milliseconds 300
