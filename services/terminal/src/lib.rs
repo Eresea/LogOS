@@ -195,6 +195,13 @@ pub struct TerminalService {
     /// tab is closed first). `None` means output follows the active tab,
     /// same as before a command is submitted.
     running_command: Option<TabHandle>,
+    /// How many leading bytes of `SHELL_PROMPT` have matched so far,
+    /// carried across `session_output_bytes` calls: `ShellOutput` chunks at
+    /// `MAX_IPC_BYTES` (session.rs's `flush`) can and do split the ~27-byte
+    /// prompt across two IPC messages, so a per-call `bytes.windows(...)`
+    /// scan would miss a match straddling the boundary and leave
+    /// `running_command` pinned forever.
+    prompt_matched: usize,
 }
 
 const _: () =
@@ -206,7 +213,7 @@ impl TerminalService {
         let mut sessions = [SESSION; MAX_TERMINAL_SESSIONS];
         sessions[0].open = true;
         sessions[0].generation = 1;
-        Self { sessions, active: 0, running_command: None }
+        Self { sessions, active: 0, running_command: None, prompt_matched: 0 }
     }
 
     fn active_session(&mut self) -> &mut TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }> {
@@ -351,6 +358,7 @@ impl TerminalService {
         // switches to next.
         if matches!(outgoing.as_ref().and_then(IpcBytes::as_bytes), Some(b"\r")) {
             self.running_command = Some(self.active_tab());
+            self.prompt_matched = 0;
         }
         outgoing
     }
@@ -373,13 +381,25 @@ impl TerminalService {
         let target = match self.running_command {
             Some(handle) if !self.is_valid(handle) => {
                 self.running_command = None;
+                self.prompt_matched = 0;
                 return;
             }
             Some(handle) => handle.slot(),
             None => self.active,
         };
-        if bytes.windows(SHELL_PROMPT.len()).any(|window| window == SHELL_PROMPT) {
-            self.running_command = None;
+        if self.running_command.is_some() {
+            for &byte in bytes {
+                if byte == SHELL_PROMPT[self.prompt_matched] {
+                    self.prompt_matched += 1;
+                    if self.prompt_matched == SHELL_PROMPT.len() {
+                        self.running_command = None;
+                        self.prompt_matched = 0;
+                        break;
+                    }
+                } else {
+                    self.prompt_matched = usize::from(byte == SHELL_PROMPT[0]);
+                }
+            }
         }
         self.sessions[target].terminal.feed(bytes);
     }
@@ -1588,6 +1608,61 @@ mod tests {
             }
         }
         assert!(saw_z, "routing should fall back to the active tab after the drop");
+    }
+
+    #[test]
+    fn prompt_detection_works_when_split_across_output_chunks() {
+        // `ShellOutput` is chunked at `MAX_IPC_BYTES` (session.rs's
+        // `flush`), which can and does split `SHELL_PROMPT` (~27 bytes)
+        // across two `session_output_bytes` calls. A naive per-call
+        // `bytes.windows(...)` scan would never see the whole prompt in
+        // either call and leave `running_command` pinned forever; the
+        // streaming match-progress counter must catch it across the
+        // boundary instead.
+        let mut service = TerminalService::new();
+        let tab_one = service.active_tab();
+        let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0);
+        assert_eq!(service.input(&enter).unwrap().as_bytes(), Some(&b"\r"[..]));
+        assert!(service.running_command.is_some());
+        let tab_two = service.open_tab().unwrap();
+        assert_eq!(service.active_tab(), tab_two);
+        drain_service(&mut service);
+
+        let split = SHELL_PROMPT.len() / 2;
+        let mut first_chunk = b"result\r\n".to_vec();
+        first_chunk.extend_from_slice(&SHELL_PROMPT[..split]);
+        service.session_output_bytes(&first_chunk);
+        assert!(service.running_command.is_some(), "prompt isn't complete after the first chunk");
+        service.session_output_bytes(&SHELL_PROMPT[split..]);
+        assert!(
+            service.running_command.is_none(),
+            "the split prompt across two chunks must still be recognized"
+        );
+        assert_eq!(service.prompt_matched, 0);
+
+        // Routing reverted to the active tab (tab two): new output lands
+        // there, not tab one.
+        drain_service(&mut service);
+        service.session_output_bytes(b"z");
+        let mut saw_z_in_tab_two = false;
+        while let Some(row) = service.next_grid_row() {
+            if row.cells[0].codepoint == b'z' as u32 {
+                saw_z_in_tab_two = true;
+            }
+        }
+        assert!(saw_z_in_tab_two, "output should follow the active tab once the prompt returned");
+
+        // And tab one's "result" is where it belongs (switching back force-
+        // redraws it, so this drain carries its actual content).
+        assert!(service.switch_tab(tab_one));
+        let mut saw_result_in_tab_one = false;
+        while let Some(row) = service.next_grid_row() {
+            if row.cells[..row.cell_count as usize].iter().any(|cell| cell.codepoint == b'r' as u32)
+            {
+                saw_result_in_tab_one = true;
+            }
+        }
+        assert!(saw_result_in_tab_one);
     }
 
     #[test]
