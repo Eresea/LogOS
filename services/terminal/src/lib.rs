@@ -136,8 +136,53 @@ pub struct TerminalState<const CELL_COUNT: usize> {
     blink_anchor: u64,
 }
 
-pub struct TerminalService {
+/// T3 (#76): the Terminal service hosts up to this many independent
+/// sessions (grid + scrollback each), with a tab bar to switch between
+/// them. The cap is fixed; no reordering or drag-out (out of scope).
+pub const MAX_TERMINAL_SESSIONS: usize = 4;
+
+/// Generation-safe handle to a tab, mirroring the `slot`/`generation`
+/// pattern `SurfaceHandle` already uses elsewhere in the ABI: closing a tab
+/// frees its slot and bumps the generation, so a handle captured before the
+/// close is rejected by `switch_tab`/`close_tab` rather than silently
+/// hitting whatever session was reused into that slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TabHandle {
+    slot: u8,
+    generation: u8,
+}
+
+impl TabHandle {
+    pub const EMPTY: Self = Self { slot: u8::MAX, generation: 0 };
+
+    pub const fn is_valid(self) -> bool {
+        self.slot != u8::MAX && self.generation != 0
+    }
+
+    pub const fn slot(self) -> usize {
+        self.slot as usize
+    }
+}
+
+struct Session {
     terminal: TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }>,
+    open: bool,
+    generation: u8,
+}
+
+impl Session {
+    const fn new() -> Self {
+        Self { terminal: TerminalState::new(), open: false, generation: 0 }
+    }
+
+    fn handle(&self, slot: usize) -> TabHandle {
+        TabHandle { slot: slot as u8, generation: self.generation }
+    }
+}
+
+pub struct TerminalService {
+    sessions: [Session; MAX_TERMINAL_SESSIONS],
+    active: usize,
 }
 
 const _: () =
@@ -145,40 +190,177 @@ const _: () =
 
 impl TerminalService {
     pub const fn new() -> Self {
-        Self { terminal: TerminalState::new() }
+        const SESSION: Session = Session::new();
+        let mut sessions = [SESSION; MAX_TERMINAL_SESSIONS];
+        sessions[0].open = true;
+        sessions[0].generation = 1;
+        Self { sessions, active: 0 }
     }
 
+    fn active_session(&mut self) -> &mut TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }> {
+        &mut self.sessions[self.active].terminal
+    }
+
+    /// The active tab's handle; always valid since the service always keeps
+    /// at least one tab open.
+    pub fn active_tab(&self) -> TabHandle {
+        self.sessions[self.active].handle(self.active)
+    }
+
+    pub const fn tab_count(&self) -> usize {
+        let mut count = 0;
+        let mut slot = 0;
+        while slot < MAX_TERMINAL_SESSIONS {
+            if self.sessions[slot].open {
+                count += 1;
+            }
+            slot += 1;
+        }
+        count
+    }
+
+    /// Handle of the open tab at `slot`, for tab-bar rendering; `None` if
+    /// that slot is not currently open.
+    pub fn tab_at(&self, slot: usize) -> Option<TabHandle> {
+        self.sessions.get(slot).filter(|session| session.open).map(|session| session.handle(slot))
+    }
+
+    /// Which slots are open, one bit per slot (bit 0 = slot 0), for
+    /// reporting tab-bar state to Atrium's scene builder.
+    pub fn open_bitmap(&self) -> u8 {
+        let mut bitmap = 0u8;
+        for (slot, session) in self.sessions.iter().enumerate() {
+            if session.open {
+                bitmap |= 1 << slot;
+            }
+        }
+        bitmap
+    }
+
+    pub const fn active_slot(&self) -> usize {
+        self.active
+    }
+
+    /// Opens a new tab (a fresh session, reset to the current surface
+    /// bounds) and makes it active. `None` once `MAX_TERMINAL_SESSIONS` are
+    /// already open.
+    pub fn open_tab(&mut self) -> Option<TabHandle> {
+        let (columns, rows) = {
+            let active = &self.sessions[self.active].terminal;
+            (active.columns, active.rows)
+        };
+        let slot = self.sessions.iter().position(|session| !session.open)?;
+        let session = &mut self.sessions[slot];
+        session.terminal = TerminalState::new();
+        session.terminal.resize(columns, rows);
+        session.open = true;
+        session.generation = session.generation.wrapping_add(1).max(1);
+        self.active = slot;
+        self.sessions[slot].terminal.force_redraw();
+        Some(self.sessions[slot].handle(slot))
+    }
+
+    /// Closes `handle`'s tab, freeing its slot for reuse (the slot's
+    /// generation is bumped, so a stale handle into it is rejected). Never
+    /// closes the last remaining tab. Picks a new active tab if the closed
+    /// one was active.
+    pub fn close_tab(&mut self, handle: TabHandle) -> bool {
+        if !self.is_valid(handle) || self.tab_count() <= 1 {
+            return false;
+        }
+        let slot = handle.slot();
+        self.sessions[slot].open = false;
+        self.sessions[slot].generation = self.sessions[slot].generation.wrapping_add(1).max(1);
+        if self.active == slot {
+            self.active = (0..MAX_TERMINAL_SESSIONS)
+                .find(|&candidate| self.sessions[candidate].open)
+                .unwrap_or(0);
+            self.sessions[self.active].terminal.force_redraw();
+        }
+        true
+    }
+
+    /// Switches the active tab by click. Rejects a stale or closed handle.
+    pub fn switch_tab(&mut self, handle: TabHandle) -> bool {
+        if !self.is_valid(handle) {
+            return false;
+        }
+        if self.active != handle.slot() {
+            self.active = handle.slot();
+            self.active_session().force_redraw();
+        }
+        true
+    }
+
+    /// Ctrl+Tab: switches to the next open tab, wrapping around.
+    pub fn next_tab(&mut self) {
+        let mut slot = (self.active + 1) % MAX_TERMINAL_SESSIONS;
+        while !self.sessions[slot].open {
+            slot = (slot + 1) % MAX_TERMINAL_SESSIONS;
+        }
+        self.active = slot;
+        self.active_session().force_redraw();
+    }
+
+    fn is_valid(&self, handle: TabHandle) -> bool {
+        handle.is_valid()
+            && handle.slot() < MAX_TERMINAL_SESSIONS
+            && self.sessions[handle.slot()].open
+            && self.sessions[handle.slot()].generation == handle.generation
+    }
+
+    /// Input routes only to the active session; Ctrl+Tab switches tabs and
+    /// Ctrl+Shift+T opens a new one (a conventional accelerator alongside
+    /// the tab bar's own new-tab button and per-tab close control),
+    /// instead of reaching the shell.
     pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
-        self.terminal.input(event)
+        if event.kind == MessageKind::Key
+            && matches!(event.state, KeyState::Pressed | KeyState::Repeat)
+            && event.modifiers & MOD_CTRL != 0
+        {
+            let code = KeyCode::from_raw(event.code);
+            if matches!(code, KeyCode::Tab) {
+                self.next_tab();
+                return None;
+            }
+            if event.state == KeyState::Pressed
+                && event.modifiers & MOD_SHIFT != 0
+                && code == KeyCode::character(b't')
+            {
+                self.open_tab();
+                return None;
+            }
+        }
+        self.active_session().input(event)
     }
 
     pub fn session_output(&mut self, message: &IpcBytes) {
         if let Some(bytes) = message.as_bytes() {
-            self.terminal.feed(bytes);
+            self.active_session().feed(bytes);
         }
     }
 
     pub fn session_output_bytes(&mut self, bytes: &[u8]) {
-        self.terminal.feed(bytes);
+        self.active_session().feed(bytes);
     }
 
     pub fn reset(&mut self) {
-        self.terminal.reset();
+        self.active_session().reset();
     }
 
     pub fn resize_to_surface(&mut self, bounds: GuiRect) {
         // Shared with Atrium's `TextGrid` scene-node sizing (#75) so both
         // sides always agree on the grid shape; see `terminal_grid_metrics`.
         let (columns, rows, _) = terminal_grid_metrics(bounds);
-        self.terminal.resize(columns, rows);
+        self.active_session().resize(columns, rows);
     }
 
     pub fn next_grid_row(&mut self) -> Option<GuiTextGridRow> {
-        self.terminal.next_grid_row()
+        self.active_session().next_grid_row()
     }
 
     pub fn blink(&mut self, now_ticks: u64) {
-        self.terminal.blink(now_ticks);
+        self.active_session().blink(now_ticks);
     }
 }
 
@@ -281,6 +463,16 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         self.cursor_hidden = false;
         self.blink_restart = true;
         self.screen.fill(blank_cell());
+        self.mark_all_dirty();
+    }
+
+    /// Forces every cell to redraw on the next `next_grid_row` drain
+    /// without otherwise touching cursor/scrollback state. Used when a
+    /// hidden session becomes visible again (tab switch, #76): its grid
+    /// store on the Display side holds whatever the previously active
+    /// session last drew, so it needs a full repaint.
+    pub fn force_redraw(&mut self) {
+        self.full_redraw_pending = true;
         self.mark_all_dirty();
     }
 
@@ -860,9 +1052,10 @@ mod tests {
 
     #[test]
     fn resize_updates_render_dimensions() {
-        // Bounds minus `TERMINAL_CHROME_HEIGHT` and `TERMINAL_CONTENT_PADDING`
-        // on every edge (#75), matching `terminal_grid_metrics` exactly so
-        // Atrium's grid node and this resize can never disagree on shape.
+        // Bounds minus `TERMINAL_CHROME_HEIGHT`, `TERMINAL_TAB_BAR_HEIGHT`
+        // and `TERMINAL_CONTENT_PADDING` on every edge (#75, #76), matching
+        // `terminal_grid_metrics` exactly so Atrium's grid node and this
+        // resize can never disagree on shape.
         let mut terminal = TerminalService::new();
         terminal.resize_to_surface(GuiRect::new(0, 0, 640, 352));
         let mut rows_seen = 0;
@@ -870,7 +1063,7 @@ mod tests {
             assert_eq!(message.cell_count, 78);
             rows_seen += 1;
         }
-        assert_eq!(rows_seen, 19);
+        assert_eq!(rows_seen, 17);
     }
 
     #[test]
@@ -1226,6 +1419,92 @@ mod tests {
         drain(&mut terminal);
         terminal.feed(b"x\x1b[2J");
         assert_eq!(drain(&mut terminal), DEFAULT_ROWS);
+    }
+
+    #[test]
+    fn session_cap_is_enforced_at_four_tabs() {
+        // #76: the service starts with one tab open; three more can be
+        // opened up to MAX_TERMINAL_SESSIONS, and a fifth is refused.
+        let mut service = TerminalService::new();
+        assert_eq!(service.tab_count(), 1);
+        for _ in 0..(MAX_TERMINAL_SESSIONS - 1) {
+            assert!(service.open_tab().is_some());
+        }
+        assert_eq!(service.tab_count(), MAX_TERMINAL_SESSIONS);
+        assert!(service.open_tab().is_none());
+        assert_eq!(service.tab_count(), MAX_TERMINAL_SESSIONS);
+    }
+
+    #[test]
+    fn closing_a_tab_frees_and_reuses_its_slot_generation_safely() {
+        let mut service = TerminalService::new();
+        let second = service.open_tab().unwrap();
+        assert_eq!(service.tab_count(), 2);
+        assert!(service.close_tab(second));
+        assert_eq!(service.tab_count(), 1);
+        // A stale handle into the freed slot is rejected.
+        assert!(!service.switch_tab(second));
+        assert!(!service.close_tab(second));
+        // Reopening reuses the freed slot with a fresh generation.
+        let third = service.open_tab().unwrap();
+        assert_eq!(third.slot(), second.slot());
+        assert_ne!(third, second);
+        assert!(service.switch_tab(third));
+    }
+
+    #[test]
+    fn the_last_remaining_tab_cannot_be_closed() {
+        let mut service = TerminalService::new();
+        let only = service.active_tab();
+        assert!(!service.close_tab(only));
+        assert_eq!(service.tab_count(), 1);
+    }
+
+    #[test]
+    fn input_routes_only_to_the_active_session() {
+        let mut service = TerminalService::new();
+        let first = service.active_tab();
+        service.session_output_bytes(b"one");
+        let second = service.open_tab().unwrap();
+        assert_eq!(service.active_tab(), second);
+        service.session_output_bytes(b"two");
+        // Switching back to the first tab redraws its own, untouched grid:
+        // "one" is still there and "two" never reached it.
+        assert!(service.switch_tab(first));
+        drain_service(&mut service);
+        service.session_output_bytes(b"?");
+        let mut saw_one = false;
+        while let Some(row) = service.next_grid_row() {
+            if row.cells[0].codepoint == b'o' as u32 {
+                saw_one = true;
+            }
+            assert_ne!(row.cells[0].codepoint, b't' as u32, "tab two's output leaked into tab one");
+        }
+        assert!(saw_one);
+    }
+
+    #[test]
+    fn ctrl_tab_switches_sessions_without_reaching_the_shell() {
+        let mut service = TerminalService::new();
+        let first = service.active_tab();
+        let second = service.open_tab().unwrap();
+        assert_eq!(service.active_tab(), second);
+        let ctrl_tab = InputMessage::key(KeyCode::Tab, KeyState::Pressed, MOD_CTRL);
+        assert!(service.input(&ctrl_tab).is_none());
+        assert_eq!(service.active_tab(), first);
+        assert!(service.input(&ctrl_tab).is_none());
+        assert_eq!(service.active_tab(), second);
+    }
+
+    #[test]
+    fn ctrl_shift_t_opens_a_new_tab_without_reaching_the_shell() {
+        let mut service = TerminalService::new();
+        assert_eq!(service.tab_count(), 1);
+        let new_tab =
+            InputMessage::key(KeyCode::character(b't'), KeyState::Pressed, MOD_CTRL | MOD_SHIFT);
+        assert!(service.input(&new_tab).is_none());
+        assert_eq!(service.tab_count(), 2);
+        assert_eq!(service.active_tab().slot(), 1);
     }
 
     #[test]

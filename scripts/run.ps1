@@ -530,13 +530,15 @@ function Framebuffer-HasTerminalGlyphs {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $false }
     # Terminal bounds come from Atrium's scene-published marker (#74); the
-    # content starts below the 32 px chrome (TERMINAL_CHROME_HEIGHT). A
-    # glyph is a bright pixel. The bottom 40 px is excluded so the always-on
-    # white FPS counter (bottom-right) can never false-pass this check.
+    # content starts below the 32 px chrome (TERMINAL_CHROME_HEIGHT) plus the
+    # 28 px tab strip (TERMINAL_TAB_BAR_HEIGHT, #76) so this never samples
+    # tab-chip pixels as if they were terminal glyphs. A glyph is a bright
+    # pixel. The bottom 40 px is excluded so the always-on white FPS counter
+    # (bottom-right) can never false-pass this check.
     $match = [regex]::Matches((Get-Content $log -Raw), 'app=Terminal scene published surface=\d+/\d+ bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
     if ($match.Count -eq 0) { return $false }
     $groups = $match[$match.Count - 1].Groups
-    $left = [int]$groups[1].Value; $top = [int]$groups[2].Value + 32
+    $left = [int]$groups[1].Value; $top = [int]$groups[2].Value + 60
     $right = $left + [int]$groups[3].Value
     $bytes = [IO.File]::ReadAllBytes($Path)
     $layout = Get-PpmLayout $bytes
@@ -565,16 +567,17 @@ function Wait-QmpTerminalFramebuffer {
     return $false
 }
 
-# The Terminal surface's own content rect (from the Atrium marker, bottom
-# 40 px excluded so the ever-changing FPS counter never counts) as a flat
-# byte array, for content-only comparisons that ignore the rest of the frame.
+# The Terminal surface's own content rect (from the Atrium marker, below the
+# chrome and tab strip, bottom 40 px excluded so the ever-changing FPS
+# counter never counts) as a flat byte array, for content-only comparisons
+# that ignore the rest of the frame.
 function Get-TerminalContentBytes {
     param([byte[]]$Bytes)
     $match = [regex]::Matches((Get-Content $log -Raw), 'app=Terminal scene published surface=\d+/\d+ bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
     $groups = $match[$match.Count - 1].Groups
     $layout = Get-PpmLayout $Bytes
     $left = [Math]::Max([int]$groups[1].Value, 0)
-    $top = [Math]::Max([int]$groups[2].Value + 32, 0)
+    $top = [Math]::Max([int]$groups[2].Value + 60, 0)
     $right = [Math]::Min($left + [int]$groups[3].Value, $layout.Width)
     $bottom = [Math]::Min([int]$groups[2].Value + [int]$groups[4].Value, $layout.Height - 40)
     $rowLength = ($right - $left) * 3
@@ -1081,6 +1084,45 @@ try {
             $scrolledContent = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalScrolledFrame))
             if (Test-BytesEqual $bottomContent $scrolledContent) {
                 throw 'Scrolling up did not change the Terminal framebuffer (scrollback not visible).'
+            }
+
+            # #76: T3 sessions. Snap back to the live view (scrolled away
+            # above), open a second tab with Ctrl+Shift+T, type a marker
+            # only this tab has seen, and screendump it. Switch back to the
+            # first tab with Ctrl+Tab and screendump that too: the two
+            # frames must differ (distinct per-tab content), and the first
+            # tab's content must match what it showed before the second tab
+            # ever existed (switching away and back never touched it).
+            Send-QmpKey $qmp 'shift-pgdn'
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalBottomFrame $TimeoutSeconds)) {
+                throw 'Terminal did not settle back on the live view before opening a second tab.'
+            }
+            $tabOneLiveContent = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalBottomFrame))
+            Send-QmpKey $qmp 'ctrl-shift-t'
+            # Lowercase: Send-QmpText's AZERTY key-name table only remaps a
+            # handful of known characters and does not shift for uppercase,
+            # so a capitalized marker would silently type as nothing.
+            Send-QmpText $qmp 'echo("tabtwo")'
+            Send-QmpKey $qmp 'ret'
+            $terminalTabTwoFrame = Join-Path $repoRoot "target\qemu-terminal-tab2-$PID.ppm"
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalTabTwoFrame $TimeoutSeconds)) {
+                throw 'Second Terminal tab did not settle after typing its own command.'
+            }
+            $tabTwoContent = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalTabTwoFrame))
+            if (Test-BytesEqual $tabOneLiveContent $tabTwoContent) {
+                throw 'Second Terminal tab shows the same content as the first (tabs are not independent).'
+            }
+            Send-QmpKey $qmp 'ctrl-tab'
+            $terminalTabOneFrame = Join-Path $repoRoot "target\qemu-terminal-tab1-$PID.ppm"
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalTabOneFrame $TimeoutSeconds)) {
+                throw 'First Terminal tab did not settle after switching back to it.'
+            }
+            $tabOneContentAfterSwitch = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalTabOneFrame))
+            if (-not (Test-BytesEqual $tabOneLiveContent $tabOneContentAfterSwitch)) {
+                throw 'Switching tabs and back changed the first tab''s own content.'
+            }
+            if (Test-BytesEqual $tabOneContentAfterSwitch $tabTwoContent) {
+                throw 'The first tab shows the second tab''s content after switching back.'
             }
         }
 
