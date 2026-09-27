@@ -581,15 +581,16 @@ fn emit_node(
             }
         }
         UiNodeKind::Button => {
-            push_shadow(output, surface, frame, index, node, bounds)?;
-            push_upsert(
-                output,
-                surface,
-                frame,
-                index,
-                1,
-                fill_command(bounds, control_color(node, theme), node),
-            )?;
+            // A transparent button is a list item over a panel: no shadow,
+            // and an idle fill in the panel colour, so it reads as see-through
+            // while keeping one stable fill in Display's paint order.
+            let transparent = node.styles.contains(UiStyle::Transparent);
+            if !transparent {
+                push_shadow(output, surface, frame, index, node, bounds)?;
+            }
+            let fill =
+                if transparent { list_item_color(node, theme) } else { control_color(node, theme) };
+            push_upsert(output, surface, frame, index, 1, fill_command(bounds, fill, node))?;
             if let Some(symbol) = material_symbol(node.icon) {
                 let max_size = if node.styles.contains(UiStyle::IconLarge) { 40 } else { 24 };
                 push_upsert(
@@ -888,6 +889,16 @@ fn control_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
         theme.accent
     } else {
         theme.input
+    }
+}
+
+fn list_item_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
+    if node.interaction.is_focused() || node.interaction.is_pressed() {
+        theme.focus
+    } else if node.interaction.is_hovered() {
+        theme.input
+    } else {
+        theme.panel
     }
 }
 
@@ -1325,6 +1336,48 @@ mod tests {
         assert_eq!(icon.command.auxiliary, logos_abi::GuiMaterialSymbol::Settings as u32);
         assert_eq!(icon.command.width, 24);
         assert_eq!(icon.command.height, 24);
+    }
+
+    #[test]
+    fn transparent_buttons_fill_like_list_items_without_shadow() {
+        let mut blueprint = UiBlueprint::new();
+        let root = blueprint.push_root(UiNodeKind::Root, 1).unwrap();
+        let button = blueprint.push_child(UiNodeKind::Button, root, 2).unwrap();
+        blueprint.set_icon(button, UiIcon::Keyboard).unwrap();
+        let mut styles = UiStyleList::EMPTY;
+        assert!(styles.push(UiStyle::Transparent) && styles.push(UiStyle::RoundedLarge));
+        blueprint.set_styles(button, styles).unwrap();
+        let mut tree = UiComponentTree::from_blueprint(&blueprint).unwrap();
+        set_bounds(&mut tree, 0, UiRect::new(0, 0, 100, 80));
+        set_bounds(&mut tree, 1, UiRect::new(8, 8, 60, 24));
+        let handle = tree.tree().handle_at(1).unwrap();
+        let theme = UiSceneTheme::DEFAULT;
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+
+        for (focused, hovered, fill) in
+            [(false, false, theme.panel), (false, true, theme.input), (true, true, theme.focus)]
+        {
+            tree.tree_mut().set_focused(handle, focused).unwrap();
+            tree.tree_mut().set_hovered(handle, hovered).unwrap();
+            let scene = emit(surface, 1, &tree, theme).unwrap();
+            let button_ops: std::vec::Vec<_> = scene
+                .as_slice()
+                .iter()
+                .filter(|operation| (operation.node_id - 1) / 3 == 1)
+                .map(|operation| (operation.node_id, operation.command.kind))
+                .collect();
+            // The fill keeps the same node id in every state; no shadow.
+            assert_eq!(
+                button_ops,
+                [
+                    (5, logos_abi::GuiDrawKind::FillRoundedRect),
+                    (6, logos_abi::GuiDrawKind::MaterialSymbol)
+                ],
+                "focused={focused} hovered={hovered}"
+            );
+            let fill_op = scene.as_slice().iter().find(|operation| operation.node_id == 5).unwrap();
+            assert_eq!(fill_op.command.color_rgb(), fill, "focused={focused} hovered={hovered}");
+        }
     }
 
     #[test]
