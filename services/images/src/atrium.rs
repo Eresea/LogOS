@@ -1231,6 +1231,13 @@ pub extern "C" fn _start() -> ! {
     let mut lockscreen_appearance = 0u16;
     let mut terminal_appearance: Option<(SurfaceHandle, u16)> = None;
     let mut system_appearance: Option<(SurfaceHandle, u16)> = None;
+    // Home applies its own theme (home_theme()) directly, with no separate
+    // channel to itself, so unlike LockScreen/Terminal/System it needs no
+    // flags to arrive -- just a redraw forced whenever `flags` changes,
+    // since otherwise it only repaints on its own triggers (input, the
+    // clock's minute ticking over, menu motion), which a pure theme flip
+    // is none of.
+    let mut home_appearance = 0u16;
     let mut pending_input_settings: Option<logos_abi::InputSettings> =
         Some(atrium.input_settings());
     let mut surface_commands = SurfaceCommandQueue::new();
@@ -2441,6 +2448,10 @@ pub extern "C" fn _start() -> ! {
             {
                 system_appearance = Some(target);
             }
+        }
+        if home_appearance != flags && atrium.home_surface().is_valid() {
+            home_appearance = flags;
+            pending_app_render = render_home_surface(display, atrium) || pending_app_render;
         }
         let now_ticks = common::current_ticks();
         let menu_motion_active = unsafe {

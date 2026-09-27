@@ -539,6 +539,34 @@ function Wait-QmpPixelIsWhite {
     return $false
 }
 
+function Framebuffer-PixelMatches {
+    param([string]$Path, [int]$X, [int]$Y, [int]$R, [int]$G, [int]$B)
+    if (-not (Test-Path $Path)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $layout = Get-PpmLayout $bytes
+    if ($X -ge $layout.Width -or $Y -ge $layout.Height) { return $false }
+    $index = $layout.Offset + (($Y * $layout.Width + $X) * 3)
+    return $bytes[$index] -eq $R -and $bytes[$index + 1] -eq $G -and $bytes[$index + 2] -eq $B
+}
+
+function Wait-QmpPixelMatches {
+    param([hashtable]$Qmp, [string]$Path, [int]$X, [int]$Y, [int]$R, [int]$G, [int]$B, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $previousHash = $null
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+        if (Framebuffer-PixelMatches $Path $X $Y $R $G $B) {
+            $hash = (Get-FileHash $Path).Hash
+            if ($hash -eq $previousHash) { return $true }
+            $previousHash = $hash
+        } else {
+            $previousHash = $null
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
 function Framebuffer-SettingsCategorySelected {
     param([string]$Path, [int]$Selected)
     if (-not (Test-Path $Path)) { return $false }
@@ -1274,10 +1302,25 @@ try {
 
             Send-QmpKey $qmp 'esc'
             $homeLightFrame = Join-Path $repoRoot "target\qemu-home-light-$PID.ppm"
-            # (30, 400) is inside the shell rail, clear of its controls --
-            # the same point `Framebuffer-HasHomePanel` samples for the
-            # dark theme's `panel` colour.
-            if (-not (Wait-QmpPixelIsWhite $qmp $homeLightFrame 30 400 $TimeoutSeconds)) {
+            # The shell rail ((30, 400), Framebuffer-HasHomePanel's dark
+            # sample point) is Atrium chrome painted regardless of which
+            # surface has focus, so it already reads the new theme's white
+            # the instant the toggle is clicked -- it can't tell "Home is
+            # showing" from "Settings is still open". The default-focused
+            # Calculator tile's accent fill (same point
+            # Framebuffer-HasHomeSelectedCard samples) is Home-only content,
+            # not shared with Settings' own layout at that point, so it
+            # only turns this colour once Home is actually back on screen.
+            # Settings (tile index 4, not Calculator's index 0) still holds
+            # grid focus at this point -- closing it doesn't reset focus to
+            # Calculator, only the explicit Left x4 walk below does -- so
+            # (1000, 248) (HOME_GRID_LEFT=160 + 4*(160+40)=960, +32 to the
+            # icon, +8,8 off-centre, services/atrium/src/lib.rs
+            # home_grid_item_bounds) samples the Settings tile, matching
+            # Framebuffer-HasHomeSelectedCard's tile0 pattern shifted to
+            # tile4. 111,156,235 = 0x6f9ceb = UI_ACCENTS_LIGHT[Blue].focus
+            # (ui-graphics/src/lib.rs), the default accent.
+            if (-not (Wait-QmpPixelMatches $qmp $homeLightFrame 1000 248 111 156 235 $TimeoutSeconds)) {
                 throw 'Home did not switch to the light theme after Settings closed.'
             }
 
