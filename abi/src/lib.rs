@@ -25,6 +25,7 @@ mod walltime;
 pub use atrium::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumControlResponse, AtriumSection,
     AtriumSurfaceInput, AtriumSurfaceOperation, AtriumSurfaceRequest, AtriumSurfaceResponse,
+    pack_terminal_tab_state, terminal_tab_active_slot, terminal_tab_open_bitmap,
 };
 pub use device_api::{
     DEVICE_ABI_VERSION, DeviceKind, DeviceOperation, DeviceRecord, DeviceRequest, DeviceResponse,
@@ -76,7 +77,7 @@ pub use user_api::{
 };
 pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
-pub const ABI_VERSION: u16 = 7;
+pub const ABI_VERSION: u16 = 8;
 /// The product version/build string shown by the Terminal `version` command
 /// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
 /// release; it is not tied to `ABI_VERSION`.
@@ -97,6 +98,103 @@ pub const TERMINAL_CHROME_HEIGHT: usize = 32;
 /// ad hoc math that could (and did, in narrow tiled panes) disagree, which
 /// showed up as clipped or rejected rows.
 pub const TERMINAL_CONTENT_PADDING: u32 = 8;
+/// Up to this many independent Terminal sessions/tabs (#76). Fixed cap, no
+/// reordering or drag-out.
+pub const TERMINAL_MAX_TABS: usize = 4;
+/// Height in pixels of the Terminal tab strip, below the title-bar chrome
+/// and above the padded text-grid content (#76). Shared by Atrium's tab-bar
+/// scene nodes and Terminal's own pointer hit-testing so a click always
+/// lands on the tab/button it visually sits on.
+pub const TERMINAL_TAB_BAR_HEIGHT: usize = 28;
+const TERMINAL_TAB_WIDTH: i32 = 96;
+const TERMINAL_TAB_GAP: i32 = 4;
+const TERMINAL_TAB_MARGIN: i32 = 8;
+const TERMINAL_TAB_CLOSE_SIZE: i32 = 16;
+
+/// The tab strip's own rect within a Terminal surface, directly below the
+/// title-bar chrome.
+pub const fn terminal_tab_bar_bounds(surface_bounds: GuiRect) -> GuiRect {
+    GuiRect::new(
+        surface_bounds.x,
+        surface_bounds.y.saturating_add(TERMINAL_CHROME_HEIGHT as i32),
+        surface_bounds.width,
+        TERMINAL_TAB_BAR_HEIGHT as u32,
+    )
+}
+
+/// Rect of tab chip `slot` (0..`TERMINAL_MAX_TABS`) within the tab strip.
+pub fn terminal_tab_chip_bounds(surface_bounds: GuiRect, slot: usize) -> GuiRect {
+    let bar = terminal_tab_bar_bounds(surface_bounds);
+    let x = bar
+        .x
+        .saturating_add(TERMINAL_TAB_MARGIN)
+        .saturating_add(slot as i32 * (TERMINAL_TAB_WIDTH + TERMINAL_TAB_GAP));
+    GuiRect::new(
+        x,
+        bar.y.saturating_add(2),
+        TERMINAL_TAB_WIDTH as u32,
+        TERMINAL_TAB_BAR_HEIGHT as u32 - 4,
+    )
+}
+
+/// Rect of the small close control inside tab chip `slot`, right-aligned
+/// within the chip.
+pub fn terminal_tab_close_bounds(surface_bounds: GuiRect, slot: usize) -> GuiRect {
+    let chip = terminal_tab_chip_bounds(surface_bounds, slot);
+    GuiRect::new(
+        chip.x.saturating_add(chip.width as i32).saturating_sub(TERMINAL_TAB_CLOSE_SIZE + 4),
+        chip.y.saturating_add((chip.height as i32 - TERMINAL_TAB_CLOSE_SIZE) / 2),
+        TERMINAL_TAB_CLOSE_SIZE as u32,
+        TERMINAL_TAB_CLOSE_SIZE as u32,
+    )
+}
+
+/// Rect of the new-tab ("add") button, immediately after the last possible
+/// tab chip so it never shifts as tabs open and close.
+pub fn terminal_tab_add_button_bounds(surface_bounds: GuiRect) -> GuiRect {
+    let bar = terminal_tab_bar_bounds(surface_bounds);
+    let x = bar
+        .x
+        .saturating_add(TERMINAL_TAB_MARGIN)
+        .saturating_add(TERMINAL_MAX_TABS as i32 * (TERMINAL_TAB_WIDTH + TERMINAL_TAB_GAP));
+    let size = TERMINAL_TAB_BAR_HEIGHT as u32 - 4;
+    GuiRect::new(x, bar.y.saturating_add(2), size, size)
+}
+
+const fn point_in_rect(x: i32, y: i32, rect: GuiRect) -> bool {
+    x >= rect.x
+        && y >= rect.y
+        && x < rect.x.saturating_add(rect.width as i32)
+        && y < rect.y.saturating_add(rect.height as i32)
+}
+
+/// What a pointer press at `(x, y)` within a Terminal surface hits, if
+/// anything, in tab-bar space. Shared so Terminal's own hit-testing always
+/// agrees with the chip/button rects Atrium actually drew.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalTabHit {
+    Tab(usize),
+    Close(usize),
+    AddTab,
+}
+
+pub fn terminal_tab_bar_hit(surface_bounds: GuiRect, x: i32, y: i32) -> Option<TerminalTabHit> {
+    if !point_in_rect(x, y, terminal_tab_bar_bounds(surface_bounds)) {
+        return None;
+    }
+    if point_in_rect(x, y, terminal_tab_add_button_bounds(surface_bounds)) {
+        return Some(TerminalTabHit::AddTab);
+    }
+    for slot in 0..TERMINAL_MAX_TABS {
+        if point_in_rect(x, y, terminal_tab_close_bounds(surface_bounds, slot)) {
+            return Some(TerminalTabHit::Close(slot));
+        }
+        if point_in_rect(x, y, terminal_tab_chip_bounds(surface_bounds, slot)) {
+            return Some(TerminalTabHit::Tab(slot));
+        }
+    }
+    None
+}
 pub const DEFAULT_SCREEN_WIDTH: usize = 1280;
 pub const DEFAULT_SCREEN_HEIGHT: usize = 800;
 pub const MIN_FRAMEBUFFER_WIDTH: usize = DEFAULT_SCREEN_WIDTH;
@@ -114,12 +212,13 @@ pub const MAX_SCROLLBACK_LINES: usize = 2048;
 /// `set_text_grid_row` "ponytail" note).
 pub fn terminal_grid_metrics(bounds: GuiRect) -> (usize, usize, GuiRect) {
     let padding = TERMINAL_CONTENT_PADDING as i32;
+    let reserved_top = TERMINAL_CHROME_HEIGHT as i32 + TERMINAL_TAB_BAR_HEIGHT as i32;
     let content_x = bounds.x.saturating_add(padding);
-    let content_y = bounds.y.saturating_add(TERMINAL_CHROME_HEIGHT as i32).saturating_add(padding);
+    let content_y = bounds.y.saturating_add(reserved_top).saturating_add(padding);
     let content_width = bounds.width.saturating_sub(TERMINAL_CONTENT_PADDING * 2);
     let content_height = bounds
         .height
-        .saturating_sub(TERMINAL_CHROME_HEIGHT as u32)
+        .saturating_sub(reserved_top as u32)
         .saturating_sub(TERMINAL_CONTENT_PADDING * 2);
     let columns = ((content_width as usize) / DISPLAY_CELL_WIDTH).clamp(1, DEFAULT_COLUMNS);
     let rows = ((content_height as usize) / DISPLAY_CELL_HEIGHT).clamp(1, DEFAULT_ROWS);
@@ -2774,7 +2873,12 @@ mod tests {
         // Grid rect sits below the chrome strip and inset by the padding on
         // every edge, and never overflows the surface bounds it was sized from.
         assert_eq!(grid.x, 100 + TERMINAL_CONTENT_PADDING as i32);
-        assert_eq!(grid.y, 50 + TERMINAL_CHROME_HEIGHT as i32 + TERMINAL_CONTENT_PADDING as i32);
+        assert_eq!(
+            grid.y,
+            50 + TERMINAL_CHROME_HEIGHT as i32
+                + TERMINAL_TAB_BAR_HEIGHT as i32
+                + TERMINAL_CONTENT_PADDING as i32
+        );
         assert!(grid.x as u32 + grid.width <= 100u32.wrapping_add(640));
         assert!(grid.y as u32 + grid.height <= 50u32.wrapping_add(400));
         assert_eq!(grid.width, (columns * DISPLAY_CELL_WIDTH) as u32);
@@ -2788,6 +2892,40 @@ mod tests {
         let (columns, rows, _) = terminal_grid_metrics(GuiRect::new(0, 0, 4, 4));
         assert_eq!(columns, 1);
         assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn terminal_tab_hit_testing_resolves_chip_close_and_add_regions() {
+        // #76: chip, close and add-button rects never overlap in a way that
+        // would make a click ambiguous, and a point outside all of them
+        // (including outside the tab bar strip entirely) hits nothing.
+        let bounds = GuiRect::new(0, 0, 800, 600);
+        assert_eq!(terminal_tab_bar_hit(bounds, 0, 0), None, "title bar, not the tab strip");
+        let chip0 = terminal_tab_chip_bounds(bounds, 0);
+        assert_eq!(
+            terminal_tab_bar_hit(bounds, chip0.x + 2, chip0.y + 2),
+            Some(TerminalTabHit::Tab(0))
+        );
+        let close0 = terminal_tab_close_bounds(bounds, 0);
+        assert_eq!(
+            terminal_tab_bar_hit(bounds, close0.x + 2, close0.y + 2),
+            Some(TerminalTabHit::Close(0))
+        );
+        let add = terminal_tab_add_button_bounds(bounds);
+        assert_eq!(
+            terminal_tab_bar_hit(bounds, add.x + 2, add.y + 2),
+            Some(TerminalTabHit::AddTab)
+        );
+        let chip3 = terminal_tab_chip_bounds(bounds, 3);
+        assert!(chip3.x < add.x, "the add button trails the last possible tab slot");
+        assert_eq!(terminal_tab_bar_hit(bounds, 0, -50), None, "above the surface entirely");
+    }
+
+    #[test]
+    fn terminal_tab_state_packing_round_trips() {
+        assert_eq!(terminal_tab_open_bitmap(pack_terminal_tab_state(0b1011, 2)), 0b1011);
+        assert_eq!(terminal_tab_active_slot(pack_terminal_tab_state(0b1011, 2)), 2);
+        assert_eq!(terminal_tab_open_bitmap(pack_terminal_tab_state(0, 0)), 0);
     }
 
     #[test]

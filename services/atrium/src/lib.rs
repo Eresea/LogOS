@@ -1492,6 +1492,18 @@ impl Atrium {
         {
             return AtriumAction::None;
         }
+        // #76: Ctrl+Tab and Ctrl+Shift+T switch/open Terminal's own tabs
+        // when Terminal is focused, taking priority over the window
+        // manager's Ctrl+Tab (`FocusNext` below) the same way plain Tab
+        // already defers to Terminal above.
+        if self.focused_surface().is_some_and(|surface| surface.app == AppId::Terminal)
+            && input.modifiers & MOD_CTRL != 0
+            && input.modifiers & (MOD_ALT | MOD_META) == 0
+            && (code == KeyCode::TAB
+                || (input.modifiers & MOD_SHIFT != 0 && code.character_byte() == Some(b't')))
+        {
+            return AtriumAction::None;
+        }
         if self.command_menu_open {
             if let Some(action) = self.command_menu_action(input.code) {
                 return action;
@@ -2759,6 +2771,38 @@ mod tests {
             AtriumAction::None
         );
         assert!(AtriumAction::None.routes_to_surface());
+    }
+
+    #[test]
+    fn ctrl_tab_and_ctrl_shift_t_route_to_a_focused_terminal_surface_not_the_window_manager() {
+        // #76: Terminal's own tab bar owns Ctrl+Tab/Ctrl+Shift+T while
+        // Terminal is focused, taking priority over the window manager's
+        // Ctrl+Tab (`FocusNext`) the same way plain Tab already does for
+        // shell completion.
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(1)).unwrap();
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::TAB, KeyState::Pressed, MOD_CTRL)),
+            AtriumAction::None
+        );
+        assert_eq!(
+            atrium.input(&InputMessage::key(
+                KeyCode::character(b't'),
+                KeyState::Pressed,
+                MOD_CTRL | MOD_SHIFT
+            )),
+            AtriumAction::None
+        );
+        // Without a focused Terminal surface, Ctrl+Tab still cycles focus
+        // as before (unaffected by the carve-out above).
+        let mut empty_atrium = Atrium::new();
+        empty_atrium.authenticate();
+        assert_eq!(
+            empty_atrium.input(&InputMessage::key(KeyCode::TAB, KeyState::Pressed, MOD_CTRL)),
+            AtriumAction::FocusNext
+        );
     }
 
     #[test]

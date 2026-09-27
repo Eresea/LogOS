@@ -180,7 +180,12 @@ impl AtriumSurfaceOperation {
 pub struct AtriumSurfaceRequest {
     pub operation: AtriumSurfaceOperation,
     pub app: u8,
-    pub reserved: u16,
+    /// Terminal-only (#76): packed tab-bar state (see `pack_tab_state`),
+    /// `0` for every other app. Terminal re-sends its surface request
+    /// whenever this changes, which Atrium's existing "surface already
+    /// exists for this client" path already treats as a routine
+    /// reconfirmation, so no new message kind is needed.
+    pub tab_state: u16,
     pub request_id: u32,
     pub client: ServiceHandle,
 }
@@ -190,16 +195,19 @@ impl AtriumSurfaceRequest {
         Self {
             operation: AtriumSurfaceOperation::Request,
             app: app as u8,
-            reserved: 0,
+            tab_state: 0,
             request_id,
             client,
         }
     }
 
+    pub const fn with_tab_state(self, tab_state: u16) -> Self {
+        Self { tab_state, ..self }
+    }
+
     pub const fn is_valid(self) -> bool {
         self.operation as u8 == AtriumSurfaceOperation::Request as u8
             && AtriumApp::from_raw(self.app).is_some()
-            && self.reserved == 0
             && self.request_id != 0
             && self.client.is_valid()
     }
@@ -211,6 +219,22 @@ impl AtriumSurfaceRequest {
     pub const fn client(self) -> ServiceHandle {
         self.client
     }
+}
+
+/// Packs which tabs are open (bit N set means slot N is open) and which is
+/// active into the spare `tab_state` field of `AtriumSurfaceRequest` (#76).
+/// Bounded to `TERMINAL_MAX_TABS` (4) slots, so 4 bits of bitmap plus 2 bits
+/// of active-slot index comfortably fit the `u16`.
+pub const fn pack_terminal_tab_state(open_bitmap: u8, active_slot: u8) -> u16 {
+    (open_bitmap as u16 & 0x0f) | ((active_slot as u16 & 0x03) << 4)
+}
+
+pub const fn terminal_tab_open_bitmap(tab_state: u16) -> u8 {
+    (tab_state & 0x0f) as u8
+}
+
+pub const fn terminal_tab_active_slot(tab_state: u16) -> u8 {
+    ((tab_state >> 4) & 0x03) as u8
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

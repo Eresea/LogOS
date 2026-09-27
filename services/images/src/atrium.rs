@@ -173,6 +173,10 @@ static mut APP_SCENE_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentTree
 /// rejects `node_id == 0`), so a row arriving before the first publish is
 /// simply dropped rather than mis-addressed (#74).
 static mut TERMINAL_GRID_NODE_ID: u32 = 0;
+/// Packed tab-bar state Terminal last reported on its surface request
+/// (#76; see `pack_terminal_tab_state`), read by `build_app_scene_tree` when
+/// laying out the tab strip.
+static mut TERMINAL_TAB_STATE: u16 = 0;
 
 #[cfg(feature = "qemu-proof")]
 fn proof_line(message: &[u8]) {
@@ -491,12 +495,76 @@ fn build_app_scene_tree(
             }
         }
         logos_atrium::AppId::Terminal => {
-            // Content below the title bar and inset by the inner padding
-            // (#75), sized from the surface bounds (works in tiled panes and
-            // after resize) via the same shared math Terminal's own
-            // `resize_to_surface` uses, so both sides always agree on the
-            // grid shape (ADR-0087; a prior duplicated formula could drift
-            // and rows would be clipped or rejected in narrow panes).
+            // Tab bar (#76): one chip per open session plus a trailing
+            // add-tab button, laid out from the same shared geometry
+            // Terminal's own pointer hit-testing uses, so a click always
+            // lands on what's actually drawn there.
+            let tab_state = unsafe { *core::ptr::addr_of!(TERMINAL_TAB_STATE) };
+            let open_bitmap = logos_abi::terminal_tab_open_bitmap(tab_state);
+            let active_slot = logos_abi::terminal_tab_active_slot(tab_state);
+            let mut active_styles = logos_ui::UiStyleList::EMPTY;
+            let _ = active_styles.push(logos_ui::UiStyle::BackgroundAccent);
+            let _ = active_styles.push(logos_ui::UiStyle::RoundedLarge);
+            let mut inactive_styles = logos_ui::UiStyleList::EMPTY;
+            let _ = inactive_styles.push(logos_ui::UiStyle::RoundedLarge);
+            let mut muted = logos_ui::UiStyleList::EMPTY;
+            let _ = muted.push(logos_ui::UiStyle::TextMuted);
+            for slot in 0..logos_abi::TERMINAL_MAX_TABS {
+                if open_bitmap & (1 << slot) == 0 {
+                    continue;
+                }
+                let chip = logos_abi::terminal_tab_chip_bounds(bounds, slot);
+                let styles =
+                    if slot as u8 == active_slot { active_styles } else { inactive_styles };
+                if add_app_scene_node(tree, root, logos_ui::UiNodeKind::Panel, chip, b"", styles)
+                    .is_none()
+                {
+                    return false;
+                }
+                let label = [b'1' + slot as u8];
+                if add_app_scene_node(
+                    tree,
+                    root,
+                    logos_ui::UiNodeKind::Label,
+                    GuiRect::new(chip.x.saturating_add(8), chip.y.saturating_add(2), 60, 16),
+                    &label[..1],
+                    logos_ui::UiStyleList::EMPTY,
+                )
+                .is_none()
+                {
+                    return false;
+                }
+                let close = logos_abi::terminal_tab_close_bounds(bounds, slot);
+                let Some(close_node) =
+                    add_app_scene_node(tree, root, logos_ui::UiNodeKind::Label, close, b"", muted)
+                else {
+                    return false;
+                };
+                if tree.set_icon(close_node, logos_ui::UiIcon::Close).is_err() {
+                    return false;
+                }
+            }
+            let add_bounds = logos_abi::terminal_tab_add_button_bounds(bounds);
+            let Some(add_node) = add_app_scene_node(
+                tree,
+                root,
+                logos_ui::UiNodeKind::Button,
+                add_bounds,
+                b"",
+                inactive_styles,
+            ) else {
+                return false;
+            };
+            if tree.set_icon(add_node, logos_ui::UiIcon::Add).is_err() {
+                return false;
+            }
+
+            // Content below the title bar and tab strip, inset by the inner
+            // padding (#75), sized from the surface bounds (works in tiled
+            // panes and after resize) via the same shared math Terminal's
+            // own `resize_to_surface` uses, so both sides always agree on
+            // the grid shape (ADR-0087; a prior duplicated formula could
+            // drift and rows would be clipped or rejected in narrow panes).
             let (_, _, grid_bounds) = logos_abi::terminal_grid_metrics(bounds);
             let Some(grid) = add_app_scene_node(
                 tree,
@@ -1313,6 +1381,12 @@ pub extern "C" fn _start() -> ! {
             } else {
                 terminal_client = terminal_request.client();
                 last_terminal_request = Some(terminal_request);
+                // Terminal re-sends this request whenever its tab bar
+                // changes (#76); a same-surface repeat below just
+                // reconfirms, so capture the latest tab state unconditionally.
+                unsafe {
+                    *core::ptr::addr_of_mut!(TERMINAL_TAB_STATE) = terminal_request.tab_state;
+                }
                 if let Some(surface) = atrium
                     .surface_for_client(terminal_request.client(), logos_atrium::AppId::Terminal)
                 {
@@ -2465,39 +2539,60 @@ mod terminal_scene_tests {
         atrium.spawn_surface(request, reference).unwrap()
     }
 
-    /// SCENE-BUDGET (#69/#74): the Terminal scene now carries its chrome
-    /// (title bar, close control) plus one `TextGrid` content node. At the
-    /// worst-case (full desktop) surface size this must still fit
-    /// `MAX_GUI_NODES`/`MAX_UI_SCENE_OPS` and publish within
-    /// `MAX_UI_SCENE_PUBLISHER_BYTES`, matching the existing Settings/Home
-    /// scene budget tests.
+    /// SCENE-BUDGET (#69/#74/#76): the Terminal scene carries its chrome
+    /// (title bar, close control), the tab strip and one `TextGrid` content
+    /// node. Both the empty tab bar and its worst case — all
+    /// `TERMINAL_MAX_TABS` open, every chip/close control plus the add
+    /// button — must fit `MAX_GUI_NODES`/`MAX_UI_SCENE_OPS` and publish
+    /// within `MAX_UI_SCENE_PUBLISHER_BYTES`, matching the existing
+    /// Settings/Home scene budget tests. Both cases run in one test (rather
+    /// than two `#[test]`s) because `APP_SCENE_TREE`/`TERMINAL_TAB_STATE`
+    /// are process-wide `static mut`s that `cargo test`'s default parallel
+    /// threads would otherwise race.
     #[test]
     fn terminal_scene_with_text_grid_fits_the_scene_budget() {
         let surface = terminal_surface();
         let calculator = logos_atrium::Calculator::new();
-        assert!(build_app_scene_tree(surface, &calculator));
 
-        let tree = unsafe { &mut *core::ptr::addr_of_mut!(APP_SCENE_TREE) };
-        assert!(tree.tree().len() <= logos_ui::MAX_UI_NODES);
+        for tab_state in
+            [0u16, logos_abi::pack_terminal_tab_state(0b1111, 3) /* worst case: 4 tabs open */]
+        {
+            unsafe {
+                *core::ptr::addr_of_mut!(TERMINAL_TAB_STATE) = tab_state;
+            }
+            assert!(build_app_scene_tree(surface, &calculator));
 
-        let mut publisher = logos_ui_graphics::UiScenePublisher::new();
-        let mut sink = CollectingSceneSink::default();
-        let (status, sent) = publisher
-            .publish(
-                surface.reference,
-                1,
-                tree,
-                logos_atrium::Atrium::new().app_theme(),
-                None,
-                &mut sink,
-            )
-            .unwrap();
-        assert_eq!(status, IpcStatus::Ok);
-        assert!(sent <= logos_ui_graphics::MAX_UI_SCENE_OPS);
+            let tree = unsafe { &mut *core::ptr::addr_of_mut!(APP_SCENE_TREE) };
+            assert!(tree.tree().len() <= logos_ui::MAX_UI_NODES);
+            assert!(tree.tree().len() <= logos_abi::MAX_GUI_NODES);
 
-        let node_id = unsafe { *core::ptr::addr_of!(TERMINAL_GRID_NODE_ID) };
-        assert_ne!(node_id, 0);
-        assert!(sink.operations.iter().any(|operation| operation.node_id == node_id
-            && operation.command.kind == logos_abi::GuiDrawKind::TextGrid));
+            let mut publisher = logos_ui_graphics::UiScenePublisher::new();
+            let mut sink = CollectingSceneSink::default();
+            let (status, sent) = publisher
+                .publish(
+                    surface.reference,
+                    1,
+                    tree,
+                    logos_atrium::Atrium::new().app_theme(),
+                    None,
+                    &mut sink,
+                )
+                .unwrap();
+            assert_eq!(status, IpcStatus::Ok);
+            assert!(sent <= logos_ui_graphics::MAX_UI_SCENE_OPS);
+            assert!(
+                core::mem::size_of::<logos_ui_graphics::UiScenePublisher>()
+                    <= logos_ui_graphics::MAX_UI_SCENE_PUBLISHER_BYTES
+            );
+
+            let node_id = unsafe { *core::ptr::addr_of!(TERMINAL_GRID_NODE_ID) };
+            assert_ne!(node_id, 0);
+            assert!(sink.operations.iter().any(|operation| operation.node_id == node_id
+                && operation.command.kind == logos_abi::GuiDrawKind::TextGrid));
+        }
+
+        unsafe {
+            *core::ptr::addr_of_mut!(TERMINAL_TAB_STATE) = 0;
+        }
     }
 }

@@ -5,8 +5,9 @@
 mod common;
 
 use logos_abi::{
-    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GuiTextGridRow,
-    InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind, SurfaceHandle,
+    AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GuiRect,
+    GuiTextGridRow, InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind,
+    PointerState, SurfaceHandle, TerminalTabHit, pack_terminal_tab_state, terminal_tab_bar_hit,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -85,18 +86,38 @@ pub extern "C" fn _start() -> ! {
     };
     let mut heartbeat_ticks = 0u16;
     let client = common::bootstrap_page().service;
-    let surface_request = AtriumSurfaceRequest::new(AtriumApp::Terminal, client, 1);
+    let base_surface_request = AtriumSurfaceRequest::new(AtriumApp::Terminal, client, 1);
+    // The very first request is sent at most once, exactly like before #76:
+    // Atrium only grants a surface once the user actually activates
+    // Terminal, and retrying an unanswered/backpressured request every loop
+    // tick would race that gate and auto-attach a surface as soon as Home
+    // is reached, before the user ever asked for one.
     let mut surface_request_sent = false;
     let mut terminal_surface = SurfaceHandle::EMPTY;
+    let mut terminal_bounds = GuiRect::EMPTY;
+    // Re-sent whenever the tab bar changes (open/close/switch) once a
+    // surface already exists: Atrium's "surface already exists for this
+    // client" path already reconfirms the same surface on a repeat
+    // request, so this doubles as the tab-state channel without a new
+    // message kind (#76).
+    let mut last_sent_tab_state: Option<u16> = None;
     loop {
         if pending_render.is_some() {
             common::heartbeat();
         } else {
             common::heartbeat_tick(&mut heartbeat_ticks);
         }
-        if !surface_request_sent && !terminal_surface.is_valid() {
+        let tab_state =
+            pack_terminal_tab_state(terminal.open_bitmap(), terminal.active_slot() as u8);
+        let surface_request = base_surface_request.with_tab_state(tab_state);
+        let want_send = (!surface_request_sent && !terminal_surface.is_valid())
+            || (terminal_surface.is_valid() && last_sent_tab_state != Some(tab_state));
+        if want_send {
             match common::ipc_send_handle(atrium_surface_request_capability, &surface_request) {
-                IpcStatus::Ok => surface_request_sent = true,
+                IpcStatus::Ok => {
+                    surface_request_sent = true;
+                    last_sent_tab_state = Some(tab_state);
+                }
                 IpcStatus::Full => {}
                 IpcStatus::Stale
                 | IpcStatus::Disconnected
@@ -111,13 +132,24 @@ pub extern "C" fn _start() -> ! {
             == IpcStatus::Ok
         {
             if surface_response.is_update() && surface_response.surface == terminal_surface {
+                terminal_bounds = surface_response.bounds;
                 terminal.resize_to_surface(surface_response.bounds);
             } else if surface_response.is_valid_for(surface_request)
                 && surface_response.status == logos_abi::GuiStatus::Ok
                 && surface_response.surface.is_valid()
             {
-                terminal.reset();
-                terminal.resize_to_surface(surface_response.bounds);
+                if surface_response.surface != terminal_surface {
+                    terminal.reset();
+                    terminal_bounds = surface_response.bounds;
+                    terminal.resize_to_surface(surface_response.bounds);
+                } else if surface_response.bounds != terminal_bounds {
+                    // A same-surface reconfirmation just echoes the tab
+                    // state we sent; only re-layout if bounds actually
+                    // moved (tiling), so switching tabs never forces a
+                    // spurious resize/redraw of the active session.
+                    terminal_bounds = surface_response.bounds;
+                    terminal.resize_to_surface(surface_response.bounds);
+                }
                 terminal_surface = surface_response.surface;
             } else if surface_response.is_revoke() && surface_response.surface == terminal_surface {
                 terminal_surface = SurfaceHandle::EMPTY;
@@ -150,6 +182,9 @@ pub extern "C" fn _start() -> ! {
                     continue;
                 }
                 if !event.is_valid() || event.surface != terminal_surface {
+                    continue;
+                }
+                if handle_tab_bar_click(terminal, terminal_bounds, &event.input) {
                     continue;
                 }
                 if let Some(message) = terminal.input(&event.input) {
@@ -221,6 +256,42 @@ pub extern "C" fn _start() -> ! {
             atrium_surface_request_capability,
             atrium_surface_response_capability,
         ]);
+    }
+}
+
+/// Left-button-down on the tab strip opens/closes/switches a tab instead of
+/// reaching the shell (#76). Pointer coordinates arrive already local to
+/// this surface (Atrium translates them before forwarding), so hit-testing
+/// against a zero-origin rect the size of the surface matches exactly what
+/// Atrium drew at `surface.x/y + ...` for the same bounds.
+fn handle_tab_bar_click(
+    terminal: &mut logos_terminal::TerminalService,
+    bounds: GuiRect,
+    input: &InputMessage,
+) -> bool {
+    let Some(pointer) = input.pointer_event() else { return false };
+    if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
+        return false;
+    }
+    let local_bounds = GuiRect::new(0, 0, bounds.width, bounds.height);
+    match terminal_tab_bar_hit(local_bounds, i32::from(pointer.x), i32::from(pointer.y)) {
+        Some(TerminalTabHit::Tab(slot)) => {
+            if let Some(handle) = terminal.tab_at(slot) {
+                terminal.switch_tab(handle);
+            }
+            true
+        }
+        Some(TerminalTabHit::Close(slot)) => {
+            if let Some(handle) = terminal.tab_at(slot) {
+                terminal.close_tab(handle);
+            }
+            true
+        }
+        Some(TerminalTabHit::AddTab) => {
+            terminal.open_tab();
+            true
+        }
+        None => false,
     }
 }
 
