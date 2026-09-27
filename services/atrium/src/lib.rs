@@ -1315,7 +1315,10 @@ impl Atrium {
                 return action;
             }
         }
-        if self.home_grid_showing() && input.modifiers == 0 {
+        // Lock keys (Num Lock is on by default) must not disable the grid.
+        if self.home_grid_showing()
+            && input.modifiers & (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_META) == 0
+        {
             let last = HOME_GRID_APPS.len() as u8 - 1;
             match code {
                 KeyCode::LEFT if self.home_grid_focus > 0 => {
@@ -2786,6 +2789,22 @@ mod tests {
             )
         );
         assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+    }
+
+    #[test]
+    fn home_grid_keys_work_with_lock_modifiers_on() {
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let locks = logos_abi::MOD_NUM_LOCK | logos_abi::MOD_CAPS_LOCK;
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::RIGHT, KeyState::Pressed, locks)),
+            AtriumAction::LauncherChanged
+        );
+        assert_eq!(atrium.home_grid_focus(), 1);
+        assert_eq!(
+            atrium.input(&InputMessage::key(KeyCode::ENTER, KeyState::Pressed, locks)),
+            AtriumAction::Launch(HOME_GRID_APPS[1])
+        );
     }
 
     #[test]
