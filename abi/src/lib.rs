@@ -77,7 +77,7 @@ pub use user_api::{
 };
 pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
-pub const ABI_VERSION: u16 = 7;
+pub const ABI_VERSION: u16 = 8;
 /// The product version/build string shown by the Terminal `version` command
 /// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
 /// release; it is not tied to `ABI_VERSION`.

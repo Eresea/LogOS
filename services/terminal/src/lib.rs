@@ -180,9 +180,21 @@ impl Session {
     }
 }
 
+/// Session's own prompt, appended to the end of a command's output once it
+/// finishes (see `services/session/src/lib.rs`'s `PROMPT`). Recognizing it
+/// here is how Terminal knows a tab's in-flight command is done and output
+/// should stop being pinned to that tab (#76 follow-up: route output to the
+/// submitting tab, not just the active one).
+const SHELL_PROMPT: &[u8] = b"\x1b[36mlogos\x1b[0m \x1b[33m>\x1b[0m ";
+
 pub struct TerminalService {
     sessions: [Session; MAX_TERMINAL_SESSIONS],
     active: usize,
+    /// The tab whose command is currently running, set when that tab sends
+    /// Enter and cleared once its reply's trailing prompt is seen (or the
+    /// tab is closed first). `None` means output follows the active tab,
+    /// same as before a command is submitted.
+    running_command: Option<TabHandle>,
 }
 
 const _: () =
@@ -194,7 +206,7 @@ impl TerminalService {
         let mut sessions = [SESSION; MAX_TERMINAL_SESSIONS];
         sessions[0].open = true;
         sessions[0].generation = 1;
-        Self { sessions, active: 0 }
+        Self { sessions, active: 0, running_command: None }
     }
 
     fn active_session(&mut self) -> &mut TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }> {
@@ -331,17 +343,45 @@ impl TerminalService {
                 return None;
             }
         }
-        self.active_session().input(event)
+        let outgoing = self.active_session().input(event);
+        // Enter submits the active tab's line as a command (Session's line
+        // editor starts running it on `\r`); pin output to this tab until
+        // its reply's prompt comes back, so background output from another
+        // tab's still-running command can't leak into whatever the user
+        // switches to next.
+        if matches!(outgoing.as_ref().and_then(IpcBytes::as_bytes), Some(b"\r")) {
+            self.running_command = Some(self.active_tab());
+        }
+        outgoing
     }
 
     pub fn session_output(&mut self, message: &IpcBytes) {
         if let Some(bytes) = message.as_bytes() {
-            self.active_session().feed(bytes);
+            self.session_output_bytes(bytes);
         }
     }
 
+    /// Routes output to whichever tab submitted the command still in
+    /// flight, if any, rather than always the active tab: a background
+    /// command's own output keeps landing in (and scrolling) its own tab
+    /// even while another tab is focused. Output for a tab that was closed
+    /// while its command was still running is dropped (the closed slot's
+    /// bumped generation is what makes `is_valid` catch this). Once the
+    /// owning tab's reply reaches its trailing prompt, routing reverts to
+    /// following the active tab, same as before any command was submitted.
     pub fn session_output_bytes(&mut self, bytes: &[u8]) {
-        self.active_session().feed(bytes);
+        let target = match self.running_command {
+            Some(handle) if !self.is_valid(handle) => {
+                self.running_command = None;
+                return;
+            }
+            Some(handle) => handle.slot(),
+            None => self.active,
+        };
+        if bytes.windows(SHELL_PROMPT.len()).any(|window| window == SHELL_PROMPT) {
+            self.running_command = None;
+        }
+        self.sessions[target].terminal.feed(bytes);
     }
 
     pub fn reset(&mut self) {
@@ -1481,6 +1521,73 @@ mod tests {
             assert_ne!(row.cells[0].codepoint, b't' as u32, "tab two's output leaked into tab one");
         }
         assert!(saw_one);
+    }
+
+    #[test]
+    fn output_from_a_submitted_command_follows_its_own_tab_while_another_is_active() {
+        // Submit in tab one (Enter pins output to it), switch to a new tab
+        // two, then deliver "background" output: it must land in tab one,
+        // not tab two, even though tab two is the one now focused.
+        let mut service = TerminalService::new();
+        let tab_one = service.active_tab();
+        let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0);
+        assert_eq!(service.input(&enter).unwrap().as_bytes(), Some(&b"\r"[..]));
+        let tab_two = service.open_tab().unwrap();
+        assert_eq!(service.active_tab(), tab_two);
+        drain_service(&mut service);
+        service.session_output_bytes(b"background");
+        // Tab two (still active) never saw it.
+        let mut saw_leak = false;
+        while let Some(row) = service.next_grid_row() {
+            if row.cells[0].codepoint == b'b' as u32 {
+                saw_leak = true;
+            }
+        }
+        assert!(!saw_leak, "background output leaked into the active tab");
+        // Tab one (inactive) has it.
+        assert!(service.switch_tab(tab_one));
+        drain_service(&mut service);
+        service.session_output_bytes(b"?");
+        let mut saw_background = false;
+        while let Some(row) = service.next_grid_row() {
+            if row.cells[0].codepoint == b'b' as u32 {
+                saw_background = true;
+            }
+        }
+        assert!(saw_background, "background output never reached the tab that submitted it");
+    }
+
+    #[test]
+    fn output_for_a_running_command_is_dropped_once_its_tab_is_closed() {
+        // Submit in tab two, close it while its command is still "running",
+        // then deliver output: the generation check must reject the stale
+        // handle and the bytes are dropped rather than landing anywhere
+        // (in particular not the now-active tab one).
+        let mut service = TerminalService::new();
+        let tab_one = service.active_tab();
+        let tab_two = service.open_tab().unwrap();
+        let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0);
+        assert_eq!(service.input(&enter).unwrap().as_bytes(), Some(&b"\r"[..]));
+        assert!(service.switch_tab(tab_one));
+        assert!(service.close_tab(tab_two));
+        drain_service(&mut service);
+        service.session_output_bytes(b"orphaned");
+        let mut saw_orphaned = false;
+        while let Some(row) = service.next_grid_row() {
+            if row.cells[0].codepoint == b'o' as u32 {
+                saw_orphaned = true;
+            }
+        }
+        assert!(!saw_orphaned, "output for a closed tab's command must be dropped, not rerouted");
+        // Routing is back to normal (the active tab) for anything after.
+        service.session_output_bytes(b"z");
+        let mut saw_z = false;
+        while let Some(row) = service.next_grid_row() {
+            if row.cells[0].codepoint == b'z' as u32 {
+                saw_z = true;
+            }
+        }
+        assert!(saw_z, "routing should fall back to the active tab after the drop");
     }
 
     #[test]
