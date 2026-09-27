@@ -3026,7 +3026,11 @@ pub extern "C" fn _start() -> ! {
                         }
                         Ok(Some(logos_flow::FlowOperation::System(operation))) => match operation {
                             logos_flow::SystemOperation::Version => {
-                                pending.stage(b"LogOS vNext 0.1.0\r\n")
+                                let version = logos_abi::LOGOS_VERSION;
+                                let mut line = [0u8; logos_abi::LOGOS_VERSION.len() + 2];
+                                line[..version.len()].copy_from_slice(version);
+                                line[version.len()..].copy_from_slice(b"\r\n");
+                                pending.stage(&line)
                             }
                             logos_flow::SystemOperation::Uname => pending.stage(b"LogOS\r\n"),
                             logos_flow::SystemOperation::Shutdown => {
