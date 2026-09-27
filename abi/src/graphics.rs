@@ -785,6 +785,9 @@ pub enum GuiHookKind {
     Refresh = 2,
     Section = 3,
     Session = 4,
+    /// Appearance preferences from Atrium; `deadline` carries the
+    /// `APPEARANCE_*` flags (ADR-0089).
+    Appearance = 5,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -814,6 +817,23 @@ impl GuiHook {
 
     pub const fn is_valid(self) -> bool {
         self.flags == 0 && self.reserved == 0 && self.request_id != 0
+    }
+
+    pub const fn appearance(request_id: u32, flags: u16) -> Self {
+        let mut hook = Self::new(GuiHookKind::Appearance, request_id);
+        hook.deadline = flags as u64;
+        hook
+    }
+
+    /// The `APPEARANCE_*` flags of a valid Appearance hook.
+    pub const fn appearance_flags(self) -> Option<u16> {
+        if !matches!(self.kind, GuiHookKind::Appearance)
+            || !self.is_valid()
+            || self.deadline & !(crate::APPEARANCE_FLAGS_MASK as u64) != 0
+        {
+            return None;
+        }
+        Some(self.deadline as u16)
     }
 }
 
@@ -912,6 +932,18 @@ const _: () = assert!(core::mem::size_of::<GuiSessionContext>() <= super::MAX_IP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_hook_round_trips_known_flags_only() {
+        let hook = GuiHook::appearance(7, crate::APPEARANCE_REDUCED_MOTION);
+        assert_eq!(hook.appearance_flags(), Some(crate::APPEARANCE_REDUCED_MOTION));
+        assert_eq!(GuiHook::appearance(7, 0).appearance_flags(), Some(0));
+        let mut unknown = hook;
+        unknown.deadline = 1 << 5;
+        assert_eq!(unknown.appearance_flags(), None);
+        assert_eq!(GuiHook::new(GuiHookKind::Section, 7).appearance_flags(), None);
+        assert_eq!(GuiHook::appearance(0, 0).appearance_flags(), None, "request id required");
+    }
 
     #[test]
     fn draw_batches_are_bounded_and_validate_every_command() {

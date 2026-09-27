@@ -360,11 +360,31 @@ impl UiMotion {
 
 pub struct UiAnimator {
     motions: [UiMotion; MAX_UI_NODES],
+    reduced_motion: bool,
 }
 
 impl UiAnimator {
     pub const fn new() -> Self {
-        Self { motions: [UiMotion::EMPTY; MAX_UI_NODES] }
+        Self { motions: [UiMotion::EMPTY; MAX_UI_NODES], reduced_motion: false }
+    }
+
+    pub const fn reduced_motion(&self) -> bool {
+        self.reduced_motion
+    }
+
+    /// With reduced motion on, transitions jump to their end state and
+    /// animations hold their base style; turning it on settles any motion
+    /// already running.
+    pub fn set_reduced_motion(&mut self, reduced: bool) {
+        self.reduced_motion = reduced;
+        if reduced {
+            for motion in &mut self.motions {
+                if motion.active {
+                    motion.active = false;
+                    motion.current = motion.to;
+                }
+            }
+        }
     }
 
     pub fn start_transition(
@@ -387,6 +407,9 @@ impl UiAnimator {
         motion.from = from;
         motion.to = to;
         motion.current = from;
+        if self.reduced_motion {
+            motion.active = false;
+        }
         if !motion.active {
             motion.current = to;
         }
@@ -405,7 +428,7 @@ impl UiAnimator {
         }
         let motion = &mut self.motions[index];
         motion.valid = true;
-        motion.active = true;
+        motion.active = !self.reduced_motion;
         motion.animation = true;
         motion.started_ms = now_ms;
         motion.animation_spec = spec;
@@ -726,6 +749,31 @@ mod tests {
         assert_eq!(animator.value(0).unwrap().opacity_q16, 49_151);
         assert!(!animator.advance(110).active);
         assert_eq!(animator.value(0).unwrap().opacity_q16, u16::MAX);
+    }
+
+    #[test]
+    fn reduced_motion_settles_transitions_and_holds_animations() {
+        let spec = UiTransitionSpec {
+            properties: MOTION_OPACITY,
+            duration_ms: 100,
+            ..UiTransitionSpec::DEFAULT
+        };
+        let mut animator = UiAnimator::new();
+        animator.set_reduced_motion(true);
+        assert!(animator.start_transition(0, style(0), style(u16::MAX), spec, 10));
+        assert_eq!(animator.value(0).unwrap().opacity_q16, u16::MAX);
+        assert_eq!(animator.next_deadline(10), None);
+        assert!(animator.start_animation(1, style(7), UiAnimationPreset::Pulse.spec(), 10));
+        assert_eq!(animator.next_deadline(10), None);
+        assert_eq!(animator.value(1), Some(style(7)));
+
+        // Turning it on mid-flight settles running motion at its target.
+        let mut running = UiAnimator::new();
+        assert!(running.start_transition(0, style(0), style(u16::MAX), spec, 10));
+        assert!(running.advance(20).active);
+        running.set_reduced_motion(true);
+        assert_eq!(running.value(0).unwrap().opacity_q16, u16::MAX);
+        assert!(!running.advance(30).active);
     }
 
     #[test]

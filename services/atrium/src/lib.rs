@@ -189,21 +189,51 @@ pub const SETTINGS_SEARCH_BOUNDS: GuiRect = GuiRect::new(32, 108, 208, 44);
 pub const SETTINGS_CATEGORY_BOUNDS: GuiRect = GuiRect::new(32, 164, 208, 44);
 pub const SETTINGS_CATEGORY_GAP: i32 = 4;
 
+/// Appearance page controls: accent swatches in a row, then on/off rows.
+pub const SETTINGS_SWATCH_BOUNDS: GuiRect = GuiRect::new(296, 172, 40, 40);
+pub const SETTINGS_SWATCH_GAP: i32 = 16;
+pub const SETTINGS_TOGGLE_ROW_BOUNDS: GuiRect = GuiRect::new(296, 244, 360, 44);
+pub const SETTINGS_TOGGLE_ROW_GAP: i32 = 12;
+pub const SETTINGS_TOGGLE_LABELS: [&[u8]; 2] = [b"Show FPS overlay", b"Reduce motion"];
+
+pub const fn settings_swatch_bounds(index: usize) -> GuiRect {
+    GuiRect::new(
+        SETTINGS_SWATCH_BOUNDS.x
+            + (SETTINGS_SWATCH_BOUNDS.width as i32 + SETTINGS_SWATCH_GAP) * index as i32,
+        SETTINGS_SWATCH_BOUNDS.y,
+        SETTINGS_SWATCH_BOUNDS.width,
+        SETTINGS_SWATCH_BOUNDS.height,
+    )
+}
+
+pub const fn settings_toggle_row_bounds(index: usize) -> GuiRect {
+    GuiRect::new(
+        SETTINGS_TOGGLE_ROW_BOUNDS.x,
+        SETTINGS_TOGGLE_ROW_BOUNDS.y
+            + (SETTINGS_TOGGLE_ROW_BOUNDS.height as i32 + SETTINGS_TOGGLE_ROW_GAP) * index as i32,
+        SETTINGS_TOGGLE_ROW_BOUNDS.width,
+        SETTINGS_TOGGLE_ROW_BOUNDS.height,
+    )
+}
+
 /// One Settings category. Adding a page means adding a variant here, its
 /// entry in [`SettingsPage::ALL`], and its page content in `settings_scene`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsPage {
     Keyboard,
     Mouse,
+    Appearance,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 2] = [SettingsPage::Keyboard, SettingsPage::Mouse];
+    pub const ALL: [SettingsPage; 3] =
+        [SettingsPage::Keyboard, SettingsPage::Mouse, SettingsPage::Appearance];
 
     pub const fn label(self) -> &'static [u8] {
         match self {
             SettingsPage::Keyboard => b"Keyboard",
             SettingsPage::Mouse => b"Mouse",
+            SettingsPage::Appearance => b"Appearance",
         }
     }
 
@@ -211,9 +241,35 @@ impl SettingsPage {
         match self {
             SettingsPage::Keyboard => logos_ui::UiIcon::Keyboard,
             SettingsPage::Mouse => logos_ui::UiIcon::Mouse,
+            SettingsPage::Appearance => logos_ui::UiIcon::Palette,
         }
     }
 }
+
+/// Accent colour choices; each indexes `logos_ui_graphics::UI_ACCENTS`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Accent {
+    Blue,
+    Teal,
+    Purple,
+    Orange,
+}
+
+impl Accent {
+    pub const ALL: [Accent; 4] = [Accent::Blue, Accent::Teal, Accent::Purple, Accent::Orange];
+
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub const fn colors(self) -> logos_ui_graphics::UiAccent {
+        logos_ui_graphics::UI_ACCENTS[self.index()]
+    }
+}
+
+/// App surfaces keep a red accent for their close control; only the focus
+/// colour follows the chosen accent there.
+const APP_CLOSE_ACCENT: u32 = 0x9f3b3b;
 
 /// Bounds of the `index`th visible category row.
 pub const fn settings_category_bounds(index: usize) -> GuiRect {
@@ -400,6 +456,9 @@ pub struct Atrium {
     settings_search: logos_ui::UiInput,
     settings_search_active: bool,
     settings_category_hover: Option<SettingsPage>,
+    accent: Accent,
+    fps_overlay: bool,
+    reduced_motion: bool,
     keyboard_layout: KeyboardLayout,
     keyboard_select: logos_ui::UiSelect,
     mouse_acceleration: MouseAcceleration,
@@ -433,6 +492,10 @@ impl Atrium {
             settings_search: logos_ui::UiInput::new(),
             settings_search_active: false,
             settings_category_hover: None,
+            accent: Accent::Blue,
+            // Display starts with its FPS overlay on.
+            fps_overlay: true,
+            reduced_motion: false,
             keyboard_layout: KeyboardLayout::Azerty,
             keyboard_select: logos_ui::UiSelect::with_selection(2, Some(0)),
             mouse_acceleration: MouseAcceleration::Medium,
@@ -574,6 +637,48 @@ impl Atrium {
         query_matches(page.label(), self.settings_search.value().as_bytes())
     }
 
+    pub const fn accent(&self) -> Accent {
+        self.accent
+    }
+
+    pub const fn fps_overlay(&self) -> bool {
+        self.fps_overlay
+    }
+
+    /// Flips the FPS overlay flag; the caller sends Display `ToggleFps`.
+    pub fn toggle_fps_overlay(&mut self) {
+        self.fps_overlay = !self.fps_overlay;
+    }
+
+    pub const fn reduced_motion(&self) -> bool {
+        self.reduced_motion
+    }
+
+    /// `APPEARANCE_*` flags for LockScreen and app services (ADR-0089).
+    pub const fn appearance_flags(&self) -> u16 {
+        if self.reduced_motion { logos_abi::APPEARANCE_REDUCED_MOTION } else { 0 }
+    }
+
+    /// Theme for Home and its menus.
+    pub const fn home_theme(&self) -> logos_ui_graphics::UiSceneTheme {
+        let accent = self.accent.colors();
+        logos_ui_graphics::UiSceneTheme {
+            accent: accent.accent,
+            focus: accent.focus,
+            ..logos_ui_graphics::UiSceneTheme::DEFAULT
+        }
+    }
+
+    /// Theme for Atrium-drawn app surfaces (Settings, Calculator, Files,
+    /// Terminal chrome).
+    pub const fn app_theme(&self) -> logos_ui_graphics::UiSceneTheme {
+        logos_ui_graphics::UiSceneTheme {
+            accent: APP_CLOSE_ACCENT,
+            focus: self.accent.colors().focus,
+            ..logos_ui_graphics::UiSceneTheme::DEFAULT
+        }
+    }
+
     pub const fn keyboard_layout(&self) -> KeyboardLayout {
         self.keyboard_layout
     }
@@ -643,11 +748,36 @@ impl Atrium {
         }
     }
 
-    fn settings_select(&mut self) -> &mut logos_ui::UiSelect {
+    /// The current page's select, if it has one.
+    fn settings_select(&mut self) -> Option<&mut logos_ui::UiSelect> {
         match self.settings_page {
-            SettingsPage::Keyboard => &mut self.keyboard_select,
-            SettingsPage::Mouse => &mut self.mouse_select,
+            SettingsPage::Keyboard => Some(&mut self.keyboard_select),
+            SettingsPage::Mouse => Some(&mut self.mouse_select),
+            SettingsPage::Appearance => None,
         }
+    }
+
+    fn settings_select_open(&mut self) -> bool {
+        self.settings_select().is_some_and(|select| select.is_open())
+    }
+
+    /// Applies a click on the Appearance page: a swatch picks the accent, a
+    /// row flips its setting.
+    fn appearance_click(&mut self, x: i32, y: i32) -> bool {
+        if let Some(index) =
+            (0..Accent::ALL.len()).find(|index| settings_swatch_bounds(*index).contains(x, y))
+        {
+            self.accent = Accent::ALL[index];
+            return true;
+        }
+        match (0..SETTINGS_TOGGLE_LABELS.len())
+            .find(|index| settings_toggle_row_bounds(*index).contains(x, y))
+        {
+            Some(0) => self.toggle_fps_overlay(),
+            Some(_) => self.reduced_motion = !self.reduced_motion,
+            None => return false,
+        }
+        true
     }
 
     /// Applies option `index` of the current page's select to its setting.
@@ -665,6 +795,7 @@ impl Atrium {
                     _ => MouseAcceleration::High,
                 };
             }
+            SettingsPage::Appearance => {}
         }
     }
 
@@ -672,6 +803,7 @@ impl Atrium {
         match self.settings_page {
             SettingsPage::Keyboard => self.keyboard_select_popover(viewport),
             SettingsPage::Mouse => self.mouse_select_popover(viewport),
+            SettingsPage::Appearance => logos_ui::UiPopoverLayout::EMPTY,
         }
     }
 
@@ -893,8 +1025,9 @@ impl Atrium {
         }
         if input.kind == MessageKind::Key && input.state != KeyState::Released {
             let code = KeyCode::from_raw(input.code);
-            if self.settings_select().is_open() {
-                return code == KeyCode::ESCAPE && self.settings_select().close();
+            if self.settings_select_open() {
+                return code == KeyCode::ESCAPE
+                    && self.settings_select().is_some_and(|select| select.close());
             }
             // Modified arrows stay window-management shortcuts.
             if input.modifiers & (MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_META) != 0 {
@@ -913,28 +1046,32 @@ impl Atrium {
             let hover = self.settings_category_at(x, y);
             let category_changed = self.settings_category_hover != hover;
             self.settings_category_hover = hover;
-            let select_changed = if self.settings_select().is_open() {
-                let layout = self.settings_select_popover(FULLSCREEN_SURFACE_BOUNDS);
-                self.settings_select().set_option_hovered(layout.option_at(x, y))
-            } else {
-                self.settings_select().set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y))
+            let layout = self.settings_select_popover(FULLSCREEN_SURFACE_BOUNDS);
+            let select_changed = match self.settings_select() {
+                Some(select) if select.is_open() => {
+                    select.set_option_hovered(layout.option_at(x, y))
+                }
+                Some(select) => select.set_hovered(SETTINGS_SELECT_BOUNDS.contains(x, y)),
+                None => false,
             };
             return category_changed || select_changed;
         }
         if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
             return false;
         }
-        if self.settings_select().is_open() {
+        if self.settings_select_open() {
             let layout = self.settings_select_popover(FULLSCREEN_SURFACE_BOUNDS);
             if let Some(index) = layout.option_at(x, y) {
-                if self.settings_select().select(index) {
+                if self.settings_select().is_some_and(|select| select.select(index)) {
                     self.apply_settings_option(index);
                 }
                 return true;
             }
             // Any other click dismisses the list first; it is not also
             // treated as a click on what lies underneath.
-            self.settings_select().close();
+            if let Some(select) = self.settings_select() {
+                select.close();
+            }
             return true;
         }
         if SETTINGS_SEARCH_BOUNDS.contains(x, y) {
@@ -947,8 +1084,11 @@ impl Atrium {
             self.select_settings_page(page);
             return true;
         }
+        if self.settings_page == SettingsPage::Appearance {
+            return self.appearance_click(x, y);
+        }
         if SETTINGS_SELECT_BOUNDS.contains(x, y) {
-            return self.settings_select().open();
+            return self.settings_select().is_some_and(|select| select.open());
         }
         false
     }
@@ -2844,8 +2984,11 @@ mod tests {
         assert_eq!(atrium.settings_page(), SettingsPage::Keyboard);
         assert!(!atrium.settings_input(&key(KeyCode::UP)), "no category above the first");
         assert!(atrium.settings_input(&key(KeyCode::DOWN)));
-        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
+        assert!(atrium.settings_input(&key(KeyCode::DOWN)));
+        assert_eq!(atrium.settings_page(), SettingsPage::Appearance);
         assert!(!atrium.settings_input(&key(KeyCode::DOWN)), "no category below the last");
+        assert!(atrium.settings_input(&key(KeyCode::UP)));
+        assert_eq!(atrium.settings_page(), SettingsPage::Mouse);
         assert!(
             !atrium.settings_input(&InputMessage::key(KeyCode::UP, KeyState::Pressed, MOD_CTRL)),
             "Ctrl+Up stays a window shortcut"

@@ -379,6 +379,7 @@ fn write_style<W: fmt::Write>(output: &mut W, style: UiStyle) -> Result<(), UiCo
         UiStyle::FontLight => write!(output, "logos_ui::UiStyle::FontLight"),
         UiStyle::Opacity50 => write!(output, "logos_ui::UiStyle::Opacity50"),
         UiStyle::Transparent => write!(output, "logos_ui::UiStyle::Transparent"),
+        UiStyle::Swatch(value) => write!(output, "logos_ui::UiStyle::Swatch({value})"),
         UiStyle::TransitionColors => write!(output, "logos_ui::UiStyle::TransitionColors"),
         UiStyle::TransitionOpacity => write!(output, "logos_ui::UiStyle::TransitionOpacity"),
         UiStyle::TransitionTransform => {

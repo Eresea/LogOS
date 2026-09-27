@@ -143,6 +143,12 @@ pub extern "C" fn _start() -> ! {
                 InputMessage::key(KeyCode::Unknown, KeyState::Released, 0),
             );
             while common::ipc_receive_handle(input_capability, &mut event) == IpcStatus::Ok {
+                // Appearance is a global preference (ADR-0089): apply it even
+                // if it overtakes this Terminal's own surface response.
+                if event.is_valid() && event.input.appearance_flags().is_some() {
+                    let _ = terminal.input(&event.input);
+                    continue;
+                }
                 if !event.is_valid() || event.surface != terminal_surface {
                     continue;
                 }
@@ -169,6 +175,8 @@ pub extern "C" fn _start() -> ! {
                 terminal.session_output_bytes(bytes);
             }
         }
+        // Waits time out every `WAIT_TIMEOUT_TICKS`, which paces the blink.
+        terminal.blink(common::current_ticks());
         if pending_render.is_none() {
             *pending_render = terminal.next_grid_row();
         }

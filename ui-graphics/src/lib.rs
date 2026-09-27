@@ -30,6 +30,22 @@ pub struct UiSceneTheme {
     pub success: u32,
 }
 
+/// One selectable accent: `accent` fills emphasised controls, `focus` marks
+/// the focused or selected item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UiAccent {
+    pub accent: u32,
+    pub focus: u32,
+}
+
+/// The fixed accent palette: blue (default), teal, purple, orange.
+pub const UI_ACCENTS: [UiAccent; 4] = [
+    UiAccent { accent: 0x356bd8, focus: 0x4b82f2 },
+    UiAccent { accent: 0x0f766e, focus: 0x14b8a6 },
+    UiAccent { accent: 0x6d28d9, focus: 0x8b5cf6 },
+    UiAccent { accent: 0xc2410c, focus: 0xf97316 },
+];
+
 impl UiSceneTheme {
     pub const DEFAULT: Self = Self {
         surface: 0x101820,
@@ -878,12 +894,27 @@ fn has_rounded_style(node: &UiNode) -> bool {
     node.styles.contains(UiStyle::RoundedLarge)
 }
 
+fn swatch_color(node: &UiNode) -> Option<u32> {
+    node.styles.tokens[..usize::from(node.styles.len)].iter().find_map(|token| match token {
+        UiStyle::Swatch(index) => UI_ACCENTS.get(usize::from(*index)).map(|swatch| swatch.focus),
+        _ => None,
+    })
+}
+
 fn panel_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
-    if node.styles.contains(UiStyle::BackgroundAccent) { theme.accent } else { theme.panel }
+    if let Some(swatch) = swatch_color(node) {
+        swatch
+    } else if node.styles.contains(UiStyle::BackgroundAccent) {
+        theme.accent
+    } else {
+        theme.panel
+    }
 }
 
 fn control_color(node: &UiNode, theme: UiSceneTheme) -> u32 {
-    if node.interaction.is_focused() || node.interaction.is_pressed() {
+    if let Some(swatch) = swatch_color(node) {
+        swatch
+    } else if node.interaction.is_focused() || node.interaction.is_pressed() {
         theme.focus
     } else if node.interaction.is_hovered() || node.styles.contains(UiStyle::BackgroundAccent) {
         theme.accent

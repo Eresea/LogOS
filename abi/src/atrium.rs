@@ -253,6 +253,7 @@ impl AtriumSurfaceInput {
                     && self.input.len as usize <= MAX_TEXT_BYTES
             }
             MessageKind::Pointer => self.input.pointer_event().is_some(),
+            MessageKind::Appearance => self.input.appearance_flags().is_some(),
             _ => false,
         }
     }
@@ -325,6 +326,20 @@ const _: () = assert!(core::mem::size_of::<AtriumSurfaceInput>() <= super::MAX_I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_input_is_valid_for_a_surface_with_known_flags() {
+        let surface = SurfaceHandle::new(1, 1, 7).unwrap();
+        let reduced = InputMessage::appearance(crate::APPEARANCE_REDUCED_MOTION);
+        assert_eq!(reduced.appearance_flags(), Some(crate::APPEARANCE_REDUCED_MOTION));
+        assert!(AtriumSurfaceInput::new(surface, reduced).is_valid());
+        assert!(AtriumSurfaceInput::new(surface, InputMessage::appearance(0)).is_valid());
+        let mut unknown = reduced;
+        unknown.modifiers = 1 << 7;
+        assert!(!AtriumSurfaceInput::new(surface, unknown).is_valid());
+        assert!(!AtriumSurfaceInput::new(SurfaceHandle::EMPTY, reduced).is_valid());
+        assert!(crate::MessageKind::raw_is_valid(crate::MessageKind::Appearance as u8));
+    }
 
     #[test]
     fn controls_validate_only_their_selected_payload() {

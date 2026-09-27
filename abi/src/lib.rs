@@ -1280,13 +1280,20 @@ pub enum MessageKind {
     GuiHook = 28,
     GuiSession = 29,
     Pointer = 30,
+    /// Appearance preferences for a surface's app; `modifiers` carries the
+    /// `APPEARANCE_*` flags (ADR-0089).
+    Appearance = 31,
 }
 
 impl MessageKind {
     pub const fn raw_is_valid(raw: u8) -> bool {
-        raw >= Self::Key as u8 && raw <= Self::Pointer as u8
+        raw >= Self::Key as u8 && raw <= Self::Appearance as u8
     }
 }
+
+/// Reduced motion: settle ADR-0082 motion at once and do not blink.
+pub const APPEARANCE_REDUCED_MOTION: u16 = 1 << 0;
+pub const APPEARANCE_FLAGS_MASK: u16 = APPEARANCE_REDUCED_MOTION;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -1472,6 +1479,30 @@ impl InputMessage {
 
     pub fn text(bytes: &[u8]) -> Option<Self> {
         Self::text_kind(MessageKind::Text, bytes)
+    }
+
+    pub const fn appearance(flags: u16) -> Self {
+        Self {
+            kind: MessageKind::Appearance,
+            state: KeyState::Pressed,
+            code: 0,
+            modifiers: flags & APPEARANCE_FLAGS_MASK,
+            len: 0,
+            text: [0; MAX_TEXT_BYTES],
+        }
+    }
+
+    /// The `APPEARANCE_*` flags of a well-formed appearance message.
+    pub const fn appearance_flags(&self) -> Option<u16> {
+        if !matches!(self.kind, MessageKind::Appearance)
+            || !matches!(self.state, KeyState::Pressed)
+            || self.code != 0
+            || self.len != 0
+            || self.modifiers & !APPEARANCE_FLAGS_MASK != 0
+        {
+            return None;
+        }
+        Some(self.modifiers)
     }
 
     pub fn paste(bytes: &[u8]) -> Option<Self> {
