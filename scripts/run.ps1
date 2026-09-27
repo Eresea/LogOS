@@ -510,6 +510,65 @@ function Wait-QmpTerminalFramebuffer {
     return $false
 }
 
+# The Terminal surface's own content rect (from the Atrium marker, bottom
+# 40 px excluded so the ever-changing FPS counter never counts) as a flat
+# byte array, for content-only comparisons that ignore the rest of the frame.
+function Get-TerminalContentBytes {
+    param([byte[]]$Bytes)
+    $match = [regex]::Matches((Get-Content $log -Raw), 'app=Terminal scene published surface=\d+/\d+ bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
+    $groups = $match[$match.Count - 1].Groups
+    $layout = Get-PpmLayout $Bytes
+    $left = [Math]::Max([int]$groups[1].Value, 0)
+    $top = [Math]::Max([int]$groups[2].Value + 32, 0)
+    $right = [Math]::Min($left + [int]$groups[3].Value, $layout.Width)
+    $bottom = [Math]::Min([int]$groups[2].Value + [int]$groups[4].Value, $layout.Height - 40)
+    $rowLength = ($right - $left) * 3
+    $content = [byte[]]::new(($bottom - $top) * $rowLength)
+    for ($y = $top; $y -lt $bottom; $y++) {
+        $rowStart = $layout.Offset + ($y * $layout.Width + $left) * 3
+        [Array]::Copy($Bytes, $rowStart, $content, ($y - $top) * $rowLength, $rowLength)
+    }
+    return $content
+}
+
+function Test-BytesEqual {
+    param([byte[]]$A, [byte[]]$B)
+    if ($A.Length -ne $B.Length) { return $false }
+    for ($i = 0; $i -lt $A.Length; $i++) {
+        if ($A[$i] -ne $B[$i]) { return $false }
+    }
+    return $true
+}
+
+# Screendumps repeatedly until the Terminal's own content rect stops
+# changing between two consecutive dumps (session/Flow output has finished
+# draining), or gives up at the deadline and returns the last dump taken.
+function Wait-QmpTerminalContentSettled {
+    param([hashtable]$Qmp, [string]$Path, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+    $previous = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($Path))
+    $stableStreak = 0
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+        $current = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($Path))
+        if (Test-BytesEqual $previous $current) {
+            # Require 3 consecutive identical dumps (not just 2): a slow,
+            # bursty drain can otherwise leave a multi-hundred-ms gap between
+            # bursts that looks "stable" for one interval but isn't done yet.
+            $stableStreak++
+            if ($stableStreak -ge 3) {
+                return $true
+            }
+        } else {
+            $stableStreak = 0
+        }
+        $previous = $current
+    }
+    return $false
+}
+
 function Framebuffer-HasNativeCursor {
     param([string]$Path, [int]$X, [int]$Y)
     if (-not (Test-Path $Path)) { return $false }
@@ -880,6 +939,52 @@ try {
             $terminalFrame = Join-Path $repoRoot "target\qemu-terminal-$PID.ppm"
             if (-not (Wait-QmpTerminalFramebuffer $qmp $terminalFrame $TimeoutSeconds)) {
                 throw 'Terminal surface did not publish glyph pixels inside its content bounds.'
+            }
+
+            # #75: bounded scrollback. Overflow the visible rows (each `help`
+            # round trip prints a few lines; enough repeats push well past a
+            # full-height pane's ~47 rows and into scrollback), screendump
+            # the live bottom view, then scroll up with Shift+PageUp and
+            # screendump again. The "Display text grid row applied" marker
+            # is a one-shot latch (logged only for the very first row ever
+            # applied, see `TEXT_GRID_ROW_LOGGED` in
+            # services/images/src/display.rs), so it can't confirm this
+            # second batch landed; comparing the two framebuffers' bytes for
+            # a difference proves scrolling actually changed the visible
+            # content instead.
+            1..100 | ForEach-Object {
+                Send-QmpText $qmp 'help'
+                Send-QmpKey $qmp 'ret'
+                # Let each round trip (echo + Flow reply + new prompt, then
+                # the row-by-row drain to Display) land before typing the
+                # next one; sending faster than that pipeline drains has
+                # been observed to drop or garble characters. 100 repeats at
+                # this pace comfortably clears a full-height pane's ~47
+                # rows even when a good fraction of individual repeats are
+                # lost to that pacing.
+                Start-Sleep -Milliseconds 400
+            }
+            # Wait for the whole backlog of typed commands to actually
+            # finish draining (session/Flow replies, then the row-by-row
+            # relay to Display) before touching scroll: `feed()` calls
+            # `show_live_view()` on every new byte of session output, so
+            # scrolling up while output is still trickling in snaps straight
+            # back to live and would make the comparison below a false
+            # negative. Poll until the content rect itself stops changing
+            # rather than guessing a fixed delay.
+            $terminalBottomFrame = Join-Path $repoRoot "target\qemu-terminal-bottom-$PID.ppm"
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalBottomFrame $TimeoutSeconds)) {
+                throw 'Terminal overflow output never stopped changing (drain did not settle).'
+            }
+            Send-QmpKey $qmp 'shift-pgup'
+            $terminalScrolledFrame = Join-Path $repoRoot "target\qemu-terminal-scrolled-$PID.ppm"
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalScrolledFrame $TimeoutSeconds)) {
+                throw 'Terminal did not settle after scrolling up.'
+            }
+            $bottomContent = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalBottomFrame))
+            $scrolledContent = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalScrolledFrame))
+            if (Test-BytesEqual $bottomContent $scrolledContent) {
+                throw 'Scrolling up did not change the Terminal framebuffer (scrollback not visible).'
             }
         }
 

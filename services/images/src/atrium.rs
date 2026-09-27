@@ -6,11 +6,10 @@ mod common;
 
 use logos_abi::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumSurfaceInput, AtriumSurfaceRequest,
-    AtriumSurfaceResponse, DISPLAY_CELL_HEIGHT, DISPLAY_CELL_WIDTH, GuiDrawCommand, GuiHook,
-    GuiHookKind, GuiRect, GuiSceneOp, GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest,
-    GuiSurfaceResponse, GuiTextGridRow, InputMessage, IpcStatus, KeyCode, KeyState,
-    MAX_GUI_TEXT_GRID_COLUMNS, MAX_GUI_TEXT_GRID_ROWS, MessageKind, PointerState, RenderMessage,
-    SurfaceHandle, TERMINAL_CHROME_HEIGHT,
+    AtriumSurfaceResponse, GuiDrawCommand, GuiHook, GuiHookKind, GuiRect, GuiSceneOp,
+    GuiSessionContext, GuiSurfaceOperation, GuiSurfaceRequest, GuiSurfaceResponse, GuiTextGridRow,
+    InputMessage, IpcStatus, KeyCode, KeyState, MessageKind, PointerState, RenderMessage,
+    SurfaceHandle,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -856,7 +855,16 @@ fn build_app_scene_tree(
             tree,
             root,
             logos_ui::UiNodeKind::Label,
-            GuiRect::new(bounds.x.saturating_add(16), bounds.y.saturating_add(10), 180, 20),
+            // Full chrome-strip height, starting at the surface's own top
+            // edge — matching System's title layout (`system_layout`'s
+            // `title` rect) so the label centers at the same vertical
+            // position instead of ~4px lower (#75).
+            GuiRect::new(
+                bounds.x.saturating_add(16),
+                bounds.y,
+                180,
+                logos_atrium::STATUS_BAR_BOUNDS.height,
+            ),
             title,
             logos_ui::UiStyleList::EMPTY,
         )
@@ -1008,22 +1016,13 @@ fn build_app_scene_tree(
             }
         }
         logos_atrium::AppId::Terminal => {
-            // Content below the title bar, sized from the surface bounds
-            // (works in tiled panes and after resize) and clamped to the
-            // node's own bounds (ADR-0087) — same math as Terminal's own
-            // `resize_to_surface`, so both sides agree on the grid shape.
-            let content_y = bounds.y.saturating_add(TERMINAL_CHROME_HEIGHT as i32);
-            let content_height = bounds.height.saturating_sub(TERMINAL_CHROME_HEIGHT as u32);
-            let columns = (bounds.width as usize / DISPLAY_CELL_WIDTH)
-                .clamp(1, MAX_GUI_TEXT_GRID_COLUMNS) as u32;
-            let rows = (content_height as usize / DISPLAY_CELL_HEIGHT)
-                .clamp(1, MAX_GUI_TEXT_GRID_ROWS) as u32;
-            let grid_bounds = GuiRect::new(
-                bounds.x,
-                content_y,
-                columns * DISPLAY_CELL_WIDTH as u32,
-                rows * DISPLAY_CELL_HEIGHT as u32,
-            );
+            // Content below the title bar and inset by the inner padding
+            // (#75), sized from the surface bounds (works in tiled panes and
+            // after resize) via the same shared math Terminal's own
+            // `resize_to_surface` uses, so both sides always agree on the
+            // grid shape (ADR-0087; a prior duplicated formula could drift
+            // and rows would be clipped or rejected in narrow panes).
+            let (_, _, grid_bounds) = logos_abi::terminal_grid_metrics(bounds);
             let Some(grid) = add_app_scene_node(
                 tree,
                 root,
