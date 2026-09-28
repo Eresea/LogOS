@@ -1,4 +1,4 @@
-# ADR-0090: Atrium settings persistence through User's snapshot
+# ADR-0091: Atrium settings persistence through User's snapshot
 
 Status: Accepted
 
@@ -30,11 +30,20 @@ Storage through User, reusing the canonical-snapshot path User already has (ADR-
   a 4-byte magic, a version byte, and an FNV-1a checksum over the header and fields. A short buffer,
   wrong magic, unknown version or checksum mismatch all decode to `AtriumSettingsRecord::DEFAULT` --
   corruption never becomes a crash or a silently wrong setting.
-- Atrium loads the record once at boot (a bounded blocking exchange, mirroring User's own blocking
-  boot-time load from Storage: User starts well before Atrium in `SERVICE_START_ORDER`) and applies
-  it before its first render or Input push. It saves only when the encoded record actually changes
-  (a Settings-page edit), not every frame, using the same non-blocking retry-on-`Full` pattern already
-  used for the Atrium-to-Input settings push (ADR-0085).
+- Atrium loads the record non-blockingly: it boots already showing `AtriumSettingsRecord::DEFAULT`
+  (kept equal to `Atrium::new()`'s own defaults by a host test), queues one `Load` request at start
+  using the same retry-on-`Full` send pattern as every other pending IPC send in its main loop, and
+  applies the answer -- Input push, FPS-overlay mirror, and a Home redraw if Home already exists --
+  whenever it lands, with no timeout or `wait_on_capability` in between. A slow or faulted User (for
+  example mounting Storage on a fresh disk) never delays Atrium's first render, LockScreen included.
+  If the user changes a setting before the Load answer arrives, their live choice wins: the late
+  answer is a race between an old persisted value and what the user just chose, and
+  `should_apply_loaded_settings` (host-tested in `logos-atrium`) drops it once
+  `settings_changed_by_user` is set, though the boot-load proof marker below still logs whatever is
+  actually in effect at that point. Saving is unrelated to loading: it fires only when the encoded
+  record actually changes on a Settings-page edit, never merely because the Load hasn't answered
+  yet, using the same non-blocking retry-on-`Full` pattern already used for the Atrium-to-Input
+  settings push (ADR-0085).
 
 This supersedes ADR-0085's "Settings are runtime-only" note: the same `InputSettings` push to Input
 that ADR-0085 introduced still happens on every change, but the settings driving it now survive a
@@ -44,8 +53,13 @@ reboot.
 
 - `ABI_VERSION` moves to 10 for the new endpoint pair and wire types (`AtriumSettingsRequest`/
   `AtriumSettingsResponse`, `AtriumSettingsOperation`, `AtriumSettingsStatus`).
-- Atrium gains a boot dependency on User (`src/service_images.rs`); User gains a third IPC client
-  alongside Flow and Shell, handled the same way (a non-blocking receive check per loop tick).
+- Atrium's `ServiceImageSpec` dependency list (`src/service_images.rs`) is unchanged: that list only
+  feeds the supervisor's runtime dependency/restart bookkeeping, not IPC capability wiring (which is
+  entirely generic, driven by `IpcEndpointId::producer`/`consumer` regardless of it) or the fixed
+  built-in boot order (`SERVICE_START_ORDER`, where User already starts before Atrium). Since the
+  settings load is non-blocking, Atrium has no boot-order requirement on User either. User gains a
+  third IPC client alongside Flow and Shell, handled the same way (a non-blocking receive check per
+  loop tick).
 - A corrupt, short or unknown-version record, or a pre-S4 snapshot with no settings section, both
   fall back to `AtriumSettingsRecord::DEFAULT` -- the same defaults `Atrium::new()` already boots
   with -- rather than failing to boot or restoring a partially-decoded record.

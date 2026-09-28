@@ -1153,7 +1153,7 @@ pub enum IpcEndpointId {
     AtriumToSystemSurfaceInput = 63,
     SystemToAtriumSurfaceDraw = 64,
     AtriumToInputControl = 65,
-    /// S4 (#81, ADR-0090): Atrium's settings load/save request to User,
+    /// S4 (#81, ADR-0091): Atrium's settings load/save request to User,
     /// which stores the opaque record inside its own canonical snapshot
     /// (ADR-0064) instead of Atrium reaching Storage directly.
     AtriumToUser = 66,
@@ -1804,7 +1804,7 @@ pub const IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE: u16 = 22;
 pub const IPC_CONTRACT_ATRIUM_SURFACE_INPUT: u16 = 23;
 pub const IPC_CONTRACT_ATRIUM_SURFACE_DRAW: u16 = 24;
 pub const IPC_CONTRACT_INPUT_SETTINGS: u16 = 25;
-/// S4 (#81, ADR-0090): Atrium's settings load/save request/response to User.
+/// S4 (#81, ADR-0091): Atrium's settings load/save request/response to User.
 pub const IPC_CONTRACT_ATRIUM_SETTINGS_REQUEST: u16 = 26;
 pub const IPC_CONTRACT_ATRIUM_SETTINGS_RESPONSE: u16 = 27;
 

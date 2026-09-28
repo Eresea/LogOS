@@ -50,7 +50,7 @@ const STORAGE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_co
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
 );
-// S4 (#81, ADR-0090): Atrium's settings load/save request/response. User
+// S4 (#81, ADR-0091): Atrium's settings load/save request/response. User
 // only stores the opaque bytes inside its own canonical snapshot.
 const ATRIUM_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_ATRIUM_SETTINGS_REQUEST,
@@ -302,7 +302,7 @@ fn persist_catalog(
 /// Handles one Atrium settings request in place: `Load` returns the bytes
 /// last saved (zero if none), `Save` stores the opaque record and persists
 /// the whole catalog through the same durable path as other durable
-/// `UserRequest` operations (S4, #81, ADR-0090).
+/// `UserRequest` operations (S4, #81, ADR-0091).
 fn handle_atrium_settings(
     request: AtriumSettingsRequest,
     storage_send_capability: logos_abi::CapabilityHandle,

@@ -115,9 +115,6 @@ pub const SERVICE_IMAGES: [ServiceImageSpec; 14] = [
             ServiceId::Shell,
             ServiceId::LockScreen,
             ServiceId::Terminal,
-            // S4 (#81, ADR-0090): Atrium loads its settings record from
-            // User at boot (AtriumToUser/UserToAtrium).
-            ServiceId::User,
         ],
     ),
     ServiceImageSpec::new(

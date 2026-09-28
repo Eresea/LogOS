@@ -322,7 +322,7 @@ pub enum MouseAcceleration {
     High,
 }
 
-/// The one persisted, versioned settings record (S4, #81, ADR-0090): a
+/// The one persisted, versioned settings record (S4, #81, ADR-0091): a
 /// plain fixed-size byte layout with a magic, a version byte and a checksum,
 /// so a corrupt, short or unknown-version record can never be mistaken for a
 /// valid one. Atrium encodes and decodes it; User only ever carries the
@@ -469,6 +469,16 @@ impl AtriumSettingsRecord {
             light_theme: flags & ATRIUM_SETTINGS_FLAG_LIGHT_THEME != 0,
         })
     }
+}
+
+/// Whether a settings record loaded from User (S4, #81, ADR-0091) should
+/// still be applied when it arrives. Atrium's boot-time load is
+/// non-blocking -- it never delays the first render on User's answer -- so
+/// the Load response can land after the user has already changed a setting
+/// in this same boot. When that happens the user's live choice wins; the
+/// late answer (an older persisted value racing the new one) is dropped.
+pub const fn should_apply_loaded_settings(settings_changed_by_user: bool) -> bool {
+    !settings_changed_by_user
 }
 
 pub const fn surface_close_bounds(surface: GuiRect) -> GuiRect {
@@ -906,7 +916,7 @@ impl Atrium {
         logos_abi::InputSettings::new(keyboard_layout, mouse_acceleration)
     }
 
-    /// The persisted subset of the current settings (S4, #81, ADR-0090).
+    /// The persisted subset of the current settings (S4, #81, ADR-0091).
     pub const fn settings_record(&self) -> AtriumSettingsRecord {
         AtriumSettingsRecord {
             keyboard_layout: self.keyboard_layout,
@@ -2863,6 +2873,23 @@ mod tests {
         assert!(!atrium.fps_overlay());
         assert!(atrium.reduced_motion());
         assert!(atrium.light_theme());
+    }
+
+    /// S4 (#81, ADR-0091): Atrium's non-blocking boot applies no explicit
+    /// record before the persisted Load answer arrives, relying on
+    /// `Atrium::new()` already booting with the same defaults as
+    /// `AtriumSettingsRecord::DEFAULT`. If these ever drift apart, Atrium
+    /// would render one theme and then flip to another the instant Load
+    /// resolves, even on a completely fresh disk.
+    #[test]
+    fn default_settings_record_matches_a_freshly_booted_atrium() {
+        assert_eq!(Atrium::new().settings_record(), AtriumSettingsRecord::DEFAULT);
+    }
+
+    #[test]
+    fn should_apply_loaded_settings_only_before_the_user_changes_anything() {
+        assert!(should_apply_loaded_settings(false));
+        assert!(!should_apply_loaded_settings(true));
     }
 
     #[test]

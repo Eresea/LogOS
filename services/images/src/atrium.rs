@@ -125,7 +125,7 @@ const LOCKSCREEN_CONTROL_CAPABILITY: common::CapabilitySpec = common::capability
     core::mem::size_of::<GuiHook>(),
     logos_abi::IpcRights::Send,
 );
-// S4 (#81, ADR-0090): Atrium's settings load/save request/response to User.
+// S4 (#81, ADR-0091): Atrium's settings load/save request/response to User.
 // User only carries the opaque record inside its own canonical snapshot
 // (ADR-0064); Atrium owns the record's layout and interpretation.
 const USER_SETTINGS_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -816,41 +816,17 @@ fn next_request_id(next: &mut u32) -> u32 {
     value
 }
 
-/// Boot-time load of the persisted settings record (S4, #81, ADR-0090).
-/// Blocks until User answers: User starts well before Atrium
-/// (`SERVICE_START_ORDER`), and this mirrors User's own boot-time blocking
-/// load from Storage. Any rejection (invalid response, disconnected
-/// capability) falls back to `AtriumSettingsRecord::DEFAULT`, matching the
-/// same-defaults behavior as a corrupt or missing record.
-fn load_settings_record(
-    send_capability: logos_abi::CapabilityHandle,
-    receive_capability: logos_abi::CapabilityHandle,
-) -> logos_atrium::AtriumSettingsRecord {
-    let request = AtriumSettingsRequest::new(AtriumSettingsOperation::Load, 1);
-    loop {
-        match common::ipc_send_handle(send_capability, &request) {
-            IpcStatus::Ok => break,
-            IpcStatus::Full => common::wait_on_capability(send_capability),
-            _ => return logos_atrium::AtriumSettingsRecord::DEFAULT,
-        }
-    }
-    loop {
-        let mut response = AtriumSettingsResponse::new(request, AtriumSettingsStatus::Invalid);
-        match common::ipc_receive_handle(receive_capability, &mut response) {
-            IpcStatus::Ok if response.is_valid_for(request) => {
-                return if response.status == AtriumSettingsStatus::Ok {
-                    logos_atrium::AtriumSettingsRecord::decode(&response.data)
-                } else {
-                    logos_atrium::AtriumSettingsRecord::DEFAULT
-                };
-            }
-            // Not our response (shouldn't happen on a point-to-point
-            // channel, but stay defensive); keep waiting for ours.
-            IpcStatus::Ok => continue,
-            IpcStatus::Empty => common::wait_on_capability(receive_capability),
-            _ => return logos_atrium::AtriumSettingsRecord::DEFAULT,
-        }
-    }
+/// QEMU proof marker (S4, #81, ADR-0091): the settings state actually in
+/// effect once the boot-time Load resolves (applied, or skipped because the
+/// user already changed a setting first -- see `should_apply_loaded_settings`
+/// in `logos-atrium`), so a change-then-reboot proof can assert persistence
+/// with a log search instead of a pixel match.
+fn proof_settings_loaded(light_theme: bool) {
+    proof_line(if light_theme {
+        b"LogOS vNext: Atrium settings loaded light_theme=1"
+    } else {
+        b"LogOS vNext: Atrium settings loaded light_theme=0"
+    });
 }
 
 struct SurfaceCommandQueue {
@@ -1254,22 +1230,12 @@ pub extern "C" fn _start() -> ! {
 
     let atrium = unsafe { &mut *core::ptr::addr_of_mut!(ATRIUM) };
     let calculator = unsafe { &mut *core::ptr::addr_of_mut!(CALCULATOR) };
-    // S4 (#81, ADR-0090): load the persisted settings record before the
-    // first render or Input push, so Home, LockScreen and Input all start
-    // already showing/applying the saved state instead of defaults that
-    // then flip. User starts well before Atrium (SERVICE_START_ORDER), so
-    // this blocking exchange mirrors User's own boot-time Storage load.
-    let loaded = load_settings_record(user_settings_send, user_settings_receive);
-    atrium.apply_settings_record(loaded);
-    // QEMU proof marker (S4, #81): distinguishes a freshly booted default
-    // record from one actually loaded back from a previous Save, so a
-    // change-then-reboot proof can assert persistence with a log search
-    // instead of a pixel match.
-    proof_line(if loaded.light_theme {
-        b"LogOS vNext: Atrium settings loaded light_theme=1"
-    } else {
-        b"LogOS vNext: Atrium settings loaded light_theme=0"
-    });
+    // Atrium already boots with `AtriumSettingsRecord::DEFAULT` --
+    // `Atrium::new()`'s own defaults, kept in lockstep with `DEFAULT` by a
+    // host test -- so nothing needs applying here. The persisted record, if
+    // any, is loaded non-blockingly from the main loop below (S4, #81,
+    // ADR-0091): never delay the first render, including LockScreen, on
+    // User's answer.
     let atrium_client = common::bootstrap_page().service;
     let mut next_request = 1u32;
     let mut pending_surface: Option<(GuiSurfaceRequest, Option<logos_atrium::SurfaceRequest>)> =
@@ -1314,12 +1280,23 @@ pub extern "C" fn _start() -> ! {
     let mut home_appearance = 0u16;
     let mut pending_input_settings: Option<logos_abi::InputSettings> =
         Some(atrium.input_settings());
-    // S4 (#81, ADR-0090): the record last known to be durable. A settings
+    // S4 (#81, ADR-0091): the record last known to be durable. A settings
     // change only queues a save when the encoded record actually differs,
-    // not on every frame.
+    // not on every frame. Starts as the (default) record already applied;
+    // updated once a persisted Load response is applied, and on every save.
     let mut last_saved_settings = atrium.settings_record().encode();
     let mut pending_settings_save: Option<[u8; logos_abi::ATRIUM_SETTINGS_RECORD_BYTES]> = None;
-    let mut settings_save_request = AtriumSettingsRequest::new(AtriumSettingsOperation::Save, 0);
+    // Non-blocking boot-time settings load: `Some` until the request is
+    // sent (retried on `Full`, same as every other pending-send below); the
+    // response is picked up by the general receive drain further down.
+    let mut pending_settings_load_request = Some(AtriumSettingsRequest::new(
+        AtriumSettingsOperation::Load,
+        next_request_id(&mut next_request),
+    ));
+    // Once the user changes a setting in this boot, their live choice wins
+    // over a Load response that was already in flight (`should_apply_
+    // loaded_settings`, host-tested in `logos-atrium`).
+    let mut settings_changed_by_user = false;
     let mut surface_commands = SurfaceCommandQueue::new();
     let mut authenticated = false;
     let mut heartbeat_ticks = 0u16;
@@ -1342,8 +1319,20 @@ pub extern "C" fn _start() -> ! {
                 _ => pending_input_settings = None,
             }
         }
+        if let Some(request) = pending_settings_load_request {
+            match common::ipc_send_handle(user_settings_send, &request) {
+                IpcStatus::Ok => pending_settings_load_request = None,
+                IpcStatus::Full => {}
+                // User's Load capability is gone; stay on the defaults
+                // already in effect rather than retry forever.
+                _ => {
+                    pending_settings_load_request = None;
+                    proof_settings_loaded(atrium.light_theme());
+                }
+            }
+        }
         if let Some(data) = pending_settings_save {
-            settings_save_request = AtriumSettingsRequest::with_data(
+            let settings_save_request = AtriumSettingsRequest::with_data(
                 AtriumSettingsOperation::Save,
                 next_request_id(&mut next_request),
                 data,
@@ -1356,18 +1345,50 @@ pub extern "C" fn _start() -> ! {
                 _ => pending_settings_save = None,
             }
         }
-        // Drain the save acknowledgement (or any stale response) so the
-        // bounded response queue never fills. `persist_catalog` on the User
-        // side only returns `Ok` after its own blocking Storage round trip
-        // (ADR-0064), so this status genuinely means durable -- worth a
-        // proof marker for a change-then-reboot QEMU proof.
-        let mut settings_save_response =
-            AtriumSettingsResponse::new(settings_save_request, AtriumSettingsStatus::Invalid);
-        while common::ipc_receive_handle(user_settings_receive, &mut settings_save_response)
+        // Drain every response on this channel (save acks and the one Load
+        // answer) so the bounded response queue never fills.
+        let mut settings_response = AtriumSettingsResponse::new(
+            AtriumSettingsRequest::new(AtriumSettingsOperation::Load, 1),
+            AtriumSettingsStatus::Invalid,
+        );
+        while common::ipc_receive_handle(user_settings_receive, &mut settings_response)
             == IpcStatus::Ok
         {
-            if settings_save_response.status == AtriumSettingsStatus::Ok {
-                proof_line(b"LogOS vNext: Atrium settings saved");
+            match settings_response.operation {
+                AtriumSettingsOperation::Save => {
+                    // `persist_catalog` on the User side only returns `Ok`
+                    // after its own blocking Storage round trip (ADR-0064),
+                    // so this status genuinely means durable -- worth a
+                    // proof marker for a change-then-reboot QEMU proof.
+                    if settings_response.status == AtriumSettingsStatus::Ok {
+                        proof_line(b"LogOS vNext: Atrium settings saved");
+                    }
+                }
+                AtriumSettingsOperation::Load => {
+                    if logos_atrium::should_apply_loaded_settings(settings_changed_by_user) {
+                        let record = if settings_response.status == AtriumSettingsStatus::Ok {
+                            logos_atrium::AtriumSettingsRecord::decode(&settings_response.data)
+                        } else {
+                            logos_atrium::AtriumSettingsRecord::DEFAULT
+                        };
+                        let fps_overlay = atrium.fps_overlay();
+                        atrium.apply_settings_record(record);
+                        if atrium.fps_overlay() != fps_overlay {
+                            queue_fps_toggle(&mut surface_commands, &mut next_request);
+                            surface_commands.flush(display_control);
+                        }
+                        // Already durable (it's what we just loaded); update
+                        // the baseline so a later real change diffs against
+                        // it instead of the boot defaults.
+                        last_saved_settings = record.encode();
+                        pending_input_settings = Some(atrium.input_settings());
+                        if atrium.home_surface().is_valid() {
+                            pending_app_render =
+                                render_home_surface(display, atrium) || pending_app_render;
+                        }
+                    }
+                    proof_settings_loaded(atrium.light_theme());
+                }
             }
         }
         if pending_app_render {
@@ -2234,13 +2255,18 @@ pub extern "C" fn _start() -> ! {
                                 if pending_input_settings != Some(settings) {
                                     pending_input_settings = Some(settings);
                                 }
-                                // S4 (#81, ADR-0090): persist only on an
+                                // S4 (#81, ADR-0091): persist only on an
                                 // actual change to the record, not every
                                 // frame the Settings surface handles input.
+                                // Also wins over a same-boot Load response
+                                // that hasn't landed yet (`should_apply_
+                                // loaded_settings`): the user's live choice
+                                // is authoritative from here on.
                                 let encoded = atrium.settings_record().encode();
                                 if encoded != last_saved_settings {
                                     last_saved_settings = encoded;
                                     pending_settings_save = Some(encoded);
+                                    settings_changed_by_user = true;
                                 }
                                 pending_app_render =
                                     render(display, atrium, calculator, atrium_client);

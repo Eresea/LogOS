@@ -268,7 +268,7 @@ pub struct UserCatalog {
     roles: [Option<RoleRecord>; MAX_ROLES],
     sessions: [Option<SessionRecord>; MAX_SESSIONS],
     session_generations: [u32; MAX_SESSIONS],
-    /// Atrium's opaque settings record (S4, #81, ADR-0090). User only
+    /// Atrium's opaque settings record (S4, #81, ADR-0091). User only
     /// carries these bytes inside its own snapshot; it never interprets
     /// them. Zeroed (no record saved yet, or an older snapshot predating
     /// this field) decodes as Atrium's own defaults on the Atrium side.
@@ -442,7 +442,7 @@ impl UserCatalog {
         self.claimed
     }
 
-    /// Atrium's opaque settings record, as last saved (S4, #81, ADR-0090).
+    /// Atrium's opaque settings record, as last saved (S4, #81, ADR-0091).
     pub const fn atrium_settings(&self) -> [u8; ATRIUM_SETTINGS_RECORD_BYTES] {
         self.atrium_settings
     }
@@ -671,7 +671,7 @@ impl UserCatalog {
         // Tail-appended, not versioned with the rest of the snapshot: an
         // older snapshot simply ends before this section, and
         // `restore_snapshot` defaults it to zero bytes rather than
-        // rejecting the whole snapshot (S4, #81, ADR-0090).
+        // rejecting the whole snapshot (S4, #81, ADR-0091).
         output[offset..offset + ATRIUM_SETTINGS_RECORD_BYTES]
             .copy_from_slice(&self.atrium_settings);
         offset += ATRIUM_SETTINGS_RECORD_BYTES;
@@ -730,7 +730,7 @@ impl UserCatalog {
         // Tolerant tail read: a pre-S4 snapshot ends here and has no
         // settings section, which defaults to zero bytes (Atrium then
         // decodes that as its own defaults) rather than failing the whole
-        // restore (ADR-0090).
+        // restore (ADR-0091).
         let mut atrium_settings = [0u8; ATRIUM_SETTINGS_RECORD_BYTES];
         if let Some(bytes) = input.get(offset..offset + ATRIUM_SETTINGS_RECORD_BYTES) {
             atrium_settings.copy_from_slice(bytes);
@@ -1466,7 +1466,7 @@ mod tests {
         assert_eq!(restored.atrium_settings(), settings);
 
         // A pre-S4 snapshot (no settings tail at all) restores fine and
-        // defaults the settings bytes to zero instead of failing (ADR-0090).
+        // defaults the settings bytes to zero instead of failing (ADR-0091).
         let pre_s4 = UserCatalog::new();
         let mut short_snapshot = [0; USER_SNAPSHOT_BYTES];
         let short_length = pre_s4.encode_snapshot(&mut short_snapshot).unwrap();

@@ -8,7 +8,7 @@ pub const USER_ARGON2_SALT_BYTES: usize = 16;
 pub const USER_ARGON2_OUTPUT_BYTES: usize = 32;
 pub const USER_STORAGE_CHUNK_BYTES: usize = 224;
 /// Size of the opaque Atrium settings record User carries inside its
-/// canonical snapshot (S4, #81, ADR-0090). User never interprets these
+/// canonical snapshot (S4, #81, ADR-0091). User never interprets these
 /// bytes; `logos_atrium` owns the layout, magic, version and checksum.
 pub const ATRIUM_SETTINGS_RECORD_BYTES: usize = 16;
 pub const USER_KDF_WORKSPACE_BYTES: usize = 64 * 1024 * 1024 + 64;
@@ -412,7 +412,7 @@ impl AtriumSettingsStatus {
     }
 }
 
-/// Atrium's settings load/save request to User (S4, #81, ADR-0090). `data`
+/// Atrium's settings load/save request to User (S4, #81, ADR-0091). `data`
 /// is the opaque, already-encoded `logos_atrium` settings record; on `Load`
 /// it is ignored. One bounded message, no chunking: the record is a handful
 /// of bytes, far under `USER_STORAGE_CHUNK_BYTES`.
