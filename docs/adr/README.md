@@ -90,3 +90,4 @@
 | [0087](0087-retained-text-grid-node.md) | Accepted | Retained bounded TextGrid scene node with dirty-row cell delivery, and a 24 -> 48 `MAX_GUI_NODES` budget |
 | [0088](0088-inter-proportional-ui-font.md) | Accepted | Offline Inter proportional UI font (14/20 px) with a shared text-measurement API; Terminal and TextGrid keep JetBrains Mono |
 | [0089](0089-atrium-appearance-preferences.md) | Accepted | Atrium-owned accent, FPS-overlay and reduced-motion preferences; reduced motion reaches LockScreen and Terminal as new message kinds on existing channels |
+| [0090](0090-per-session-flow-state.md) | Accepted | Per-session Terminal line-editor and Flow interpreter state, tagged on IPC, with one shared arbitration queue for Flow's single-flight clients |

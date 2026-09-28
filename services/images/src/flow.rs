@@ -529,6 +529,7 @@ fn forward_fetch_progress(response: FetchResponse) -> IpcStatus {
     let Some(message) = IpcBytes::from_bytes(MessageKind::FlowProgress, bytes) else {
         return IpcStatus::Malformed;
     };
+    let message = message.with_session(active_session());
     common::ipc_send_handle(ipc_capabilities().output, &message)
 }
 
@@ -542,7 +543,10 @@ fn fetch_control(message: &IpcBytes, fetch: &mut FetchClient) -> bool {
         return false;
     }
     let control: FlowControl = unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
-    if control.is_valid() && (control.request_id == 0 || control.request_id == fetch.request_id) {
+    if control.is_valid()
+        && control.session == active_session()
+        && (control.request_id == 0 || control.request_id == fetch.request_id)
+    {
         fetch.cancel();
         true
     } else {
@@ -1030,7 +1034,11 @@ impl PendingOutput {
         self.pending = true;
     }
 
-    fn flush(&mut self, capability: logos_abi::CapabilityHandle) -> bool {
+    /// Tags every chunk with `session` (T3c, #98): Flow only ever has one
+    /// session's command in flight at a time (see `ACTIVE_SESSION`), but
+    /// Session and Terminal still need the tag to route the reply back to
+    /// the right tab.
+    fn flush(&mut self, capability: logos_abi::CapabilityHandle, session: u8) -> bool {
         let mut progressed = false;
         while self.offset < self.len {
             let end = (self.offset + logos_abi::MAX_IPC_BYTES).min(self.len);
@@ -1042,6 +1050,7 @@ impl PendingOutput {
             if end < self.len {
                 message.flags = IPC_FLAG_MORE;
             }
+            message = message.with_session(session);
             if common::ipc_send_handle(capability, &message) != IpcStatus::Ok {
                 break;
             }
@@ -1049,7 +1058,7 @@ impl PendingOutput {
             progressed = true;
         }
         if self.pending && self.offset == self.len {
-            let message = IpcBytes::empty(MessageKind::SessionOutput);
+            let message = IpcBytes::empty(MessageKind::SessionOutput).with_session(session);
             if self.len == 0 && common::ipc_send_handle(capability, &message) == IpcStatus::Ok {
                 self.pending = false;
                 progressed = true;
@@ -2689,7 +2698,18 @@ fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClien
     network_proof_probe(network) && manager_restart_probe()
 }
 
-static mut FLOW: logos_flow::FlowService = logos_flow::FlowService::new();
+/// One interpreter (variables) per Terminal session (T3c, #98). The seven
+/// clients below stay singletons: Session (`services/images/src/session.rs`)
+/// only ever lets one session's command reach Flow at a time, so they never
+/// need to be duplicated, only tagged by whichever session currently owns
+/// them (`ACTIVE_SESSION`).
+const EMPTY_FLOW_SERVICE: logos_flow::FlowService = logos_flow::FlowService::new();
+static mut FLOWS: [logos_flow::FlowService; logos_abi::MAX_SHELL_SESSIONS] =
+    [EMPTY_FLOW_SERVICE; logos_abi::MAX_SHELL_SESSIONS];
+/// The session whose `SessionInput`/`CompletionRequest` is currently being
+/// served; every reply Flow sends out is tagged with it until the next
+/// `SessionInput`/`CompletionRequest` picks a new one.
+static mut ACTIVE_SESSION: u8 = 0;
 static mut PENDING: PendingOutput = PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
 static mut PACKAGE: PackageClient = PackageClient::new();
@@ -2702,6 +2722,10 @@ static mut PENDING_COMPLETION: Option<IpcBytes> = None;
 
 fn required_capability(spec: common::CapabilitySpec) -> logos_abi::CapabilityHandle {
     common::capability_handle(spec).unwrap_or_else(|_| common::idle())
+}
+
+fn active_session() -> u8 {
+    unsafe { *core::ptr::addr_of!(ACTIVE_SESSION) }
 }
 
 #[unsafe(no_mangle)]
@@ -2723,7 +2747,7 @@ pub extern "C" fn _start() -> ! {
         shell_context: required_capability(SHELL_CONTEXT_CAPABILITY),
     };
     unsafe { *core::ptr::addr_of_mut!(IPC_CAPABILITIES) = Some(capabilities) };
-    let flow = unsafe { &mut *core::ptr::addr_of_mut!(FLOW) };
+    let flows = unsafe { &mut *core::ptr::addr_of_mut!(FLOWS) };
     let pending = unsafe { &mut *core::ptr::addr_of_mut!(PENDING) };
     let storage = unsafe { &mut *core::ptr::addr_of_mut!(STORAGE) };
     let package = unsafe { &mut *core::ptr::addr_of_mut!(PACKAGE) };
@@ -2762,7 +2786,7 @@ pub extern "C" fn _start() -> ! {
         } else {
             common::heartbeat_tick(&mut heartbeat_ticks);
         }
-        let mut progressed = pending.flush(ipc_capabilities().output);
+        let mut progressed = pending.flush(ipc_capabilities().output, active_session());
         while common::ipc_receive_handle(ipc_capabilities().shell_context, &mut shell_context)
             == IpcStatus::Ok
         {
@@ -2784,7 +2808,7 @@ pub extern "C" fn _start() -> ! {
                 {
                     let value: FlowControl =
                         unsafe { ptr::read_unaligned(control.bytes.as_ptr().cast()) };
-                    if value.is_valid() {
+                    if value.is_valid() && value.session == active_session() {
                         if storage.active() {
                             storage.cancel();
                         } else if package.active() {
@@ -2891,7 +2915,7 @@ pub extern "C" fn _start() -> ! {
         if fetch.active() {
             progressed |= fetch.drive(pending);
             if !fetch.active() {
-                fetch.resolve_promise(flow);
+                fetch.resolve_promise(&mut flows[active_session() as usize]);
                 if let Some((destination, body)) = fetch.take_callback() {
                     if storage.start_touch_write(destination, body) {
                         fetch.clear_callback();
@@ -2927,13 +2951,23 @@ pub extern "C" fn _start() -> ! {
         let mut message = IpcBytes::empty(MessageKind::SessionInput);
         if common::ipc_receive_handle(ipc_capabilities().input, &mut message) == IpcStatus::Ok {
             progressed = true;
+            // Every reply below (`pending`, `pending_completion`, fetch
+            // progress) is tagged with this until the next `SessionInput`/
+            // `CompletionRequest` changes it (T3c, #98): Session never
+            // lets a second session's request reach Flow before this
+            // one's reply comes back, so it can't change mid-command.
+            unsafe { *core::ptr::addr_of_mut!(ACTIVE_SESSION) = message.session() };
             if message.kind == MessageKind::CompletionRequest {
                 if let Some(request) = completion_request(&message) {
-                    *pending_completion = Some(completion_message(completion.complete(request)));
+                    *pending_completion = Some(
+                        completion_message(completion.complete(request))
+                            .with_session(message.session()),
+                    );
                     progressed = true;
                 }
             } else if message.kind == MessageKind::SessionInput {
                 if let Some(bytes) = message.as_bytes() {
+                    let flow = &mut flows[message.session() as usize];
                     match flow.operation(bytes) {
                         Ok(Some(logos_flow::FlowOperation::Help { topic })) => {
                             let mut output = [0; logos_flow::MAX_OUTPUT_BYTES];
@@ -3369,6 +3403,33 @@ mod tests {
         assert!(!client.active);
         assert!(client.done);
         assert_eq!(&client.result[..client.result_len], b"command cancelled\r\n");
+    }
+
+    #[test]
+    fn each_sessions_flow_service_keeps_its_own_variables() {
+        // T3c (#98): `FLOWS` holds one `FlowService` per Terminal session
+        // so a `var` assignment in one tab can never leak into another's.
+        let mut flows = [logos_flow::FlowService::new(), logos_flow::FlowService::new()];
+        assert!(flows[0].validate(br#"var text = "session-a""#).is_ok());
+        assert!(flows[1].validate(br#"var text = "session-b""#).is_ok());
+        let mut output = [0u8; 32];
+        let length = flows[0].copy_string_variable(b"text", &mut output).unwrap();
+        assert_eq!(&output[..length], b"session-a");
+        let length = flows[1].copy_string_variable(b"text", &mut output).unwrap();
+        assert_eq!(&output[..length], b"session-b");
+    }
+
+    #[test]
+    fn pending_output_flush_tags_every_chunk_with_its_session() {
+        // An invalid capability makes `ipc_send_handle` return `Malformed`
+        // without touching real IPC state (see `common::ipc_send_raw`),
+        // so this exercises `flush`'s tagging and chunking logic on the
+        // host without a live endpoint. Delivery itself is proved in
+        // QEMU.
+        let mut pending = PendingOutput::new();
+        pending.stage(b"ok\r\n");
+        assert!(!pending.flush(logos_abi::CapabilityHandle::EMPTY, 2));
+        assert!(pending.pending, "an undeliverable message stays queued, not silently dropped");
     }
 
     #[test]

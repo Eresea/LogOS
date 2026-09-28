@@ -77,7 +77,7 @@ pub use user_api::{
 };
 pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
-pub const ABI_VERSION: u16 = 9;
+pub const ABI_VERSION: u16 = 10;
 /// The product version/build string shown by the Terminal `version` command
 /// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
 /// release; it is not tied to `ABI_VERSION`.
@@ -256,6 +256,16 @@ pub const MAX_COMPLETION_CANDIDATES: usize = 8;
 pub const MAX_COMPLETION_ITEM_BYTES: usize = 24;
 pub const IPC_FLAG_MORE: u8 = 1 << 0;
 pub const RENDER_FLAG_MORE: u8 = IPC_FLAG_MORE;
+/// Bits 1-2 of `IpcBytes.flags`/`FlowControl` tag the Terminal session
+/// (T3c, #98) a `SessionInput`/`SessionOutput`/`FlowControl` message
+/// belongs to, so Session and Flow can keep per-session state while a
+/// single shared channel still carries every session's traffic.
+pub const IPC_SESSION_SHIFT: u8 = 1;
+pub const IPC_SESSION_MASK: u8 = 0b0000_0110;
+/// Matches Terminal's `MAX_TERMINAL_SESSIONS` (#76); kept here too since
+/// Session and Flow tag/decode session ids without depending on the
+/// Terminal crate.
+pub const MAX_SHELL_SESSIONS: usize = 4;
 pub const SERVICE_IPC_BASE: usize = 0x0000_0100_0200_0000;
 pub const SERVICE_BOOTSTRAP_BASE: usize = 0x0000_0100_2000_0000;
 pub const PROGRAM_BOOTSTRAP_BASE: usize = 0x0000_0100_2100_0000;
@@ -1386,11 +1396,16 @@ pub enum MessageKind {
     /// Appearance preferences for a surface's app; `modifiers` carries the
     /// `APPEARANCE_*` flags (ADR-0089).
     Appearance = 31,
+    /// Terminal tab closed (T3c, #98): carries no payload beyond the
+    /// session tag in `flags`, and tells Session (and, if that session
+    /// owned it, Flow) to cancel its in-flight or queued command and drop
+    /// its per-session state.
+    SessionClose = 32,
 }
 
 impl MessageKind {
     pub const fn raw_is_valid(raw: u8) -> bool {
-        raw >= Self::Key as u8 && raw <= Self::Appearance as u8
+        raw >= Self::Key as u8 && raw <= Self::SessionClose as u8
     }
 }
 
@@ -1753,6 +1768,19 @@ impl IpcBytes {
         bytes
             .get(core::mem::offset_of!(Self, kind))
             .is_some_and(|raw| MessageKind::raw_is_valid(*raw))
+    }
+
+    /// The Terminal session this message belongs to (T3c, #98), packed
+    /// into the spare bits of `flags` alongside `IPC_FLAG_MORE`.
+    pub const fn session(&self) -> u8 {
+        (self.flags & IPC_SESSION_MASK) >> IPC_SESSION_SHIFT
+    }
+
+    /// Returns `self` tagged with `session` (0..`MAX_SHELL_SESSIONS`).
+    pub const fn with_session(mut self, session: u8) -> Self {
+        self.flags =
+            (self.flags & !IPC_SESSION_MASK) | ((session << IPC_SESSION_SHIFT) & IPC_SESSION_MASK);
+        self
     }
 }
 
@@ -2397,21 +2425,25 @@ impl FetchBodyChunk {
 pub struct FlowControl {
     pub request_id: u32,
     pub operation: FetchControlOperation,
-    pub reserved: [u8; 3],
+    /// Terminal session (T3c, #98) this cancel targets; Flow only acts on
+    /// it when it matches the session whose command is currently active,
+    /// since only one session's command is ever in flight at a time.
+    pub session: u8,
+    pub reserved: [u8; 2],
 }
 
 impl FlowControl {
-    pub const fn cancel(request_id: u32) -> Self {
-        Self { request_id, operation: FetchControlOperation::Cancel, reserved: [0; 3] }
+    pub const fn cancel(request_id: u32, session: u8) -> Self {
+        Self { request_id, operation: FetchControlOperation::Cancel, session, reserved: [0; 2] }
     }
 
     pub const fn is_valid(self) -> bool {
         // Zero is the bounded "cancel the active Flow" wildcard.
         // resolves it only against its one active Fetch operation.
         matches!(self.operation, FetchControlOperation::Cancel)
+            && self.session < MAX_SHELL_SESSIONS as u8
             && self.reserved[0] == 0
             && self.reserved[1] == 0
-            && self.reserved[2] == 0
     }
 
     pub fn wire_enums_valid(bytes: &[u8]) -> bool {
@@ -3233,9 +3265,26 @@ mod tests {
 
     #[test]
     fn command_cancel_can_target_the_active_operation_without_its_id() {
-        assert!(FlowControl::cancel(0).is_valid());
+        assert!(FlowControl::cancel(0, 0).is_valid());
         assert!(!FetchControl::cancel(0).is_valid());
-        assert!(FlowControl::cancel(7).is_valid());
+        assert!(FlowControl::cancel(7, 3).is_valid());
+    }
+
+    #[test]
+    fn command_cancel_rejects_a_session_outside_the_shell_session_cap() {
+        assert!(!FlowControl::cancel(0, MAX_SHELL_SESSIONS as u8).is_valid());
+    }
+
+    #[test]
+    fn ipc_bytes_session_tag_round_trips_without_disturbing_the_more_flag() {
+        let mut message = IpcBytes::empty(MessageKind::SessionInput);
+        message.flags |= IPC_FLAG_MORE;
+        message = message.with_session(3);
+        assert_eq!(message.session(), 3);
+        assert_ne!(message.flags & IPC_FLAG_MORE, 0);
+        message = message.with_session(1);
+        assert_eq!(message.session(), 1);
+        assert_ne!(message.flags & IPC_FLAG_MORE, 0);
     }
 
     #[test]
