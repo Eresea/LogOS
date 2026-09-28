@@ -58,13 +58,13 @@ bench = false
 [[bin]]
 name = "logos-session"
 path = "src/session.rs"
-test = false
+test = true
 bench = false
 
 [[bin]]
 name = "logos-flow"
 path = "src/flow.rs"
-test = false
+test = true
 bench = false
 
 [[bin]]

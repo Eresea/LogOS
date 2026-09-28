@@ -876,7 +876,7 @@ mod tests {
             if let Some(length) = session.input_for_command(bytes, &mut command, &mut edit_output) {
                 committed = Some(length);
             }
-            terminal.session_output_bytes(edit_output.as_bytes());
+            terminal.session_output_bytes(0, edit_output.as_bytes());
         }
 
         let length = committed.expect("enter commits the command");
@@ -887,7 +887,7 @@ mod tests {
         );
         let mut output = ShellOutput::new();
         session.command_output(b"LogOS vNext 0.1.0\r\n", &mut output);
-        terminal.session_output_bytes(output.as_bytes());
+        terminal.session_output_bytes(0, output.as_bytes());
         assert!(terminal.next_grid_row().is_some());
     }
 
@@ -898,7 +898,7 @@ mod tests {
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();
         session.prompt(&mut output);
-        terminal.session_output_bytes(output.as_bytes());
+        terminal.session_output_bytes(0, output.as_bytes());
 
         let mut screen = [Cell {
             codepoint: b' ' as u32,
@@ -912,7 +912,7 @@ mod tests {
 
         output = ShellOutput::new();
         session.input_for_command(b"net.", &mut command, &mut output);
-        terminal.session_output_bytes(output.as_bytes());
+        terminal.session_output_bytes(0, output.as_bytes());
         let request = session.take_completion_request().unwrap();
         let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
         response.line_revision = request.line_revision;
@@ -923,14 +923,14 @@ mod tests {
 
         output = ShellOutput::new();
         session.apply_completion_response(response, &mut output);
-        terminal.session_output_bytes(output.as_bytes());
+        terminal.session_output_bytes(0, output.as_bytes());
         drain_screen(&mut terminal, &mut screen);
         assert_eq!(screen[12].codepoint, b's' as u32);
         assert_eq!(screen[DEFAULT_COLUMNS + 12].codepoint, b'p' as u32);
 
         output = ShellOutput::new();
         session.input_for_command(b"x", &mut command, &mut output);
-        terminal.session_output_bytes(output.as_bytes());
+        terminal.session_output_bytes(0, output.as_bytes());
         drain_screen(&mut terminal, &mut screen);
         assert_eq!(screen[12].codepoint, b'x' as u32);
         let stale = screen[DEFAULT_COLUMNS..2 * DEFAULT_COLUMNS]
