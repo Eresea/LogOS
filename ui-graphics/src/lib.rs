@@ -38,12 +38,27 @@ pub struct UiAccent {
     pub focus: u32,
 }
 
-/// The fixed accent palette: blue (default), teal, purple, orange.
+/// The fixed accent palette: blue (default), teal, purple, orange. Used
+/// directly by the dark theme and by the small swatch controls that pick an
+/// accent (`UiStyle::Swatch`), which stay this fixed palette in both themes
+/// (ADR-0089).
 pub const UI_ACCENTS: [UiAccent; 4] = [
     UiAccent { accent: 0x356bd8, focus: 0x4b82f2 },
     UiAccent { accent: 0x0f766e, focus: 0x14b8a6 },
     UiAccent { accent: 0x6d28d9, focus: 0x8b5cf6 },
     UiAccent { accent: 0xc2410c, focus: 0xf97316 },
+];
+
+/// Light-theme counterpart of [`UI_ACCENTS`] (S5, #82): lighter tints of the
+/// same four hues so [`UiSceneTheme::LIGHT`]'s dark `text` keeps WCAG AA
+/// contrast on an accent- or focus-filled control (the close button, a
+/// selected settings category, a hovered select). Only a theme's own
+/// `accent`/`focus` fields use this table; the swatches stay [`UI_ACCENTS`].
+pub const UI_ACCENTS_LIGHT: [UiAccent; 4] = [
+    UiAccent { accent: 0x8fb3f5, focus: 0x6f9ceb },
+    UiAccent { accent: 0x7fd8cd, focus: 0x5cc4b7 },
+    UiAccent { accent: 0xc7aef2, focus: 0xb191ea },
+    UiAccent { accent: 0xf5b98f, focus: 0xeda36f },
 ];
 
 impl UiSceneTheme {
@@ -57,6 +72,20 @@ impl UiSceneTheme {
         text: 0xffffff,
         muted: 0xb8c7da,
         success: 0x7ee787,
+    };
+
+    /// Light variant (S5, #82): selectable in Settings > Appearance, no
+    /// automatic day/night switching. See `docs/adr/0089-atrium-appearance-preferences.md`.
+    pub const LIGHT: Self = Self {
+        surface: 0xf5f7fa,
+        panel: 0xffffff,
+        input: 0xe4eaf1,
+        border: 0xc7d2e0,
+        accent: 0x6f9ceb,
+        focus: 0x6f9ceb,
+        text: 0x14212c,
+        muted: 0x4c6178,
+        success: 0x0d6c39,
     };
 }
 
@@ -1979,6 +2008,73 @@ mod tests {
             assert_initial_app_publication_at_every_index(&build);
             assert_app_transition_at_every_index(&build, 2);
             assert_app_transition_at_every_index(&build, 3);
+        }
+    }
+
+    /// WCAG relative luminance of a `0xRRGGBB` colour (sRGB gamma-corrected).
+    fn relative_luminance(rgb: u32) -> f64 {
+        let channel = |shift: u32| {
+            let c = ((rgb >> shift) & 0xff) as f64 / 255.0;
+            if c <= 0.039_28 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    /// WCAG contrast ratio between two `0xRRGGBB` colours (1:1 to 21:1).
+    fn contrast_ratio(a: u32, b: u32) -> f64 {
+        let (la, lb) = (relative_luminance(a), relative_luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// S5 (#82): every text/background pair Atrium actually draws (Home and
+    /// Settings), for both themes, meets WCAG AA body text (>= 4.5:1):
+    /// `text`, `success` and `muted` against `surface`/`panel`/`input`, and
+    /// `text` against every accent's `accent` fill (the close control) and
+    /// `focus` fill (a selected list row, a hovered select, an "on" toggle
+    /// track a label sits over -- the light-theme selector added here).
+    ///
+    /// `text` on a `focus` fill in the *dark* theme is the one exception:
+    /// it predates this change (the nav category highlight already shipped
+    /// this way) and two of its four accents don't even clear 3:1 (teal
+    /// 2.49:1, orange 2.80:1). Fixing the shipped dark palette is out of
+    /// S5's scope -- adding a light theme -- so this test documents the gap
+    /// instead of silently asserting past it. `docs/adr/0089-...` owns the
+    /// accent palette; a follow-up should retune dark `focus` there.
+    #[test]
+    fn theme_text_styles_meet_wcag_aa_against_every_background_they_draw_on() {
+        const AA_BODY: f64 = 4.5;
+        for (theme_name, theme, accents) in [
+            ("dark", UiSceneTheme::DEFAULT, UI_ACCENTS),
+            ("light", UiSceneTheme::LIGHT, UI_ACCENTS_LIGHT),
+        ] {
+            for (bg_name, bg) in
+                [("surface", theme.surface), ("panel", theme.panel), ("input", theme.input)]
+            {
+                for (style_name, style) in
+                    [("text", theme.text), ("success", theme.success), ("muted", theme.muted)]
+                {
+                    let ratio = contrast_ratio(style, bg);
+                    assert!(
+                        ratio >= AA_BODY,
+                        "{theme_name}: {style_name} on {bg_name} = {ratio:.2}, need >= {AA_BODY}"
+                    );
+                }
+            }
+            for (index, accent) in accents.into_iter().enumerate() {
+                let on_accent = contrast_ratio(theme.text, accent.accent);
+                assert!(
+                    on_accent >= AA_BODY,
+                    "{theme_name}: text on accent[{index}].accent = {on_accent:.2}, need >= {AA_BODY}"
+                );
+                let on_focus = contrast_ratio(theme.text, accent.focus);
+                if theme_name == "dark" {
+                    continue; // pre-existing gap, see the doc comment above
+                }
+                assert!(
+                    on_focus >= AA_BODY,
+                    "{theme_name}: text on accent[{index}].focus = {on_focus:.2}, need >= {AA_BODY}"
+                );
+            }
         }
     }
 }

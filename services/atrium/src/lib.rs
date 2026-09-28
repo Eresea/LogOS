@@ -216,6 +216,14 @@ pub const fn settings_toggle_row_bounds(index: usize) -> GuiRect {
     )
 }
 
+/// S5 (#82): the Light theme row, one past `SETTINGS_TOGGLE_LABELS`. It
+/// reuses the select trigger's idle node slots (`settings_scene::SELECT`,
+/// `SELECT_VALUE`) instead of growing `MAX_GUI_NODES` for a third toggle's
+/// own label/track/knob -- the shared Settings tree has no node to spare.
+pub const fn settings_light_theme_row_bounds() -> GuiRect {
+    settings_toggle_row_bounds(SETTINGS_TOGGLE_LABELS.len())
+}
+
 /// One Settings category. Adding a page means adding a variant here, its
 /// entry in [`SettingsPage::ALL`], and its page content in `settings_scene`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -283,6 +291,10 @@ impl Accent {
 /// App surfaces keep a red accent for their close control; only the focus
 /// colour follows the chosen accent there.
 const APP_CLOSE_ACCENT: u32 = 0x9f3b3b;
+/// Light-theme counterpart of [`APP_CLOSE_ACCENT`] (S5, #82): a lighter red
+/// so the light theme's dark `text`/icon keeps WCAG AA contrast on it.
+/// `services/images/src/system.rs` mirrors this pair for its own theme.
+const APP_CLOSE_ACCENT_LIGHT: u32 = 0xe38a85;
 
 /// Bounds of the `index`th visible category row.
 pub const fn settings_category_bounds(index: usize) -> GuiRect {
@@ -472,6 +484,7 @@ pub struct Atrium {
     accent: Accent,
     fps_overlay: bool,
     reduced_motion: bool,
+    light_theme: bool,
     keyboard_layout: KeyboardLayout,
     keyboard_select: logos_ui::UiSelect,
     mouse_acceleration: MouseAcceleration,
@@ -509,6 +522,7 @@ impl Atrium {
             // Display starts with its FPS overlay on.
             fps_overlay: true,
             reduced_motion: false,
+            light_theme: false,
             keyboard_layout: KeyboardLayout::Azerty,
             keyboard_select: logos_ui::UiSelect::with_selection(2, Some(0)),
             mouse_acceleration: MouseAcceleration::Medium,
@@ -667,18 +681,47 @@ impl Atrium {
         self.reduced_motion
     }
 
-    /// `APPEARANCE_*` flags for LockScreen and app services (ADR-0089).
+    /// S5 (#82): selectable on the Appearance page, applied live to every
+    /// Atrium scene and mirrored to LockScreen, System and Terminal like
+    /// reduced motion (ADR-0089). No automatic day/night switching.
+    pub const fn light_theme(&self) -> bool {
+        self.light_theme
+    }
+
+    /// `APPEARANCE_*` flags for LockScreen and app services (ADR-0089, S5).
     pub const fn appearance_flags(&self) -> u16 {
-        if self.reduced_motion { logos_abi::APPEARANCE_REDUCED_MOTION } else { 0 }
+        (if self.reduced_motion { logos_abi::APPEARANCE_REDUCED_MOTION } else { 0 })
+            | (if self.light_theme { logos_abi::APPEARANCE_LIGHT_THEME } else { 0 })
+    }
+
+    /// The scene theme's base colours (surface/panel/input/border/text/
+    /// muted/success) before the chosen accent is applied.
+    const fn theme_base(&self) -> logos_ui_graphics::UiSceneTheme {
+        if self.light_theme {
+            logos_ui_graphics::UiSceneTheme::LIGHT
+        } else {
+            logos_ui_graphics::UiSceneTheme::DEFAULT
+        }
+    }
+
+    /// The chosen accent, in the light-safe tint (S5) when the light theme
+    /// is on; the accent swatches themselves stay `UI_ACCENTS` in both
+    /// themes (ADR-0089).
+    const fn theme_accent(&self) -> logos_ui_graphics::UiAccent {
+        if self.light_theme {
+            logos_ui_graphics::UI_ACCENTS_LIGHT[self.accent.index()]
+        } else {
+            self.accent.colors()
+        }
     }
 
     /// Theme for Home and its menus.
     pub const fn home_theme(&self) -> logos_ui_graphics::UiSceneTheme {
-        let accent = self.accent.colors();
+        let accent = self.theme_accent();
         logos_ui_graphics::UiSceneTheme {
             accent: accent.accent,
             focus: accent.focus,
-            ..logos_ui_graphics::UiSceneTheme::DEFAULT
+            ..self.theme_base()
         }
     }
 
@@ -686,9 +729,9 @@ impl Atrium {
     /// Terminal chrome).
     pub const fn app_theme(&self) -> logos_ui_graphics::UiSceneTheme {
         logos_ui_graphics::UiSceneTheme {
-            accent: APP_CLOSE_ACCENT,
-            focus: self.accent.colors().focus,
-            ..logos_ui_graphics::UiSceneTheme::DEFAULT
+            accent: if self.light_theme { APP_CLOSE_ACCENT_LIGHT } else { APP_CLOSE_ACCENT },
+            focus: self.theme_accent().focus,
+            ..self.theme_base()
         }
     }
 
@@ -781,6 +824,10 @@ impl Atrium {
             (0..Accent::ALL.len()).find(|index| settings_swatch_bounds(*index).contains(x, y))
         {
             self.accent = Accent::ALL[index];
+            return true;
+        }
+        if settings_light_theme_row_bounds().contains(x, y) {
+            self.light_theme = !self.light_theme;
             return true;
         }
         match (0..SETTINGS_TOGGLE_LABELS.len())

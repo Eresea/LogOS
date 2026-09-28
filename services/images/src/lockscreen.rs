@@ -85,6 +85,10 @@ static mut UI_SCENE_PUBLISHER: logos_ui_graphics::UiScenePublisher =
 static mut SPLASH_TREE: UiComponentTree = UiComponentTree::new();
 static mut SPLASH_SCENE_PUBLISHER: logos_ui_graphics::UiScenePublisher =
     logos_ui_graphics::UiScenePublisher::new();
+/// S5 (#82): the login/register form's theme, set from Atrium's appearance
+/// flags like reduced motion (ADR-0089). The boot splash keeps its own
+/// fixed theme -- it plays once, before any preference has reached here.
+static mut LOGIN_LIGHT_THEME: bool = false;
 
 const SPLASH_OPACITY: u16 = 56_000;
 const SPLASH_ANIMATION_INDEX: usize = 0;
@@ -149,16 +153,15 @@ fn publish_ui_scene(
     sequence: u32,
     tree: &UiComponentTree,
 ) -> IpcStatus {
+    let theme = if unsafe { *core::ptr::addr_of!(LOGIN_LIGHT_THEME) } {
+        logos_ui_graphics::UiSceneTheme::LIGHT
+    } else {
+        logos_ui_graphics::UiSceneTheme::DEFAULT
+    };
     let mut sink = DisplaySceneSink(display);
     match unsafe {
-        (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER)).publish(
-            surface,
-            sequence,
-            tree,
-            logos_ui_graphics::UiSceneTheme::DEFAULT,
-            None,
-            &mut sink,
-        )
+        (*core::ptr::addr_of_mut!(UI_SCENE_PUBLISHER))
+            .publish(surface, sequence, tree, theme, None, &mut sink)
     } {
         Ok((status, _)) => status,
         Err(_) => IpcStatus::Malformed,
@@ -662,6 +665,20 @@ pub extern "C" fn _start() -> ! {
                 let reduced = flags & logos_abi::APPEARANCE_REDUCED_MOTION != 0;
                 splash_animator.set_reduced_motion(reduced);
                 unsafe { (*core::ptr::addr_of_mut!(UI_TREE)).set_reduced_motion(reduced) };
+                // S5 (#82): the login/register form's theme. Unlike reduced
+                // motion this touches no animation deadline, so force the
+                // next redraw explicitly; `publish_ui_scene` emits it in the
+                // new theme's colours (same mechanism as an Atrium accent
+                // change: the scene diff is computed against those, not
+                // against node state).
+                let light = flags & logos_abi::APPEARANCE_LIGHT_THEME != 0;
+                if unsafe { *core::ptr::addr_of!(LOGIN_LIGHT_THEME) } != light {
+                    unsafe { LOGIN_LIGHT_THEME = light };
+                    if visible && !pending_draw {
+                        pending_draw = true;
+                        pending_draw_sequence = 0;
+                    }
+                }
                 continue;
             }
             if hook.kind != GuiHookKind::Section {
