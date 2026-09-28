@@ -184,7 +184,13 @@ pub extern "C" fn _start() -> ! {
                 if !event.is_valid() || event.surface != terminal_surface {
                     continue;
                 }
-                if handle_tab_bar_click(terminal, terminal_bounds, &event.input) {
+                if let Some(close) = handle_tab_bar_click(terminal, terminal_bounds, &event.input) {
+                    if let Some(message) = close {
+                        // Best-effort: a dropped close on backpressure just
+                        // leaves Session's queued/in-flight command running
+                        // a little longer, same as any other slow reply.
+                        let _ = common::ipc_send_handle(session_input_capability, &message);
+                    }
                     continue;
                 }
                 if let Some(message) = terminal.input(&event.input) {
@@ -206,9 +212,7 @@ pub extern "C" fn _start() -> ! {
         }
         let mut message = IpcBytes::empty(MessageKind::SessionOutput);
         while common::ipc_receive_handle(session_output_capability, &mut message) == IpcStatus::Ok {
-            if let Some(bytes) = message.as_bytes() {
-                terminal.session_output_bytes(bytes);
-            }
+            terminal.session_output(&message);
         }
         // Waits time out every `WAIT_TIMEOUT_TICKS`, which paces the blink.
         terminal.blink(common::current_ticks());
@@ -264,34 +268,34 @@ pub extern "C" fn _start() -> ! {
 /// this surface (Atrium translates them before forwarding), so hit-testing
 /// against a zero-origin rect the size of the surface matches exactly what
 /// Atrium drew at `surface.x/y + ...` for the same bounds.
+/// `None` means the click wasn't on the tab bar at all; `Some(_)` means it
+/// was handled, optionally carrying a `SessionClose` message (T3c, #98)
+/// for a closed tab's session to be forwarded to Session.
 fn handle_tab_bar_click(
     terminal: &mut logos_terminal::TerminalService,
     bounds: GuiRect,
     input: &InputMessage,
-) -> bool {
-    let Some(pointer) = input.pointer_event() else { return false };
+) -> Option<Option<IpcBytes>> {
+    let pointer = input.pointer_event()?;
     if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
-        return false;
+        return None;
     }
     let local_bounds = GuiRect::new(0, 0, bounds.width, bounds.height);
-    match terminal_tab_bar_hit(local_bounds, i32::from(pointer.x), i32::from(pointer.y)) {
-        Some(TerminalTabHit::Tab(slot)) => {
+    match terminal_tab_bar_hit(local_bounds, i32::from(pointer.x), i32::from(pointer.y))? {
+        TerminalTabHit::Tab(slot) => {
             if let Some(handle) = terminal.tab_at(slot) {
                 terminal.switch_tab(handle);
             }
-            true
+            Some(None)
         }
-        Some(TerminalTabHit::Close(slot)) => {
-            if let Some(handle) = terminal.tab_at(slot) {
-                terminal.close_tab(handle);
-            }
-            true
+        TerminalTabHit::Close(slot) => {
+            let close = terminal.tab_at(slot).and_then(|handle| terminal.close_tab(handle));
+            Some(close)
         }
-        Some(TerminalTabHit::AddTab) => {
+        TerminalTabHit::AddTab => {
             terminal.open_tab();
-            true
+            Some(None)
         }
-        None => false,
     }
 }
 

@@ -190,28 +190,9 @@ impl Session {
     }
 }
 
-/// Session's own prompt, appended to the end of a command's output once it
-/// finishes (see `services/session/src/lib.rs`'s `PROMPT`). Recognizing it
-/// here is how Terminal knows a tab's in-flight command is done and output
-/// should stop being pinned to that tab (#76 follow-up: route output to the
-/// submitting tab, not just the active one).
-const SHELL_PROMPT: &[u8] = b"\x1b[36mlogos\x1b[0m \x1b[33m>\x1b[0m ";
-
 pub struct TerminalService {
     sessions: [Session; MAX_TERMINAL_SESSIONS],
     active: usize,
-    /// The tab whose command is currently running, set when that tab sends
-    /// Enter and cleared once its reply's trailing prompt is seen (or the
-    /// tab is closed first). `None` means output follows the active tab,
-    /// same as before a command is submitted.
-    running_command: Option<TabHandle>,
-    /// How many leading bytes of `SHELL_PROMPT` have matched so far,
-    /// carried across `session_output_bytes` calls: `ShellOutput` chunks at
-    /// `MAX_IPC_BYTES` (session.rs's `flush`) can and do split the ~27-byte
-    /// prompt across two IPC messages, so a per-call `bytes.windows(...)`
-    /// scan would miss a match straddling the boundary and leave
-    /// `running_command` pinned forever.
-    prompt_matched: usize,
 }
 
 const _: () =
@@ -223,7 +204,7 @@ impl TerminalService {
         let mut sessions = [SESSION; MAX_TERMINAL_SESSIONS];
         sessions[0].open = true;
         sessions[0].generation = 1;
-        Self { sessions, active: 0, running_command: None, prompt_matched: 0 }
+        Self { sessions, active: 0 }
     }
 
     fn active_session(&mut self) -> &mut TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }> {
@@ -292,10 +273,12 @@ impl TerminalService {
     /// Closes `handle`'s tab, freeing its slot for reuse (the slot's
     /// generation is bumped, so a stale handle into it is rejected). Never
     /// closes the last remaining tab. Picks a new active tab if the closed
-    /// one was active.
-    pub fn close_tab(&mut self, handle: TabHandle) -> bool {
+    /// one was active. Returns a tagged `SessionClose` message (T3c, #98)
+    /// for the caller to forward to Session, so it cancels that session's
+    /// in-flight or queued command and frees its per-session state.
+    pub fn close_tab(&mut self, handle: TabHandle) -> Option<IpcBytes> {
         if !self.is_valid(handle) || self.tab_count() <= 1 {
-            return false;
+            return None;
         }
         let slot = handle.slot();
         self.sessions[slot].open = false;
@@ -306,7 +289,7 @@ impl TerminalService {
                 .unwrap_or(0);
             self.sessions[self.active].terminal.force_redraw();
         }
-        true
+        Some(IpcBytes::empty(MessageKind::SessionClose).with_session(slot as u8))
     }
 
     /// Switches the active tab by click. Rejects a stale or closed handle.
@@ -371,58 +354,29 @@ impl TerminalService {
                 return None;
             }
         }
-        let outgoing = self.active_session().input(event);
-        // Enter submits the active tab's line as a command (Session's line
-        // editor starts running it on `\r`); pin output to this tab until
-        // its reply's prompt comes back, so background output from another
-        // tab's still-running command can't leak into whatever the user
-        // switches to next.
-        if matches!(outgoing.as_ref().and_then(IpcBytes::as_bytes), Some(b"\r")) {
-            self.running_command = Some(self.active_tab());
-            self.prompt_matched = 0;
-        }
-        outgoing
+        // Tag with the active tab's slot (T3c, #98) so Session and Flow can
+        // keep this tab's line-editor and variables separate from every
+        // other open tab's, even while another tab's command is still
+        // running on the shared channel.
+        self.active_session().input(event).map(|message| message.with_session(self.active as u8))
     }
 
     pub fn session_output(&mut self, message: &IpcBytes) {
         if let Some(bytes) = message.as_bytes() {
-            self.session_output_bytes(bytes);
+            self.session_output_bytes(message.session(), bytes);
         }
     }
 
-    /// Routes output to whichever tab submitted the command still in
-    /// flight, if any, rather than always the active tab: a background
-    /// command's own output keeps landing in (and scrolling) its own tab
-    /// even while another tab is focused. Output for a tab that was closed
-    /// while its command was still running is dropped (the closed slot's
-    /// bumped generation is what makes `is_valid` catch this). Once the
-    /// owning tab's reply reaches its trailing prompt, routing reverts to
-    /// following the active tab, same as before any command was submitted.
-    pub fn session_output_bytes(&mut self, bytes: &[u8]) {
-        let target = match self.running_command {
-            Some(handle) if !self.is_valid(handle) => {
-                self.running_command = None;
-                self.prompt_matched = 0;
-                return;
-            }
-            Some(handle) => handle.slot(),
-            None => self.active,
+    /// Routes output to the tab named by `session` (T3c, #98): Session
+    /// tags every reply with the session whose command produced it, so
+    /// Terminal no longer has to guess from a shell-prompt heuristic.
+    /// Output for a tab that was since closed (a stale/out-of-range slot)
+    /// is dropped.
+    pub fn session_output_bytes(&mut self, session: u8, bytes: &[u8]) {
+        let Some(target) = self.sessions.get_mut(session as usize).filter(|s| s.open) else {
+            return;
         };
-        if self.running_command.is_some() {
-            for &byte in bytes {
-                if byte == SHELL_PROMPT[self.prompt_matched] {
-                    self.prompt_matched += 1;
-                    if self.prompt_matched == SHELL_PROMPT.len() {
-                        self.running_command = None;
-                        self.prompt_matched = 0;
-                        break;
-                    }
-                } else {
-                    self.prompt_matched = usize::from(byte == SHELL_PROMPT[0]);
-                }
-            }
-        }
-        self.sessions[target].terminal.feed(bytes);
+        target.terminal.feed(bytes);
     }
 
     pub fn reset(&mut self) {
@@ -1194,7 +1148,7 @@ mod tests {
         // row index rather than a flat cell position.
         let mut service = TerminalService::new();
         drain_service(&mut service);
-        service.session_output_bytes(b"hi");
+        service.session_output_bytes(0, b"hi");
         let row = service.next_grid_row().unwrap();
         assert_eq!(row.row, 0);
         assert_eq!(row.cells[0].codepoint, b'h' as u32);
@@ -1619,11 +1573,11 @@ mod tests {
         let mut service = TerminalService::new();
         let second = service.open_tab().unwrap();
         assert_eq!(service.tab_count(), 2);
-        assert!(service.close_tab(second));
+        assert!(service.close_tab(second).is_some());
         assert_eq!(service.tab_count(), 1);
         // A stale handle into the freed slot is rejected.
         assert!(!service.switch_tab(second));
-        assert!(!service.close_tab(second));
+        assert!(service.close_tab(second).is_none());
         // Reopening reuses the freed slot with a fresh generation.
         let third = service.open_tab().unwrap();
         assert_eq!(third.slot(), second.slot());
@@ -1632,156 +1586,80 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_tab_returns_a_session_close_tagged_with_its_slot() {
+        let mut service = TerminalService::new();
+        let second = service.open_tab().unwrap();
+        let message = service.close_tab(second).expect("closing an open tab");
+        assert_eq!(message.kind, MessageKind::SessionClose);
+        assert_eq!(message.session(), second.slot() as u8);
+    }
+
+    #[test]
     fn the_last_remaining_tab_cannot_be_closed() {
         let mut service = TerminalService::new();
         let only = service.active_tab();
-        assert!(!service.close_tab(only));
+        assert!(service.close_tab(only).is_none());
         assert_eq!(service.tab_count(), 1);
     }
 
     #[test]
-    fn input_routes_only_to_the_active_session() {
+    fn input_is_tagged_with_the_active_tabs_slot() {
+        // T3c (#98): Session and Flow tell tabs apart by this tag alone,
+        // so it must always match whichever tab is focused, not just the
+        // first one.
         let mut service = TerminalService::new();
-        let first = service.active_tab();
-        service.session_output_bytes(b"one");
         let second = service.open_tab().unwrap();
         assert_eq!(service.active_tab(), second);
-        service.session_output_bytes(b"two");
-        // Switching back to the first tab redraws its own, untouched grid:
-        // "one" is still there and "two" never reached it.
-        assert!(service.switch_tab(first));
-        drain_service(&mut service);
-        service.session_output_bytes(b"?");
-        let mut saw_one = false;
-        while let Some(row) = service.next_grid_row() {
-            if row.cells[0].codepoint == b'o' as u32 {
-                saw_one = true;
-            }
-            assert_ne!(row.cells[0].codepoint, b't' as u32, "tab two's output leaked into tab one");
-        }
-        assert!(saw_one);
+        let key = InputMessage::text(b"a").unwrap();
+        let message = service.input(&key).unwrap();
+        assert_eq!(message.session(), second.slot() as u8);
     }
 
     #[test]
-    fn output_from_a_submitted_command_follows_its_own_tab_while_another_is_active() {
-        // Submit in tab one (Enter pins output to it), switch to a new tab
-        // two, then deliver "background" output: it must land in tab one,
-        // not tab two, even though tab two is the one now focused.
+    fn output_routes_by_its_tagged_session_not_the_active_tab() {
+        // Session/Flow (T3c, #98) tag every reply with the session that
+        // produced it; Terminal just trusts the tag, regardless of which
+        // tab is currently focused.
         let mut service = TerminalService::new();
         let tab_one = service.active_tab();
-        let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0);
-        assert_eq!(service.input(&enter).unwrap().as_bytes(), Some(&b"\r"[..]));
         let tab_two = service.open_tab().unwrap();
         assert_eq!(service.active_tab(), tab_two);
         drain_service(&mut service);
-        service.session_output_bytes(b"background");
-        // Tab two (still active) never saw it.
+        service.session_output_bytes(tab_one.slot() as u8, b"background");
+        // Tab two (active) never saw it.
         let mut saw_leak = false;
         while let Some(row) = service.next_grid_row() {
             if row.cells[0].codepoint == b'b' as u32 {
                 saw_leak = true;
             }
         }
-        assert!(!saw_leak, "background output leaked into the active tab");
+        assert!(!saw_leak, "output tagged for tab one leaked into the active tab");
         // Tab one (inactive) has it.
         assert!(service.switch_tab(tab_one));
-        drain_service(&mut service);
-        service.session_output_bytes(b"?");
         let mut saw_background = false;
         while let Some(row) = service.next_grid_row() {
             if row.cells[0].codepoint == b'b' as u32 {
                 saw_background = true;
             }
         }
-        assert!(saw_background, "background output never reached the tab that submitted it");
+        assert!(saw_background, "output never reached the tab named by its tag");
     }
 
     #[test]
-    fn output_for_a_running_command_is_dropped_once_its_tab_is_closed() {
-        // Submit in tab two, close it while its command is still "running",
-        // then deliver output: the generation check must reject the stale
-        // handle and the bytes are dropped rather than landing anywhere
-        // (in particular not the now-active tab one).
+    fn output_for_a_closed_tabs_slot_is_dropped() {
         let mut service = TerminalService::new();
-        let tab_one = service.active_tab();
         let tab_two = service.open_tab().unwrap();
-        let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0);
-        assert_eq!(service.input(&enter).unwrap().as_bytes(), Some(&b"\r"[..]));
-        assert!(service.switch_tab(tab_one));
-        assert!(service.close_tab(tab_two));
+        let closed_slot = tab_two.slot() as u8;
+        assert!(service.close_tab(tab_two).is_some());
         drain_service(&mut service);
-        service.session_output_bytes(b"orphaned");
+        service.session_output_bytes(closed_slot, b"orphaned");
         let mut saw_orphaned = false;
         while let Some(row) = service.next_grid_row() {
             if row.cells[0].codepoint == b'o' as u32 {
                 saw_orphaned = true;
             }
         }
-        assert!(!saw_orphaned, "output for a closed tab's command must be dropped, not rerouted");
-        // Routing is back to normal (the active tab) for anything after.
-        service.session_output_bytes(b"z");
-        let mut saw_z = false;
-        while let Some(row) = service.next_grid_row() {
-            if row.cells[0].codepoint == b'z' as u32 {
-                saw_z = true;
-            }
-        }
-        assert!(saw_z, "routing should fall back to the active tab after the drop");
-    }
-
-    #[test]
-    fn prompt_detection_works_when_split_across_output_chunks() {
-        // `ShellOutput` is chunked at `MAX_IPC_BYTES` (session.rs's
-        // `flush`), which can and does split `SHELL_PROMPT` (~27 bytes)
-        // across two `session_output_bytes` calls. A naive per-call
-        // `bytes.windows(...)` scan would never see the whole prompt in
-        // either call and leave `running_command` pinned forever; the
-        // streaming match-progress counter must catch it across the
-        // boundary instead.
-        let mut service = TerminalService::new();
-        let tab_one = service.active_tab();
-        let enter = InputMessage::key(KeyCode::Enter, KeyState::Pressed, 0);
-        assert_eq!(service.input(&enter).unwrap().as_bytes(), Some(&b"\r"[..]));
-        assert!(service.running_command.is_some());
-        let tab_two = service.open_tab().unwrap();
-        assert_eq!(service.active_tab(), tab_two);
-        drain_service(&mut service);
-
-        let split = SHELL_PROMPT.len() / 2;
-        let mut first_chunk = b"result\r\n".to_vec();
-        first_chunk.extend_from_slice(&SHELL_PROMPT[..split]);
-        service.session_output_bytes(&first_chunk);
-        assert!(service.running_command.is_some(), "prompt isn't complete after the first chunk");
-        service.session_output_bytes(&SHELL_PROMPT[split..]);
-        assert!(
-            service.running_command.is_none(),
-            "the split prompt across two chunks must still be recognized"
-        );
-        assert_eq!(service.prompt_matched, 0);
-
-        // Routing reverted to the active tab (tab two): new output lands
-        // there, not tab one.
-        drain_service(&mut service);
-        service.session_output_bytes(b"z");
-        let mut saw_z_in_tab_two = false;
-        while let Some(row) = service.next_grid_row() {
-            if row.cells[0].codepoint == b'z' as u32 {
-                saw_z_in_tab_two = true;
-            }
-        }
-        assert!(saw_z_in_tab_two, "output should follow the active tab once the prompt returned");
-
-        // And tab one's "result" is where it belongs (switching back force-
-        // redraws it, so this drain carries its actual content).
-        assert!(service.switch_tab(tab_one));
-        let mut saw_result_in_tab_one = false;
-        while let Some(row) = service.next_grid_row() {
-            if row.cells[..row.cell_count as usize].iter().any(|cell| cell.codepoint == b'r' as u32)
-            {
-                saw_result_in_tab_one = true;
-            }
-        }
-        assert!(saw_result_in_tab_one);
+        assert!(!saw_orphaned, "output tagged for a closed slot must be dropped");
     }
 
     #[test]

@@ -1221,6 +1221,40 @@ try {
                 throw 'The first tab shows the second tab''s content after switching back.'
             }
 
+            # #98 (T3c): per-session Flow state. Submit a command in tab
+            # one, then — without waiting for its reply — immediately
+            # switch to tab two and type there. Before #98 this raced a
+            # single shared Session/Flow instance: tab two's keystrokes
+            # could echo into tab one's still-in-flight exchange. Tab
+            # two's own echo must land cleanly and distinctly, and
+            # switching back to tab one must still show its own reply
+            # once it arrives, proving the two sessions' line-editor and
+            # Flow variable state never cross.
+            Send-QmpText $qmp 'help'
+            Send-QmpKey $qmp 'ret'
+            Send-QmpKey $qmp 'ctrl-tab'
+            Send-QmpText $qmp 'echo("tabtwoinflight")'
+            Send-QmpKey $qmp 'ret'
+            $terminalTabTwoInFlightFrame = Join-Path $repoRoot "target\qemu-terminal-tab2-inflight-$PID.ppm"
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalTabTwoInFlightFrame $TimeoutSeconds)) {
+                throw 'Second tab did not settle after typing while the first tab had a command in flight.'
+            }
+            $tabTwoInFlightContent =
+                Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalTabTwoInFlightFrame))
+            if (Test-BytesEqual $tabOneContentAfterSwitch $tabTwoInFlightContent) {
+                throw 'Typing in the second tab while the first had a command in flight leaked into the first.'
+            }
+            Send-QmpKey $qmp 'ctrl-tab'
+            $terminalTabOneAfterFlightFrame = Join-Path $repoRoot "target\qemu-terminal-tab1-after-flight-$PID.ppm"
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalTabOneAfterFlightFrame $TimeoutSeconds)) {
+                throw 'First tab did not settle on its own reply after its command was submitted concurrently.'
+            }
+            $tabOneAfterFlightContent =
+                Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalTabOneAfterFlightFrame))
+            if (Test-BytesEqual $tabOneAfterFlightContent $tabTwoInFlightContent) {
+                throw 'The first tab shows the second tab''s content after its own command completed.'
+            }
+
             # S5 (#82): the light theme. Everything above ran in the dark
             # theme (default) and its pixel checks are dark-coded, so the
             # switch happens last, after them, not before. Both Terminal
