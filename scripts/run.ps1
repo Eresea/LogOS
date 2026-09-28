@@ -1333,6 +1333,14 @@ try {
             if (-not (Wait-QmpPixelIsWhite $qmp $settingsAppearanceLightFrame ($settingsOriginX + 36) ($settingsOriginY + 186) $TimeoutSeconds)) {
                 throw 'Settings did not switch to the light theme after the toggle click.'
             }
+            # S4 (#81, ADR-0091): the light-theme toggle above also queues a
+            # settings save to User, which only acks `Ok` after its own
+            # durable Storage round trip (persist_catalog). Wait for that
+            # before quitting below, so the persisted-boot check after the
+            # reboot is testing durability, not a lucky timing window.
+            if (-not (Wait-ProofMarker 'LogOS vNext: Atrium settings saved' $TimeoutSeconds)) {
+                throw 'Atrium did not durably save settings after the light-theme toggle.'
+            }
 
             Send-QmpKey $qmp 'esc'
             $homeLightFrame = Join-Path $repoRoot "target\qemu-home-light-$PID.ppm"
@@ -1408,6 +1416,15 @@ try {
         }
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen surface ready' $TimeoutSeconds)) {
             throw 'Second boot did not recreate LockScreen.'
+        }
+        # S4 (#81, ADR-0091): settings persistence proof. The first boot
+        # above toggled the light theme (durably saved -- see the
+        # 'Atrium settings saved' wait before quitting) before this reboot
+        # on the same disk image. Atrium logs which value it loaded back
+        # from User before its first render, so this is a log-marker check
+        # of the persisted setting, not a pixel match.
+        if (-not (Wait-ProofMarker 'LogOS vNext: Atrium settings loaded light_theme=1' $TimeoutSeconds)) {
+            throw 'Settings did not persist across reboot: light theme was not loaded back as on.'
         }
         $loginMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen login PASS'
         Send-QmpText $qmp 'admin'

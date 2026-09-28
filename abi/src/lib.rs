@@ -67,13 +67,15 @@ pub use storage_api::{
     StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
 pub use user_api::{
-    NamespaceCapability, NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot, RoleId,
-    SessionHandle, USER_ABI_VERSION, USER_ARGON2_OUTPUT_BYTES, USER_ARGON2_SALT_BYTES,
-    USER_KDF_WORKSPACE_BASE, USER_KDF_WORKSPACE_BYTES, USER_KDF_WORKSPACE_PAGES,
-    USER_MAX_PASSWORD_BYTES, USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES,
-    USER_STORAGE_CHUNK_BYTES, USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserAdminCapability,
-    UserId, UserOperation, UserRequest, UserResponse, UserStatus, UserStorageOperation,
-    UserStorageRequest, UserStorageResponse, UserStorageStatus,
+    ATRIUM_SETTINGS_RECORD_BYTES, AtriumSettingsOperation, AtriumSettingsRequest,
+    AtriumSettingsResponse, AtriumSettingsStatus, NamespaceCapability, NamespaceCapabilityHandle,
+    NamespaceRights, NamespaceRoot, RoleId, SessionHandle, USER_ABI_VERSION,
+    USER_ARGON2_OUTPUT_BYTES, USER_ARGON2_SALT_BYTES, USER_KDF_WORKSPACE_BASE,
+    USER_KDF_WORKSPACE_BYTES, USER_KDF_WORKSPACE_PAGES, USER_MAX_PASSWORD_BYTES,
+    USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES, USER_STORAGE_CHUNK_BYTES,
+    USER_STORAGE_FLAG_BEGIN, USER_STORAGE_FLAG_END, UserAdminCapability, UserId, UserOperation,
+    UserRequest, UserResponse, UserStatus, UserStorageOperation, UserStorageRequest,
+    UserStorageResponse, UserStorageStatus,
 };
 pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
@@ -319,7 +321,7 @@ pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
-pub const IPC_ENDPOINT_COUNT: usize = 66;
+pub const IPC_ENDPOINT_COUNT: usize = 68;
 pub const FRAMEBUFFER_CURSOR_WIDTH: usize = 24;
 pub const FRAMEBUFFER_CURSOR_HEIGHT: usize = 24;
 
@@ -1161,6 +1163,11 @@ pub enum IpcEndpointId {
     AtriumToSystemSurfaceInput = 63,
     SystemToAtriumSurfaceDraw = 64,
     AtriumToInputControl = 65,
+    /// S4 (#81, ADR-0091): Atrium's settings load/save request to User,
+    /// which stores the opaque record inside its own canonical snapshot
+    /// (ADR-0064) instead of Atrium reaching Storage directly.
+    AtriumToUser = 66,
+    UserToAtrium = 67,
 }
 
 impl IpcEndpointId {
@@ -1238,6 +1245,8 @@ impl IpcEndpointId {
             63 => Some(Self::AtriumToSystemSurfaceInput),
             64 => Some(Self::SystemToAtriumSurfaceDraw),
             65 => Some(Self::AtriumToInputControl),
+            66 => Some(Self::AtriumToUser),
+            67 => Some(Self::UserToAtrium),
             _ => None,
         }
     }
@@ -1297,6 +1306,8 @@ impl IpcEndpointId {
             Self::AtriumToSystemSurface | Self::AtriumToSystemSurfaceInput => ServiceId::Atrium,
             Self::SystemToAtriumSurfaceDraw => ServiceId::System,
             Self::AtriumToInputControl => ServiceId::Atrium,
+            Self::AtriumToUser => ServiceId::Atrium,
+            Self::UserToAtrium => ServiceId::User,
         }
     }
 
@@ -1354,6 +1365,8 @@ impl IpcEndpointId {
             Self::AtriumToSystemSurface | Self::AtriumToSystemSurfaceInput => ServiceId::System,
             Self::SystemToAtriumSurfaceDraw => ServiceId::Atrium,
             Self::AtriumToInputControl => ServiceId::Input,
+            Self::AtriumToUser => ServiceId::User,
+            Self::UserToAtrium => ServiceId::Atrium,
         }
     }
 }
@@ -1819,6 +1832,9 @@ pub const IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE: u16 = 22;
 pub const IPC_CONTRACT_ATRIUM_SURFACE_INPUT: u16 = 23;
 pub const IPC_CONTRACT_ATRIUM_SURFACE_DRAW: u16 = 24;
 pub const IPC_CONTRACT_INPUT_SETTINGS: u16 = 25;
+/// S4 (#81, ADR-0091): Atrium's settings load/save request/response to User.
+pub const IPC_CONTRACT_ATRIUM_SETTINGS_REQUEST: u16 = 26;
+pub const IPC_CONTRACT_ATRIUM_SETTINGS_RESPONSE: u16 = 27;
 
 /// Stable typed contract identifier for an endpoint's wire payload.
 ///
@@ -1947,6 +1963,12 @@ pub const fn ipc_contract_id(endpoint: usize) -> Option<u16> {
     if endpoint == IpcEndpointId::SystemToAtriumSurfaceDraw as usize {
         return Some(IPC_CONTRACT_ATRIUM_SURFACE_DRAW);
     }
+    if endpoint == IpcEndpointId::AtriumToUser as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SETTINGS_REQUEST);
+    }
+    if endpoint == IpcEndpointId::UserToAtrium as usize {
+        return Some(IPC_CONTRACT_ATRIUM_SETTINGS_RESPONSE);
+    }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(IPC_CONTRACT_INPUT),
         Some(IpcMessageType::Render) => Some(IPC_CONTRACT_RENDER),
@@ -1980,6 +2002,7 @@ pub const fn ipc_message_type(endpoint: usize) -> Option<IpcMessageType> {
         35..=38 | 40 => Some(IpcMessageType::Bytes),
         39 => Some(IpcMessageType::SessionContext),
         65 => Some(IpcMessageType::Bytes),
+        66 | 67 => Some(IpcMessageType::Bytes),
         _ => None,
     }
 }
@@ -2089,6 +2112,12 @@ pub const fn ipc_message_size(endpoint: usize) -> Option<usize> {
         || endpoint == IpcEndpointId::AtriumToDisplaySurfaceRender as usize
     {
         return Some(core::mem::size_of::<GuiTextGridRow>());
+    }
+    if endpoint == IpcEndpointId::AtriumToUser as usize {
+        return Some(core::mem::size_of::<AtriumSettingsRequest>());
+    }
+    if endpoint == IpcEndpointId::UserToAtrium as usize {
+        return Some(core::mem::size_of::<AtriumSettingsResponse>());
     }
     match ipc_message_type(endpoint) {
         Some(IpcMessageType::Input) => Some(core::mem::size_of::<InputMessage>()),
@@ -3005,7 +3034,7 @@ mod tests {
 
     #[test]
     fn lockscreen_auth_and_display_endpoints_are_typed_and_directional() {
-        assert_eq!(IPC_ENDPOINT_COUNT, 66);
+        assert_eq!(IPC_ENDPOINT_COUNT, 68);
         assert_eq!(IpcEndpointId::LockScreenToShellAuth.producer(), ServiceId::LockScreen);
         assert_eq!(IpcEndpointId::LockScreenToShellAuth.consumer(), ServiceId::Shell);
         assert_eq!(IpcEndpointId::ShellToLockScreenAuth.producer(), ServiceId::Shell);
@@ -3092,6 +3121,30 @@ mod tests {
         );
         assert_eq!(IPC_CONTRACT_ATRIUM_SURFACE_DRAW, 24);
         assert!(core::mem::size_of::<GuiDrawBatch>() <= IPC_PAGE_BYTES);
+        assert_eq!(IpcEndpointId::AtriumToUser.producer(), ServiceId::Atrium);
+        assert_eq!(IpcEndpointId::AtriumToUser.consumer(), ServiceId::User);
+        assert_eq!(IpcEndpointId::UserToAtrium.producer(), ServiceId::User);
+        assert_eq!(IpcEndpointId::UserToAtrium.consumer(), ServiceId::Atrium);
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::AtriumToUser as usize),
+            Some(IPC_CONTRACT_ATRIUM_SETTINGS_REQUEST)
+        );
+        assert_eq!(
+            ipc_contract_id(IpcEndpointId::UserToAtrium as usize),
+            Some(IPC_CONTRACT_ATRIUM_SETTINGS_RESPONSE)
+        );
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::AtriumToUser as usize),
+            Some(core::mem::size_of::<AtriumSettingsRequest>())
+        );
+        assert_eq!(
+            ipc_message_size(IpcEndpointId::UserToAtrium as usize),
+            Some(core::mem::size_of::<AtriumSettingsResponse>())
+        );
+        assert_eq!(
+            IpcEndpointId::from_index(IpcEndpointId::UserToAtrium as usize),
+            Some(IpcEndpointId::UserToAtrium)
+        );
     }
 
     #[test]

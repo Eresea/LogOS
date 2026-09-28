@@ -7,6 +7,7 @@ mod common;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use logos_abi::{
+    AtriumSettingsOperation, AtriumSettingsRequest, AtriumSettingsResponse, AtriumSettingsStatus,
     IpcBytes, IpcStatus, MessageKind, USER_STORAGE_CHUNK_BYTES, USER_STORAGE_FLAG_BEGIN,
     USER_STORAGE_FLAG_END, UserRequest, UserResponse, UserStorageOperation, UserStorageRequest,
     UserStorageResponse, UserStorageStatus,
@@ -48,6 +49,20 @@ const STORAGE_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_co
     b"storage",
     core::mem::size_of::<IpcBytes>(),
     logos_abi::IpcRights::Receive,
+);
+// S4 (#81, ADR-0091): Atrium's settings load/save request/response. User
+// only stores the opaque bytes inside its own canonical snapshot.
+const ATRIUM_RECEIVE_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_ATRIUM_SETTINGS_REQUEST,
+    b"atrium",
+    core::mem::size_of::<AtriumSettingsRequest>(),
+    logos_abi::IpcRights::Receive,
+);
+const ATRIUM_SEND_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
+    logos_abi::IPC_CONTRACT_ATRIUM_SETTINGS_RESPONSE,
+    b"atrium",
+    core::mem::size_of::<AtriumSettingsResponse>(),
+    logos_abi::IpcRights::Send,
 );
 
 static NEXT_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
@@ -284,6 +299,35 @@ fn persist_catalog(
     }
 }
 
+/// Handles one Atrium settings request in place: `Load` returns the bytes
+/// last saved (zero if none), `Save` stores the opaque record and persists
+/// the whole catalog through the same durable path as other durable
+/// `UserRequest` operations (S4, #81, ADR-0091).
+fn handle_atrium_settings(
+    request: AtriumSettingsRequest,
+    storage_send_capability: logos_abi::CapabilityHandle,
+    storage_receive_capability: logos_abi::CapabilityHandle,
+) -> AtriumSettingsResponse {
+    if !request.is_valid() {
+        return AtriumSettingsResponse::new(request, AtriumSettingsStatus::Invalid);
+    }
+    let service = unsafe { core::ptr::addr_of_mut!(SERVICE).as_mut().unwrap() };
+    match request.operation {
+        AtriumSettingsOperation::Load => {
+            let data = service.catalog().atrium_settings();
+            AtriumSettingsResponse::with_data(request, AtriumSettingsStatus::Ok, data)
+        }
+        AtriumSettingsOperation::Save => {
+            service.catalog_mut().set_atrium_settings(request.data);
+            if persist_catalog(storage_send_capability, storage_receive_capability) {
+                AtriumSettingsResponse::new(request, AtriumSettingsStatus::Ok)
+            } else {
+                AtriumSettingsResponse::new(request, AtriumSettingsStatus::Invalid)
+            }
+        }
+    }
+}
+
 fn durable(operation: logos_abi::UserOperation) -> bool {
     matches!(
         operation,
@@ -324,6 +368,14 @@ pub extern "C" fn _start() -> ! {
         Ok(capability) => capability,
         Err(_) => common::idle(),
     };
+    let atrium_receive_capability = match common::capability_handle(ATRIUM_RECEIVE_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
+    let atrium_send_capability = match common::capability_handle(ATRIUM_SEND_CAPABILITY) {
+        Ok(capability) => capability,
+        Err(_) => common::idle(),
+    };
     while !load_catalog(storage_send_capability, storage_receive_capability) {
         common::heartbeat();
         common::sleep();
@@ -331,6 +383,24 @@ pub extern "C" fn _start() -> ! {
     let mut heartbeat_ticks = 0u16;
     loop {
         common::heartbeat_tick(&mut heartbeat_ticks);
+        let mut settings_request = AtriumSettingsRequest::new(AtriumSettingsOperation::Load, 0);
+        if common::ipc_receive_handle(atrium_receive_capability, &mut settings_request)
+            == IpcStatus::Ok
+        {
+            let response = handle_atrium_settings(
+                settings_request,
+                storage_send_capability,
+                storage_receive_capability,
+            );
+            loop {
+                match common::ipc_send_handle(atrium_send_capability, &response) {
+                    IpcStatus::Ok => break,
+                    IpcStatus::Full => common::wait_on_capability(atrium_send_capability),
+                    _ => break,
+                }
+            }
+            continue;
+        }
         let mut request = IpcBytes::empty(MessageKind::UserRequest);
         let send_capability =
             if common::ipc_receive_handle(flow_receive_capability, &mut request) == IpcStatus::Ok {
@@ -343,6 +413,7 @@ pub extern "C" fn _start() -> ! {
                 common::wait_on_capabilities(&[
                     flow_receive_capability,
                     shell_receive_capability,
+                    atrium_receive_capability,
                     storage_receive_capability,
                 ]);
                 continue;

@@ -1,6 +1,6 @@
 # ADR-0085: Live input settings control
 
-- Status: Accepted
+- Status: Superseded by ADR-0091
 - Date: 2026-09-13
 
 ## Decision

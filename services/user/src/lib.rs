@@ -8,10 +8,10 @@ use argon2::Block;
 #[cfg(feature = "password-kdf")]
 use argon2::{Algorithm, Argon2, Params, Version};
 use logos_abi::{
-    NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot, RoleId, SessionHandle,
-    USER_ARGON2_OUTPUT_BYTES, USER_ARGON2_SALT_BYTES, USER_MAX_PASSWORD_BYTES,
-    USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES, UserId, UserOperation, UserRequest,
-    UserResponse, UserStatus,
+    ATRIUM_SETTINGS_RECORD_BYTES, NamespaceCapabilityHandle, NamespaceRights, NamespaceRoot,
+    RoleId, SessionHandle, USER_ARGON2_OUTPUT_BYTES, USER_ARGON2_SALT_BYTES,
+    USER_MAX_PASSWORD_BYTES, USER_MAX_ROLE_NAME_BYTES, USER_MAX_USER_NAME_BYTES, UserId,
+    UserOperation, UserRequest, UserResponse, UserStatus,
 };
 #[cfg(all(feature = "password-kdf", target_os = "none"))]
 use logos_abi::{USER_KDF_WORKSPACE_BASE, USER_KDF_WORKSPACE_BYTES};
@@ -268,6 +268,11 @@ pub struct UserCatalog {
     roles: [Option<RoleRecord>; MAX_ROLES],
     sessions: [Option<SessionRecord>; MAX_SESSIONS],
     session_generations: [u32; MAX_SESSIONS],
+    /// Atrium's opaque settings record (S4, #81, ADR-0091). User only
+    /// carries these bytes inside its own snapshot; it never interprets
+    /// them. Zeroed (no record saved yet, or an older snapshot predating
+    /// this field) decodes as Atrium's own defaults on the Atrium side.
+    atrium_settings: [u8; ATRIUM_SETTINGS_RECORD_BYTES],
 }
 
 pub struct UserService<E> {
@@ -429,11 +434,23 @@ impl UserCatalog {
             roles: [None; MAX_ROLES],
             sessions: [None; MAX_SESSIONS],
             session_generations: [1; MAX_SESSIONS],
+            atrium_settings: [0; ATRIUM_SETTINGS_RECORD_BYTES],
         }
     }
 
     pub const fn is_claimed(&self) -> bool {
         self.claimed
+    }
+
+    /// Atrium's opaque settings record, as last saved (S4, #81, ADR-0091).
+    pub const fn atrium_settings(&self) -> [u8; ATRIUM_SETTINGS_RECORD_BYTES] {
+        self.atrium_settings
+    }
+
+    /// Stores Atrium's opaque settings record; the caller (User's service
+    /// image) is responsible for persisting the catalog afterwards.
+    pub fn set_atrium_settings(&mut self, bytes: [u8; ATRIUM_SETTINGS_RECORD_BYTES]) {
+        self.atrium_settings = bytes;
     }
 
     pub const fn default_home_root(&self) -> NamespaceRoot {
@@ -651,6 +668,13 @@ impl UserCatalog {
                 offset += encoded_role_bytes();
             }
         }
+        // Tail-appended, not versioned with the rest of the snapshot: an
+        // older snapshot simply ends before this section, and
+        // `restore_snapshot` defaults it to zero bytes rather than
+        // rejecting the whole snapshot (S4, #81, ADR-0091).
+        output[offset..offset + ATRIUM_SETTINGS_RECORD_BYTES]
+            .copy_from_slice(&self.atrium_settings);
+        offset += ATRIUM_SETTINGS_RECORD_BYTES;
         Ok(offset)
     }
 
@@ -703,12 +727,22 @@ impl UserCatalog {
         if !restored.snapshot_is_valid() {
             return Err(UserError::Corrupt);
         }
+        // Tolerant tail read: a pre-S4 snapshot ends here and has no
+        // settings section, which defaults to zero bytes (Atrium then
+        // decodes that as its own defaults) rather than failing the whole
+        // restore (ADR-0091).
+        let mut atrium_settings = [0u8; ATRIUM_SETTINGS_RECORD_BYTES];
+        if let Some(bytes) = input.get(offset..offset + ATRIUM_SETTINGS_RECORD_BYTES) {
+            atrium_settings.copy_from_slice(bytes);
+        }
+        restored.atrium_settings = atrium_settings;
         self.claimed = restored.claimed;
         self.next_user = restored.next_user;
         self.next_role = restored.next_role;
         self.next_lineage = restored.next_lineage;
         self.users = restored.users;
         self.roles = restored.roles;
+        self.atrium_settings = restored.atrium_settings;
         for generation in &mut self.session_generations {
             *generation = generation.wrapping_add(1).max(1);
         }
@@ -1418,6 +1452,29 @@ mod tests {
             restored.capability(session, NamespaceCapabilityHandle::EMPTY),
             Err(UserError::Stale)
         );
+    }
+
+    #[test]
+    fn snapshot_round_trips_atrium_settings_and_defaults_missing_tail() {
+        let mut catalog = UserCatalog::new();
+        let settings = [7u8; ATRIUM_SETTINGS_RECORD_BYTES];
+        catalog.set_atrium_settings(settings);
+        let mut snapshot = [0; USER_SNAPSHOT_BYTES];
+        let length = catalog.encode_snapshot(&mut snapshot).unwrap();
+        let mut restored = UserCatalog::new();
+        restored.restore_snapshot(&snapshot[..length]).unwrap();
+        assert_eq!(restored.atrium_settings(), settings);
+
+        // A pre-S4 snapshot (no settings tail at all) restores fine and
+        // defaults the settings bytes to zero instead of failing (ADR-0091).
+        let pre_s4 = UserCatalog::new();
+        let mut short_snapshot = [0; USER_SNAPSHOT_BYTES];
+        let short_length = pre_s4.encode_snapshot(&mut short_snapshot).unwrap();
+        let truncated_length = short_length - ATRIUM_SETTINGS_RECORD_BYTES;
+        let mut restored_pre_s4 = UserCatalog::new();
+        restored_pre_s4.set_atrium_settings(settings);
+        restored_pre_s4.restore_snapshot(&short_snapshot[..truncated_length]).unwrap();
+        assert_eq!(restored_pre_s4.atrium_settings(), [0u8; ATRIUM_SETTINGS_RECORD_BYTES]);
     }
 
     #[test]
