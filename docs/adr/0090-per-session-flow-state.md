@@ -33,9 +33,10 @@ Terminal session tag (0..3, `IPC_SESSION_MASK`/`IPC_SESSION_SHIFT`,
 from its `reserved` bytes, same wire size). Terminal tags every
 `SessionInput` it sends with the active tab's slot; Session and Flow tag
 every reply they send with the session that produced it. `ABI_VERSION`
-moves 8 -> 9 for the `FlowControl` shape change and the now-significant
-`IpcBytes.flags` bits. A new `MessageKind::SessionClose` (32) tells Session
-a tab closed.
+moves to 10 for the `FlowControl` shape change and the now-significant
+`IpcBytes.flags` bits (9 was S5/#99's; S4/#81 lands its own bump
+concurrently, so whoever merges second rebases to the next number). A new
+`MessageKind::SessionClose` (32) tells Session a tab closed.
 
 ### Session (`services/images/src/session.rs`)
 
@@ -61,24 +62,35 @@ it back without re-deriving ownership.
 
 `TerminalService::close_tab` now returns `Option<IpcBytes>` — a tagged
 `SessionClose` — for the caller to forward. Session resets that slot (fresh
-line editor, dropped queued work) and, if it was `OWNER`, sends a tagged
-`FlowControl` cancel; the eventual (possibly-cancelled) reply, still tagged
-to that slot, clears `OWNER` normally rather than being force-cleared,
-so Flow's shared clients are never driven by two sessions at once.
+line editor, dropped queued work) immediately, so a new tab can reuse it
+(Terminal picks the lowest free slot) before Flow has replied at all. If
+the closed slot was `OWNER`, Session sends a tagged `FlowControl` cancel
+and sets `ORPHANED`, but deliberately leaves `OWNER` itself untouched:
+Flow's shared clients only ever serve one command at a time, so the slot
+cannot be freed for a new exchange until this one actually ends — forcing
+`OWNER` clear early would let a second session's command start while Flow
+is still mid-command for the first.
 
-### Accepted race
+While `ORPHANED` is set, every reply for that exchange (fetch progress,
+partial `SessionOutput` chunks, the terminal chunk or completion response)
+is received and inspected only to tell whether it is that exchange's
+*terminal* message (`is_terminal_reply`); nothing is staged into the slot
+and its line editor is never touched, so a new tab already reusing the
+slot cannot receive the old tab's output or an extra prompt. `OWNER` and
+`ORPHANED` both clear together on that terminal message, freeing the slot
+for the next exchange — the same place `OWNER` would have cleared for a
+still-open tab.
 
-A reply already in flight from Flow when a tab closes can still arrive
-tagged to that slot after Session has reset it for reuse by a new tab
-opened in the same, since-reused slot. Terminal drops output for a slot it
-no longer has open, and the new tab's own exchange only starts once
-`OWNER` clears, so this cannot corrupt either tab's visible state or Flow's
-shared clients — the observable effect is bounded to a stray, unrendered
-`SessionOutput`/`CompletionResponse` chunk. A full fix needs a generation
-counter carried alongside the session tag, which the 2 spare `flags` bits
-used here do not have room for; if this ever matters in practice, it is a
-smaller follow-up (e.g. moving the tag to a wider field) rather than a
-reason to prefer the per-session-clients design.
+### Residual race
+
+Between `close_session` queuing the cancel and Flow acting on it, Flow may
+still emit a few more chunks of the original (uncancelled) command before
+the cancellation lands — these are drained the same as any other orphaned
+reply, so they cost extra IPC round trips but never reach a slot's output
+or editor state. `PENDING_CONTROL` is a single queued slot, but only one
+session can ever be `OWNER` at a time, so only one cancel can ever be
+outstanding; a second tab closing while unrelated (not `OWNER`) never
+touches it. No correctness gap remains here, only bounded wasted work.
 
 ## Rationale
 
@@ -97,5 +109,9 @@ input to stay untangled while both tabs are otherwise responsive.
   Flow to finish, though its own typing is never blocked while it waits.
 - `MAX_SHELL_SESSIONS` (4) is the one source of truth for the tag's range;
   Terminal's own `MAX_TERMINAL_SESSIONS` must stay equal to it.
-- `ABI_VERSION` 9: any future spare-bit user of `IpcBytes.flags` must avoid
+- `ABI_VERSION` 10: any future spare-bit user of `IpcBytes.flags` must avoid
   bits 1-2.
+- A closed tab's slot cannot start a new exchange until its old one's
+  terminal reply is drained, even though the slot itself is instantly
+  reusable for typing; in the ordinary case (Flow's cancel actually
+  cancels quickly) this is not user-visible.

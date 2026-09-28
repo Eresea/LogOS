@@ -173,6 +173,14 @@ static mut SESSIONS: [SessionSlot; MAX_SHELL_SESSIONS] = [EMPTY_SLOT; MAX_SHELL_
 /// Flow; every other slot's line editing keeps working locally regardless
 /// (T3c, #98's "one shared arbitration queue" approach).
 static mut OWNER: Option<u8> = None;
+/// Set when `OWNER`'s tab was closed while its exchange was still in
+/// flight (`close_session`): `OWNER` itself stays put (Flow's shared
+/// clients only ever serve one command at a time, so the slot cannot be
+/// freed for a new owner until this exchange actually ends), but its
+/// reply must not be staged into the slot any more — a new tab may
+/// already have reused it. The reply handler drains and discards instead
+/// until the exchange's terminal message, then clears both.
+static mut ORPHANED: bool = false;
 static mut PENDING_CONTROL: Option<IpcBytes> = None;
 
 fn completion_request_message(request: CompletionRequest, session: u8) -> IpcBytes {
@@ -235,6 +243,18 @@ fn render_fetch_progress(response: FetchResponse, output: &mut logos_session::Sh
     }
 }
 
+/// Whether `message` is the last reply of a Flow exchange (a completion
+/// response, or a `SessionOutput` chunk without `IPC_FLAG_MORE`) rather
+/// than an intermediate fetch-progress or partial-output chunk. Shared by
+/// the normal and orphaned-reply paths in `_start` so both agree on when
+/// an exchange ends and `OWNER` can free up.
+fn is_terminal_reply(message: &IpcBytes) -> bool {
+    completion_response(message).is_some()
+        || (fetch_progress(message).is_none()
+            && message.kind == MessageKind::SessionOutput
+            && message.flags & IPC_FLAG_MORE == 0)
+}
+
 /// Picks the next slot with queued Flow work, starting just after
 /// `after` and wrapping once, so no tab is starved if several submit
 /// commands back to back.
@@ -249,22 +269,22 @@ fn next_owner(sessions: &[SessionSlot; MAX_SHELL_SESSIONS], after: u8) -> Option
 /// its slot for reuse (T3c, #98's close acceptance). A command already
 /// sent to Flow keeps running to completion (Flow's shared clients can
 /// only ever serve one command at a time; see `next_owner`): this only
-/// requests its cancellation and lets the eventual reply, still tagged to
-/// this slot, clear `OWNER` normally rather than forcing it free early
-/// and letting a second command start while Flow is still mid-command for
-/// the first. See ADR for the accepted race this leaves: a reply that was
-/// already in flight when the tab closed can still land (and be silently
-/// dropped by Terminal, which stops rendering a closed slot) just as a
-/// new tab opened in the same, reused slot starts using it.
+/// requests its cancellation and marks `*orphaned` so the reply handler
+/// drains and discards the eventual (possibly-cancelled) reply instead of
+/// staging it into this slot, which a new tab may already have reused.
+/// `OWNER` itself is left untouched here — forcing it free early would let
+/// a second command start while Flow is still mid-command for the first.
 fn close_session(
     sessions: &mut [SessionSlot; MAX_SHELL_SESSIONS],
     owner: Option<u8>,
+    orphaned: &mut bool,
     pending_control: &mut Option<IpcBytes>,
     session: u8,
 ) {
     let Some(slot) = sessions.get_mut(session as usize) else { return };
     if owner == Some(session) && (slot.waiting_for_command || slot.waiting_for_completion) {
         *pending_control = Some(flow_control_message(0, session));
+        *orphaned = true;
     }
     slot.reset();
 }
@@ -274,6 +294,7 @@ pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let sessions = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };
     let owner = unsafe { &mut *core::ptr::addr_of_mut!(OWNER) };
+    let orphaned = unsafe { &mut *core::ptr::addr_of_mut!(ORPHANED) };
     let pending_control = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_CONTROL) };
     let input_capability = match common::capability_handle(INPUT_CAPABILITY) {
         Ok(capability) => capability,
@@ -371,40 +392,53 @@ pub extern "C" fn _start() -> ! {
         }
 
         if let Some(index) = *owner {
-            let slot = &mut sessions[index as usize];
             let mut message = IpcBytes::empty(MessageKind::SessionOutput);
             if common::ipc_receive_handle(flow_output_capability, &mut message) == IpcStatus::Ok {
                 progressed = true;
-                if let Some(response) = completion_response(&message) {
-                    let mut edit_output = logos_session::ShellOutput::new();
-                    slot.session.apply_completion_response(response, &mut edit_output);
-                    if edit_output.len > 0 {
-                        slot.pending_output.stage(edit_output.as_bytes());
+                if *orphaned {
+                    // This slot's tab was closed while this exchange was
+                    // still in flight and may already be reused by a new
+                    // tab (`close_session`): discard the reply instead of
+                    // staging it or touching the slot's line editor, and
+                    // only track whether it was this exchange's terminal
+                    // message so `OWNER` can free up for the next one.
+                    if is_terminal_reply(&message) {
+                        *owner = None;
+                        *orphaned = false;
                     }
-                    slot.waiting_for_completion = false;
-                    *owner = None;
-                } else if let Some(response) = fetch_progress(&message) {
-                    let mut progress = logos_session::ShellOutput::new();
-                    render_fetch_progress(response, &mut progress);
-                    slot.pending_output.stage(progress.as_bytes());
-                } else if message.kind == MessageKind::SessionOutput {
-                    if let Some(bytes) = message.as_bytes() {
-                        let available = slot.command_response.len() - slot.command_response_len;
-                        let count = bytes.len().min(available);
-                        slot.command_response
-                            [slot.command_response_len..slot.command_response_len + count]
-                            .copy_from_slice(&bytes[..count]);
-                        slot.command_response_len += count;
-                        if message.flags & IPC_FLAG_MORE == 0 {
-                            let mut result = logos_session::ShellOutput::new();
-                            slot.session.command_output(
-                                &slot.command_response[..slot.command_response_len],
-                                &mut result,
-                            );
-                            slot.pending_output.stage(result.as_bytes());
-                            slot.command_response_len = 0;
-                            slot.waiting_for_command = false;
-                            *owner = None;
+                } else {
+                    let slot = &mut sessions[index as usize];
+                    if let Some(response) = completion_response(&message) {
+                        let mut edit_output = logos_session::ShellOutput::new();
+                        slot.session.apply_completion_response(response, &mut edit_output);
+                        if edit_output.len > 0 {
+                            slot.pending_output.stage(edit_output.as_bytes());
+                        }
+                        slot.waiting_for_completion = false;
+                        *owner = None;
+                    } else if let Some(response) = fetch_progress(&message) {
+                        let mut progress = logos_session::ShellOutput::new();
+                        render_fetch_progress(response, &mut progress);
+                        slot.pending_output.stage(progress.as_bytes());
+                    } else if message.kind == MessageKind::SessionOutput {
+                        if let Some(bytes) = message.as_bytes() {
+                            let available = slot.command_response.len() - slot.command_response_len;
+                            let count = bytes.len().min(available);
+                            slot.command_response
+                                [slot.command_response_len..slot.command_response_len + count]
+                                .copy_from_slice(&bytes[..count]);
+                            slot.command_response_len += count;
+                            if message.flags & IPC_FLAG_MORE == 0 {
+                                let mut result = logos_session::ShellOutput::new();
+                                slot.session.command_output(
+                                    &slot.command_response[..slot.command_response_len],
+                                    &mut result,
+                                );
+                                slot.pending_output.stage(result.as_bytes());
+                                slot.command_response_len = 0;
+                                slot.waiting_for_command = false;
+                                *owner = None;
+                            }
                         }
                     }
                 }
@@ -416,7 +450,7 @@ pub extern "C" fn _start() -> ! {
             progressed = true;
             let tag = message.session();
             if message.kind == MessageKind::SessionClose {
-                close_session(sessions, *owner, pending_control, tag);
+                close_session(sessions, *owner, orphaned, pending_control, tag);
                 continue;
             }
             if message.kind != MessageKind::SessionInput || tag as usize >= sessions.len() {
@@ -521,24 +555,30 @@ mod tests {
         let mut sessions: [SessionSlot; MAX_SHELL_SESSIONS] = [EMPTY_SLOT; MAX_SHELL_SESSIONS];
         sessions[1].flow_input.stage(b"sys.version()");
         let mut pending_control = None;
-        close_session(&mut sessions, Some(0), &mut pending_control, 1);
+        let mut orphaned = false;
+        close_session(&mut sessions, Some(0), &mut orphaned, &mut pending_control, 1);
         assert!(sessions[1].flow_input.is_empty());
         assert!(pending_control.is_none(), "a merely-queued command needs no cancel sent to Flow");
+        assert!(!orphaned, "no exchange was in flight for the closed session");
     }
 
     #[test]
-    fn closing_the_owning_session_sends_a_tagged_cancel_to_flow() {
+    fn closing_the_owning_session_sends_a_tagged_cancel_to_flow_and_marks_it_orphaned() {
         // Session A's command is already in flight with Flow (`OWNER` is
         // A): closing A must ask Flow to cancel it, tagged to A, rather
         // than silently forgetting about it (Flow's shared clients would
-        // otherwise keep driving a command nobody can see the result of).
+        // otherwise keep driving a command nobody can see the result of),
+        // and mark the exchange orphaned so its eventual reply is drained
+        // instead of staged into whatever tab reuses the slot.
         let mut sessions: [SessionSlot; MAX_SHELL_SESSIONS] = [EMPTY_SLOT; MAX_SHELL_SESSIONS];
         sessions[0].waiting_for_command = true;
         let mut pending_control = None;
-        close_session(&mut sessions, Some(0), &mut pending_control, 0);
+        let mut orphaned = false;
+        close_session(&mut sessions, Some(0), &mut orphaned, &mut pending_control, 0);
         let control = pending_control.expect("the owning session's cancel is queued to send");
         assert_eq!(control.kind, MessageKind::FlowControl);
         assert_eq!(control.session(), 0);
+        assert!(orphaned);
     }
 
     #[test]
@@ -549,10 +589,57 @@ mod tests {
         sessions[2].session.input_for_command(b"leftover", &mut command, &mut discard);
         sessions[2].pending_completion = Some(IpcBytes::empty(MessageKind::CompletionRequest));
         let mut pending_control = None;
-        close_session(&mut sessions, None, &mut pending_control, 2);
+        let mut orphaned = false;
+        close_session(&mut sessions, None, &mut orphaned, &mut pending_control, 2);
         assert!(sessions[2].pending_completion.is_none());
         assert!(sessions[2].flow_input.is_empty());
         // A fresh prompt is queued for whatever tab reuses this slot next.
         assert!(!sessions[2].pending_output.is_empty());
+    }
+
+    /// The exact race the coordinator's review flagged: A submits, A
+    /// closes (so B can immediately reuse its slot), then the late reply
+    /// for A's cancelled command arrives. It must not land in B's output,
+    /// and `OWNER`/`ORPHANED` must both clear on that reply's terminal
+    /// message so the slot is free for the next exchange.
+    #[test]
+    fn a_late_reply_for_a_closed_and_reused_slot_is_drained_not_staged() {
+        let mut sessions: [SessionSlot; MAX_SHELL_SESSIONS] = [EMPTY_SLOT; MAX_SHELL_SESSIONS];
+        sessions[0].waiting_for_command = true;
+        let mut owner = Some(0u8);
+        let mut orphaned = false;
+        let mut pending_control = None;
+
+        // A closes while its command is still in flight.
+        close_session(&mut sessions, owner, &mut orphaned, &mut pending_control, 0);
+        assert!(orphaned);
+        assert_eq!(owner, Some(0), "OWNER stays put; Flow is still mid-command for slot 0");
+
+        // A new tab reuses slot 0 (Terminal picks the lowest free slot)
+        // and types into it before A's stale reply ever arrives.
+        let mut command = [0u8; MAX_LINE_BYTES];
+        let mut new_tab_output = logos_session::ShellOutput::new();
+        sessions[0].session.input_for_command(b"fresh", &mut command, &mut new_tab_output);
+        let new_tab_queued_before_reply = sessions[0].pending_output.len;
+
+        // A's stale, cancelled command's terminal reply finally arrives,
+        // tagged (by Flow) to slot 0 same as always. This is exactly the
+        // `*orphaned` branch of `_start`'s `*owner` block.
+        let final_chunk = IpcBytes::empty(MessageKind::SessionOutput);
+        assert!(
+            is_terminal_reply(&final_chunk),
+            "an empty, non-MORE SessionOutput is this exchange's terminal message"
+        );
+        if orphaned && is_terminal_reply(&final_chunk) {
+            owner = None;
+            orphaned = false;
+        }
+
+        assert_eq!(owner, None, "OWNER clears once the orphaned exchange's reply is drained");
+        assert!(!orphaned);
+        assert_eq!(
+            sessions[0].pending_output.len, new_tab_queued_before_reply,
+            "the closed session's late reply must not add to the reused slot's output"
+        );
     }
 }
