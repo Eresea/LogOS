@@ -322,6 +322,155 @@ pub enum MouseAcceleration {
     High,
 }
 
+/// The one persisted, versioned settings record (S4, #81, ADR-0090): a
+/// plain fixed-size byte layout with a magic, a version byte and a checksum,
+/// so a corrupt, short or unknown-version record can never be mistaken for a
+/// valid one. Atrium encodes and decodes it; User only ever carries the
+/// opaque bytes inside its own canonical snapshot (ADR-0064) and never
+/// interprets them. There are no per-user profiles, just one system record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AtriumSettingsRecord {
+    pub keyboard_layout: KeyboardLayout,
+    pub mouse_acceleration: MouseAcceleration,
+    pub accent: Accent,
+    pub fps_overlay: bool,
+    pub reduced_motion: bool,
+    pub light_theme: bool,
+}
+
+const ATRIUM_SETTINGS_MAGIC: [u8; 4] = *b"LSET";
+const ATRIUM_SETTINGS_VERSION: u8 = 1;
+const ATRIUM_SETTINGS_FLAG_FPS_OVERLAY: u8 = 1 << 0;
+const ATRIUM_SETTINGS_FLAG_REDUCED_MOTION: u8 = 1 << 1;
+const ATRIUM_SETTINGS_FLAG_LIGHT_THEME: u8 = 1 << 2;
+
+/// The record's fixed on-the-wire/on-disk size: magic(4) + version(1) +
+/// keyboard(1) + mouse(1) + accent(1) + flags(1) + reserved(3) +
+/// checksum(4).
+pub const ATRIUM_SETTINGS_RECORD_BYTES: usize = 16;
+const _: () = assert!(ATRIUM_SETTINGS_RECORD_BYTES == logos_abi::ATRIUM_SETTINGS_RECORD_BYTES);
+
+/// Tiny FNV-1a fold over the record's header and field bytes; enough to
+/// catch bit rot and truncation without pulling in a CRC crate.
+const fn checksum(bytes: &[u8]) -> u32 {
+    const FNV_OFFSET: u32 = 0x811c_9dc5;
+    const FNV_PRIME: u32 = 0x0100_0193;
+    let mut hash = FNV_OFFSET;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u32;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        index += 1;
+    }
+    hash
+}
+
+impl AtriumSettingsRecord {
+    pub const DEFAULT: Self = Self {
+        keyboard_layout: KeyboardLayout::Azerty,
+        mouse_acceleration: MouseAcceleration::Medium,
+        accent: Accent::Blue,
+        fps_overlay: true,
+        reduced_motion: false,
+        light_theme: false,
+    };
+
+    /// Encodes the record as its fixed durable byte layout.
+    pub fn encode(self) -> [u8; ATRIUM_SETTINGS_RECORD_BYTES] {
+        let mut bytes = [0u8; ATRIUM_SETTINGS_RECORD_BYTES];
+        bytes[0..4].copy_from_slice(&ATRIUM_SETTINGS_MAGIC);
+        bytes[4] = ATRIUM_SETTINGS_VERSION;
+        bytes[5] = match self.keyboard_layout {
+            KeyboardLayout::Azerty => 0,
+            KeyboardLayout::Qwerty => 1,
+        };
+        bytes[6] = match self.mouse_acceleration {
+            MouseAcceleration::Off => 0,
+            MouseAcceleration::Low => 1,
+            MouseAcceleration::Medium => 2,
+            MouseAcceleration::High => 3,
+        };
+        bytes[7] = self.accent.index() as u8;
+        let mut flags = 0u8;
+        if self.fps_overlay {
+            flags |= ATRIUM_SETTINGS_FLAG_FPS_OVERLAY;
+        }
+        if self.reduced_motion {
+            flags |= ATRIUM_SETTINGS_FLAG_REDUCED_MOTION;
+        }
+        if self.light_theme {
+            flags |= ATRIUM_SETTINGS_FLAG_LIGHT_THEME;
+        }
+        bytes[8] = flags;
+        // bytes[9..12] stay reserved (zero) for a later field, e.g. a
+        // distinct theme selector beyond the current light/dark bit.
+        let sum = checksum(&bytes[0..12]);
+        bytes[12..16].copy_from_slice(&sum.to_le_bytes());
+        bytes
+    }
+
+    /// Decodes a stored record, falling back to `DEFAULT` for anything
+    /// short, wrong-magic, unknown-version, checksum-mismatched or
+    /// otherwise out of range -- corruption never becomes a crash or a
+    /// silently wrong setting.
+    pub fn decode(bytes: &[u8]) -> Self {
+        Self::try_decode(bytes).unwrap_or(Self::DEFAULT)
+    }
+
+    fn try_decode(bytes: &[u8]) -> Option<Self> {
+        let bytes = bytes.get(0..ATRIUM_SETTINGS_RECORD_BYTES)?;
+        if bytes[0..4] != ATRIUM_SETTINGS_MAGIC {
+            return None;
+        }
+        if bytes[4] != ATRIUM_SETTINGS_VERSION {
+            return None;
+        }
+        let stored_sum = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
+        if checksum(&bytes[0..12]) != stored_sum {
+            return None;
+        }
+        let keyboard_layout = match bytes[5] {
+            0 => KeyboardLayout::Azerty,
+            1 => KeyboardLayout::Qwerty,
+            _ => return None,
+        };
+        let mouse_acceleration = match bytes[6] {
+            0 => MouseAcceleration::Off,
+            1 => MouseAcceleration::Low,
+            2 => MouseAcceleration::Medium,
+            3 => MouseAcceleration::High,
+            _ => return None,
+        };
+        let accent = match bytes[7] {
+            0 => Accent::Blue,
+            1 => Accent::Teal,
+            2 => Accent::Purple,
+            3 => Accent::Orange,
+            _ => return None,
+        };
+        let flags = bytes[8];
+        if bytes[9] != 0 || bytes[10] != 0 || bytes[11] != 0 {
+            return None;
+        }
+        if flags
+            & !(ATRIUM_SETTINGS_FLAG_FPS_OVERLAY
+                | ATRIUM_SETTINGS_FLAG_REDUCED_MOTION
+                | ATRIUM_SETTINGS_FLAG_LIGHT_THEME)
+            != 0
+        {
+            return None;
+        }
+        Some(Self {
+            keyboard_layout,
+            mouse_acceleration,
+            accent,
+            fps_overlay: flags & ATRIUM_SETTINGS_FLAG_FPS_OVERLAY != 0,
+            reduced_motion: flags & ATRIUM_SETTINGS_FLAG_REDUCED_MOTION != 0,
+            light_theme: flags & ATRIUM_SETTINGS_FLAG_LIGHT_THEME != 0,
+        })
+    }
+}
+
 pub const fn surface_close_bounds(surface: GuiRect) -> GuiRect {
     GuiRect::new(
         surface.width.saturating_sub(STATUS_BAR_CLOSE_BOUNDS.width) as i32,
@@ -755,6 +904,40 @@ impl Atrium {
             MouseAcceleration::High => logos_abi::InputSettings::MOUSE_ACCELERATION_HIGH,
         };
         logos_abi::InputSettings::new(keyboard_layout, mouse_acceleration)
+    }
+
+    /// The persisted subset of the current settings (S4, #81, ADR-0090).
+    pub const fn settings_record(&self) -> AtriumSettingsRecord {
+        AtriumSettingsRecord {
+            keyboard_layout: self.keyboard_layout,
+            mouse_acceleration: self.mouse_acceleration,
+            accent: self.accent,
+            fps_overlay: self.fps_overlay,
+            reduced_motion: self.reduced_motion,
+            light_theme: self.light_theme,
+        }
+    }
+
+    /// Applies a loaded (or defaulted) settings record at Atrium start,
+    /// including the derived select-widget selections so Settings renders
+    /// consistently with the applied state.
+    pub fn apply_settings_record(&mut self, record: AtriumSettingsRecord) {
+        self.keyboard_layout = record.keyboard_layout;
+        self.keyboard_select.set_selected(Some(match record.keyboard_layout {
+            KeyboardLayout::Azerty => 0,
+            KeyboardLayout::Qwerty => 1,
+        }));
+        self.mouse_acceleration = record.mouse_acceleration;
+        self.mouse_select.set_selected(Some(match record.mouse_acceleration {
+            MouseAcceleration::Off => 0,
+            MouseAcceleration::Low => 1,
+            MouseAcceleration::Medium => 2,
+            MouseAcceleration::High => 3,
+        }));
+        self.accent = record.accent;
+        self.fps_overlay = record.fps_overlay;
+        self.reduced_motion = record.reduced_motion;
+        self.light_theme = record.light_theme;
     }
 
     fn settings_search_event(&mut self, event: logos_ui::UiInputEvent) -> bool {
@@ -2562,6 +2745,124 @@ mod tests {
 
     fn ctrl_alt(code: KeyCode) -> InputMessage {
         InputMessage::key(code, KeyState::Pressed, MOD_CTRL | MOD_ALT)
+    }
+
+    #[test]
+    fn settings_record_size_is_fixed() {
+        assert_eq!(ATRIUM_SETTINGS_RECORD_BYTES, 16);
+        assert_eq!(AtriumSettingsRecord::DEFAULT.encode().len(), ATRIUM_SETTINGS_RECORD_BYTES);
+    }
+
+    #[test]
+    fn settings_record_round_trips_every_field() {
+        let record = AtriumSettingsRecord {
+            keyboard_layout: KeyboardLayout::Qwerty,
+            mouse_acceleration: MouseAcceleration::High,
+            accent: Accent::Orange,
+            fps_overlay: false,
+            reduced_motion: true,
+            light_theme: true,
+        };
+        let bytes = record.encode();
+        assert_eq!(AtriumSettingsRecord::decode(&bytes), record);
+
+        // The all-default record round-trips too (not just non-defaults,
+        // which could hide an accidental always-true default fallback).
+        let bytes = AtriumSettingsRecord::DEFAULT.encode();
+        assert_eq!(AtriumSettingsRecord::decode(&bytes), AtriumSettingsRecord::DEFAULT);
+    }
+
+    #[test]
+    fn settings_record_decode_falls_back_to_defaults_on_short_buffer() {
+        let bytes = AtriumSettingsRecord::DEFAULT.encode();
+        for length in 0..ATRIUM_SETTINGS_RECORD_BYTES {
+            assert_eq!(
+                AtriumSettingsRecord::decode(&bytes[..length]),
+                AtriumSettingsRecord::DEFAULT
+            );
+        }
+        assert_eq!(AtriumSettingsRecord::decode(&[]), AtriumSettingsRecord::DEFAULT);
+    }
+
+    #[test]
+    fn settings_record_decode_falls_back_to_defaults_on_wrong_magic() {
+        let mut bytes = AtriumSettingsRecord {
+            keyboard_layout: KeyboardLayout::Qwerty,
+            mouse_acceleration: MouseAcceleration::High,
+            accent: Accent::Orange,
+            fps_overlay: false,
+            reduced_motion: true,
+            light_theme: true,
+        }
+        .encode();
+        bytes[0] = b'X';
+        assert_eq!(AtriumSettingsRecord::decode(&bytes), AtriumSettingsRecord::DEFAULT);
+    }
+
+    #[test]
+    fn settings_record_decode_falls_back_to_defaults_on_unknown_version() {
+        let mut bytes = AtriumSettingsRecord {
+            keyboard_layout: KeyboardLayout::Qwerty,
+            mouse_acceleration: MouseAcceleration::High,
+            accent: Accent::Orange,
+            fps_overlay: false,
+            reduced_motion: true,
+            light_theme: true,
+        }
+        .encode();
+        bytes[4] = 0xff;
+        assert_eq!(AtriumSettingsRecord::decode(&bytes), AtriumSettingsRecord::DEFAULT);
+    }
+
+    #[test]
+    fn settings_record_decode_falls_back_to_defaults_on_corrupt_bytes() {
+        let bytes = AtriumSettingsRecord {
+            keyboard_layout: KeyboardLayout::Qwerty,
+            mouse_acceleration: MouseAcceleration::High,
+            accent: Accent::Orange,
+            fps_overlay: false,
+            reduced_motion: true,
+            light_theme: true,
+        }
+        .encode();
+        // Flipping any single field byte without recomputing the checksum
+        // must be caught, not silently accepted as a different valid value.
+        for index in 5..12 {
+            let mut corrupt = bytes;
+            corrupt[index] ^= 0xff;
+            assert_eq!(
+                AtriumSettingsRecord::decode(&corrupt),
+                AtriumSettingsRecord::DEFAULT,
+                "byte {index} corruption was not detected"
+            );
+        }
+        // An all-zero buffer (e.g. never-saved storage) is also invalid
+        // (wrong magic) rather than a coincidentally valid record.
+        assert_eq!(
+            AtriumSettingsRecord::decode(&[0u8; ATRIUM_SETTINGS_RECORD_BYTES]),
+            AtriumSettingsRecord::DEFAULT
+        );
+    }
+
+    #[test]
+    fn atrium_settings_record_round_trips_through_apply() {
+        let mut atrium = Atrium::new();
+        let record = AtriumSettingsRecord {
+            keyboard_layout: KeyboardLayout::Qwerty,
+            mouse_acceleration: MouseAcceleration::Off,
+            accent: Accent::Purple,
+            fps_overlay: false,
+            reduced_motion: true,
+            light_theme: true,
+        };
+        atrium.apply_settings_record(record);
+        assert_eq!(atrium.settings_record(), record);
+        assert_eq!(atrium.keyboard_layout(), KeyboardLayout::Qwerty);
+        assert_eq!(atrium.mouse_acceleration(), MouseAcceleration::Off);
+        assert_eq!(atrium.accent(), Accent::Purple);
+        assert!(!atrium.fps_overlay());
+        assert!(atrium.reduced_motion());
+        assert!(atrium.light_theme());
     }
 
     #[test]

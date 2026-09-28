@@ -85,8 +85,9 @@
 | [0082](0082-bounded-ui-motion.md) | Accepted | Fixed-point CSS-like transitions and bounded keyframe animation owned by UI hosts, with transform-aware Display ABI rasterization |
 | [0083](0083-bounded-dynamic-tiling-workspace.md) | Accepted | Atrium-owned fixed-capacity binary split tree for dynamic vertical and horizontal tiled workspace layout |
 | [0084](0084-bounded-material-symbols.md) | Accepted | Bounded native Material Symbols through one retained UI button paint fragment |
-| [0085](0085-live-input-settings.md) | Accepted | Fixed live Atrium→Input keyboard-layout and mouse-acceleration settings control |
+| [0085](0085-live-input-settings.md) | Superseded by ADR-0090 | Fixed live Atrium→Input keyboard-layout and mouse-acceleration settings control |
 | [0086](0086-wall-clock-time-source.md) | Accepted | Core-owned RTC-anchored wall clock exposed to services through one bounded read-only syscall |
 | [0087](0087-retained-text-grid-node.md) | Accepted | Retained bounded TextGrid scene node with dirty-row cell delivery, and a 24 -> 48 `MAX_GUI_NODES` budget |
 | [0088](0088-inter-proportional-ui-font.md) | Accepted | Offline Inter proportional UI font (14/20 px) with a shared text-measurement API; Terminal and TextGrid keep JetBrains Mono |
 | [0089](0089-atrium-appearance-preferences.md) | Accepted | Atrium-owned accent, FPS-overlay and reduced-motion preferences; reduced motion reaches LockScreen and Terminal as new message kinds on existing channels |
+| [0090](0090-atrium-settings-persistence.md) | Accepted | Atrium's settings record persists across reboots through a new Atrium↔User endpoint, stored as an opaque tail section of User's canonical snapshot (ADR-0064); supersedes ADR-0085's runtime-only note |

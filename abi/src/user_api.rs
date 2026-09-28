@@ -7,6 +7,10 @@ pub const USER_MAX_PASSWORD_BYTES: usize = 128;
 pub const USER_ARGON2_SALT_BYTES: usize = 16;
 pub const USER_ARGON2_OUTPUT_BYTES: usize = 32;
 pub const USER_STORAGE_CHUNK_BYTES: usize = 224;
+/// Size of the opaque Atrium settings record User carries inside its
+/// canonical snapshot (S4, #81, ADR-0090). User never interprets these
+/// bytes; `logos_atrium` owns the layout, magic, version and checksum.
+pub const ATRIUM_SETTINGS_RECORD_BYTES: usize = 16;
 pub const USER_KDF_WORKSPACE_BYTES: usize = 64 * 1024 * 1024 + 64;
 pub const USER_KDF_WORKSPACE_PAGES: usize = USER_KDF_WORKSPACE_BYTES.div_ceil(4096);
 pub const USER_KDF_WORKSPACE_BASE: usize = 0x0000_0200_0000_0000;
@@ -375,6 +379,126 @@ impl UserStorageResponse {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AtriumSettingsOperation {
+    Load = 1,
+    Save = 2,
+}
+
+impl AtriumSettingsOperation {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Load),
+            2 => Some(Self::Save),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AtriumSettingsStatus {
+    Ok = 0,
+    Invalid = 1,
+}
+
+impl AtriumSettingsStatus {
+    pub const fn from_raw(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Ok),
+            1 => Some(Self::Invalid),
+            _ => None,
+        }
+    }
+}
+
+/// Atrium's settings load/save request to User (S4, #81, ADR-0090). `data`
+/// is the opaque, already-encoded `logos_atrium` settings record; on `Load`
+/// it is ignored. One bounded message, no chunking: the record is a handful
+/// of bytes, far under `USER_STORAGE_CHUNK_BYTES`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct AtriumSettingsRequest {
+    pub operation: AtriumSettingsOperation,
+    pub reserved: u8,
+    pub request_id: u32,
+    pub data: [u8; ATRIUM_SETTINGS_RECORD_BYTES],
+}
+
+impl AtriumSettingsRequest {
+    pub const fn new(operation: AtriumSettingsOperation, request_id: u32) -> Self {
+        Self { operation, reserved: 0, request_id, data: [0; ATRIUM_SETTINGS_RECORD_BYTES] }
+    }
+
+    pub const fn with_data(
+        operation: AtriumSettingsOperation,
+        request_id: u32,
+        data: [u8; ATRIUM_SETTINGS_RECORD_BYTES],
+    ) -> Self {
+        Self { operation, reserved: 0, request_id, data }
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.request_id != 0 && self.reserved == 0
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| AtriumSettingsOperation::from_raw(*raw).is_some())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct AtriumSettingsResponse {
+    pub operation: AtriumSettingsOperation,
+    pub status: AtriumSettingsStatus,
+    pub reserved: u16,
+    pub request_id: u32,
+    pub data: [u8; ATRIUM_SETTINGS_RECORD_BYTES],
+}
+
+impl AtriumSettingsResponse {
+    pub const fn new(request: AtriumSettingsRequest, status: AtriumSettingsStatus) -> Self {
+        Self {
+            operation: request.operation,
+            status,
+            reserved: 0,
+            request_id: request.request_id,
+            data: [0; ATRIUM_SETTINGS_RECORD_BYTES],
+        }
+    }
+
+    pub const fn with_data(
+        request: AtriumSettingsRequest,
+        status: AtriumSettingsStatus,
+        data: [u8; ATRIUM_SETTINGS_RECORD_BYTES],
+    ) -> Self {
+        Self {
+            operation: request.operation,
+            status,
+            reserved: 0,
+            request_id: request.request_id,
+            data,
+        }
+    }
+
+    pub const fn is_valid_for(self, request: AtriumSettingsRequest) -> bool {
+        self.operation as u8 == request.operation as u8 && self.request_id == request.request_id
+    }
+
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .is_some_and(|raw| AtriumSettingsOperation::from_raw(*raw).is_some())
+            && bytes
+                .get(core::mem::offset_of!(Self, status))
+                .is_some_and(|raw| AtriumSettingsStatus::from_raw(*raw).is_some())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct UserRequest {
     pub operation: UserOperation,
@@ -490,6 +614,8 @@ const _: () = assert!(core::mem::size_of::<UserRequest>() <= MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<UserResponse>() <= MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<UserStorageRequest>() <= MAX_IPC_BYTES);
 const _: () = assert!(core::mem::size_of::<UserStorageResponse>() <= MAX_IPC_BYTES);
+const _: () = assert!(core::mem::size_of::<AtriumSettingsRequest>() <= MAX_IPC_BYTES);
+const _: () = assert!(core::mem::size_of::<AtriumSettingsResponse>() <= MAX_IPC_BYTES);
 
 #[cfg(test)]
 mod tests {
@@ -534,5 +660,24 @@ mod tests {
             &storage_response,
             core::mem::offset_of!(UserStorageResponse, status),
         )));
+
+        let settings_request = AtriumSettingsRequest::new(AtriumSettingsOperation::Load, 1);
+        let settings_response =
+            AtriumSettingsResponse::new(settings_request, AtriumSettingsStatus::Ok);
+        assert!(AtriumSettingsRequest::wire_enums_valid(unsafe {
+            core::slice::from_raw_parts(
+                (&settings_request as *const AtriumSettingsRequest).cast::<u8>(),
+                core::mem::size_of::<AtriumSettingsRequest>(),
+            )
+        }));
+        assert!(!AtriumSettingsRequest::wire_enums_valid(&invalid_byte(
+            &settings_request,
+            core::mem::offset_of!(AtriumSettingsRequest, operation),
+        )));
+        assert!(!AtriumSettingsResponse::wire_enums_valid(&invalid_byte(
+            &settings_response,
+            core::mem::offset_of!(AtriumSettingsResponse, status),
+        )));
+        assert!(settings_response.is_valid_for(settings_request));
     }
 }
