@@ -3621,6 +3621,27 @@ mod tests {
     }
 
     #[test]
+    fn terminal_may_own_a_surface_per_split_pane() {
+        // T3b (#97): a waiting split pane can take a second Terminal surface
+        // from the same client; other apps still get one per client.
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(12)).unwrap();
+        assert!(!atrium.has_empty_leaf());
+        atrium.apply_action(AtriumAction::Split(SplitDirection::Vertical)).unwrap();
+        assert!(atrium.has_empty_leaf());
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(13)).unwrap();
+        assert!(!atrium.has_empty_leaf());
+        assert_eq!(atrium.surfaces().filter(|surface| surface.app == AppId::Terminal).count(), 2);
+        // Closing one pane leaves the other and collapses the split.
+        atrium.close_reference(surface(13)).unwrap();
+        assert!(atrium.surface_by_reference(surface(12)).is_some());
+        assert!(atrium.surface_by_reference(surface(13)).is_none());
+    }
+
+    #[test]
     fn surface_reference_lookup_is_exact_and_generation_safe() {
         let mut atrium = Atrium::new();
         atrium.authenticate();

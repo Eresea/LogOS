@@ -612,6 +612,15 @@ mod tests {
     use logos_session::{MAX_LINE_BYTES, SessionService, ShellOutput};
     use logos_terminal::TerminalService;
 
+    /// A Terminal whose primary pane is bound to an Atrium surface, so it
+    /// emits grid rows (T3b, #97).
+    fn bound_terminal() -> TerminalService {
+        let mut terminal = TerminalService::new();
+        let surface = logos_abi::SurfaceHandle::new(0, 1, 7).unwrap();
+        assert!(terminal.bind_surface(surface, logos_abi::GuiRect::new(0, 0, 1280, 720)));
+        terminal
+    }
+
     fn drain_screen(
         terminal: &mut TerminalService,
         screen: &mut [Cell; DEFAULT_COLUMNS * DEFAULT_ROWS],
@@ -920,7 +929,7 @@ mod tests {
 
     #[test]
     fn terminal_graph_forwards_one_command_and_renders_output() {
-        let mut terminal = TerminalService::new();
+        let mut terminal = bound_terminal();
         let mut session = SessionService::new();
         let mut flow = FlowService::new();
         let mut command = [0; MAX_LINE_BYTES];
@@ -953,7 +962,7 @@ mod tests {
 
     #[test]
     fn completion_rows_are_erased_from_the_terminal_surface_after_dismissal() {
-        let mut terminal = TerminalService::new();
+        let mut terminal = bound_terminal();
         let mut session = SessionService::new();
         let mut command = [0; MAX_LINE_BYTES];
         let mut output = ShellOutput::new();

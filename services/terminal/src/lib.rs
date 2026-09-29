@@ -228,6 +228,9 @@ pub struct TerminalService {
     /// it with `select` from the surface an event arrived for.
     current: usize,
     render_cursor: usize,
+    /// Last desktop appearance flags received, applied to every session
+    /// created afterwards (a new tab or pane must not start dark/animated).
+    appearance: u16,
 }
 
 const _: () =
@@ -241,7 +244,7 @@ impl TerminalService {
         sessions[0].generation = 1;
         let mut panes = [Pane::EMPTY; MAX_TERMINAL_PANES];
         panes[0].in_use = true;
-        Self { sessions, panes, current: 0, render_cursor: 0 }
+        Self { sessions, panes, current: 0, render_cursor: 0, appearance: 0 }
     }
 
     fn active_slot_of(&self, pane: usize) -> usize {
@@ -364,6 +367,8 @@ impl TerminalService {
         };
         let session = &mut self.sessions[slot];
         session.terminal = TerminalState::new();
+        session.terminal.set_reduced_motion(self.appearance & APPEARANCE_REDUCED_MOTION != 0);
+        session.terminal.set_light_theme(self.appearance & APPEARANCE_LIGHT_THEME != 0);
         session.open = true;
         session.owner = pane as u8;
         session.generation = session.generation.wrapping_add(1).max(1);
@@ -386,13 +391,12 @@ impl TerminalService {
             self.panes[pane].surface = SurfaceHandle::EMPTY;
             return closes;
         }
-        for slot in 0..MAX_TERMINAL_SESSIONS {
+        for (slot, close) in closes.iter_mut().enumerate() {
             if self.owns(pane, slot) {
                 let session = &mut self.sessions[slot];
                 session.open = false;
                 session.generation = session.generation.wrapping_add(1).max(1);
-                closes[slot] =
-                    Some(IpcBytes::empty(MessageKind::SessionClose).with_session(slot as u8));
+                *close = Some(IpcBytes::empty(MessageKind::SessionClose).with_session(slot as u8));
             }
         }
         self.panes[pane] = Pane::EMPTY;
@@ -414,6 +418,8 @@ impl TerminalService {
         let slot = self.sessions.iter().position(|session| !session.open)?;
         let session = &mut self.sessions[slot];
         session.terminal = TerminalState::new();
+        session.terminal.set_reduced_motion(self.appearance & APPEARANCE_REDUCED_MOTION != 0);
+        session.terminal.set_light_theme(self.appearance & APPEARANCE_LIGHT_THEME != 0);
         session.terminal.resize(columns, rows);
         session.open = true;
         session.owner = self.current as u8;
@@ -486,6 +492,7 @@ impl TerminalService {
         // switches to later must already match instead of showing its old
         // appearance until it next redraws.
         if let Some(flags) = event.appearance_flags() {
+            self.appearance = flags;
             for session in &mut self.sessions {
                 session.terminal.set_reduced_motion(flags & APPEARANCE_REDUCED_MOTION != 0);
                 session.terminal.set_light_theme(flags & APPEARANCE_LIGHT_THEME != 0);
