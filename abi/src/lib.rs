@@ -83,7 +83,9 @@ pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
 /// 11: T3c session tags on Terminal/Session/Flow IPC (ADR-0090) and S4 Atrium settings edge (ADR-0091); both PRs shipped as 10.
 /// 12: wheel delta on `PointerEvent`/`MessageKind::Pointer` (ADR-0092).
-pub const ABI_VERSION: u16 = 13;
+/// 13: `SYSTEM_INFO_SYSCALL` (ADR-0093).
+/// 14: `AtriumSurfaceRequest.surface` names the Terminal pane a request describes (ADR-0094).
+pub const ABI_VERSION: u16 = 14;
 /// The product version/build string shown by the Terminal `version` command
 /// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
 /// release; it is not tied to `ABI_VERSION`.

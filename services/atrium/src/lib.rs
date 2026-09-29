@@ -1542,7 +1542,9 @@ impl Atrium {
         if !client.is_valid() {
             return Err(AtriumError::InvalidSurface);
         }
-        if self.surface_for_client(client, app).is_some() {
+        // Terminal alone may own several tiled surfaces (T3b, #97); every
+        // other app keeps one surface per client.
+        if app != AppId::Terminal && self.surface_for_client(client, app).is_some() {
             return Err(AtriumError::AlreadyRegistered);
         }
         if !self.surfaces.iter().any(Option::is_none) {
@@ -2158,6 +2160,13 @@ impl Atrium {
                 .find_leaf(Some(first), surface_id)
                 .or_else(|| self.find_leaf(Some(second), surface_id)),
         }
+    }
+
+    /// True while a split pane is waiting for its application (T3b, #97):
+    /// launching Terminal into it attaches a new Terminal surface instead of
+    /// refocusing the existing one.
+    pub fn has_empty_leaf(&self) -> bool {
+        self.find_empty_leaf(self.layout_root).is_some()
     }
 
     fn find_empty_leaf(&self, node: Option<usize>) -> Option<usize> {
