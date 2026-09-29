@@ -1105,6 +1105,10 @@ try {
             if (-not (Wait-QmpSettingsCategory $qmp $settingsAboutFrame 3 $TimeoutSeconds)) {
                 throw 'Down did not move the Settings selection to the About category.'
             }
+            # #95: the About page's CPU count must match -Cpus (ADR-0093).
+            if (-not (Wait-ProofMarker "LogOS vNext: Atrium about cpus=$Cpus " $TimeoutSeconds)) {
+                throw "Settings About did not report cpus=$Cpus."
+            }
             Send-QmpKey $qmp 'esc'
             Start-Sleep -Milliseconds 300
             1..4 | ForEach-Object {

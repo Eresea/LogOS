@@ -1124,6 +1124,28 @@ pub fn wall_time() -> logos_abi::WallTime {
     }
 }
 
+/// System-info reading (ADR-0093), through `SYSTEM_INFO_SYSCALL`. Host builds
+/// return an empty reading.
+#[allow(dead_code)]
+pub fn system_info() -> logos_abi::SystemInfo {
+    #[cfg(target_os = "none")]
+    {
+        let mut raw = logos_abi::SYSTEM_INFO_SYSCALL;
+        unsafe {
+            asm!(
+                "int 49",
+                inout("rax") raw,
+                options(preserves_flags),
+            );
+        }
+        logos_abi::SystemInfo::unpack(raw as u64)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        logos_abi::SystemInfo { cpus: 1, mem_total_mib: 0, mem_used_mib: 0 }
+    }
+}
+
 #[allow(dead_code)]
 pub fn wait_on_capability(capability: logos_abi::CapabilityHandle) {
     wait_on_capabilities(core::slice::from_ref(&capability));

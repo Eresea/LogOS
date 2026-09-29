@@ -93,3 +93,4 @@
 | [0091](0091-atrium-settings-persistence.md) | Accepted | Atrium's settings record persists across reboots through a new Atrium↔User endpoint, stored as an opaque tail section of User's canonical snapshot (ADR-0064); supersedes ADR-0085's runtime-only note |
 | [0090](0090-per-session-flow-state.md) | Accepted | Per-session Terminal line-editor and Flow interpreter state, tagged on IPC, with one shared arbitration queue for Flow's single-flight clients |
 | [0092](0092-mouse-wheel-input.md) | Accepted | IntelliMouse (ID 3) wheel negotiation in the PS/2 driver, 4-byte packet decode, and a wheel delta on `PointerEvent` (ABI_VERSION 12); Atrium routes it to the focused surface and Terminal scrolls its scrollback |
+| [0093](0093-system-info-query.md) | Accepted | `SYSTEM_INFO_SYSCALL` (22): open, read-only, no-pointer query returning online CPU count and physical memory total/used in MiB packed in `rax` (ABI_VERSION 13); shown on Settings About |
