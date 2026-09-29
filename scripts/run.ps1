@@ -1417,13 +1417,14 @@ try {
         if (-not (Wait-ProofMarker 'LogOS vNext: LockScreen surface ready' $TimeoutSeconds)) {
             throw 'Second boot did not recreate LockScreen.'
         }
+        # Only -SystemProof toggles the light theme, so only it can expect the reload.
         # S4 (#81, ADR-0091): settings persistence proof. The first boot
         # above toggled the light theme (durably saved -- see the
         # 'Atrium settings saved' wait before quitting) before this reboot
         # on the same disk image. Atrium logs which value it loaded back
         # from User before its first render, so this is a log-marker check
         # of the persisted setting, not a pixel match.
-        if (-not (Wait-ProofMarker 'LogOS vNext: Atrium settings loaded light_theme=1' $TimeoutSeconds)) {
+        if ($SystemProof -and -not (Wait-ProofMarker 'LogOS vNext: Atrium settings loaded light_theme=1' $TimeoutSeconds)) {
             throw 'Settings did not persist across reboot: light theme was not loaded back as on.'
         }
         $loginMarker = Get-ProofMarkerCount 'LogOS vNext: LockScreen login PASS'
