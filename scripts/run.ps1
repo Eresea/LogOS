@@ -354,6 +354,21 @@ function Send-QmpPointerButton {
     Start-Sleep -Milliseconds 100
 }
 
+function Send-QmpWheel {
+    # One notch per call: QMP wheel buttons are press/release pairs (#90).
+    param([hashtable]$Qmp, [ValidateSet('wheel-up', 'wheel-down')][string]$Direction)
+    foreach ($down in $true, $false) {
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{
+            execute = 'input-send-event'
+            arguments = @{
+                device = 'video0'
+                events = @(@{ type = 'btn'; data = @{ button = $Direction; down = $down } })
+            }
+        } | Out-Null
+    }
+    Start-Sleep -Milliseconds 100
+}
+
 function Wait-ProofMarker {
     param([string]$Marker, [int]$TimeoutSeconds)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -1181,6 +1196,33 @@ try {
             if (Test-BytesEqual $bottomContent $scrolledContent) {
                 throw 'Scrolling up did not change the Terminal framebuffer (scrollback not visible).'
             }
+
+            # #90: mouse-wheel scrollback. Back to the live view first, then
+            # wheel up (must scroll, so the frame differs from live) and
+            # wheel down (must return to exactly the live frame).
+            Send-QmpKey $qmp 'shift-pgdn'
+            $terminalWheelFrame = Join-Path $repoRoot "target\qemu-terminal-wheel-$PID.ppm"
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalBottomFrame $TimeoutSeconds)) {
+                throw 'Terminal did not settle on the live view before the wheel proof.'
+            }
+            $wheelLiveContent = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalBottomFrame))
+            1..3 | ForEach-Object { Send-QmpWheel $qmp 'wheel-up' }
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalWheelFrame $TimeoutSeconds)) {
+                throw 'Terminal did not settle after wheel-up.'
+            }
+            $wheelUpContent = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalWheelFrame))
+            if (Test-BytesEqual $wheelLiveContent $wheelUpContent) {
+                throw 'Mouse wheel up did not scroll the Terminal scrollback.'
+            }
+            1..3 | ForEach-Object { Send-QmpWheel $qmp 'wheel-down' }
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalBottomFrame $TimeoutSeconds)) {
+                throw 'Terminal did not settle after wheel-down.'
+            }
+            $wheelDownContent = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($terminalBottomFrame))
+            if (-not (Test-BytesEqual $wheelLiveContent $wheelDownContent)) {
+                throw 'Mouse wheel down did not return the Terminal to the live view.'
+            }
+            Write-Host "Mouse wheel scrolled the Terminal scrollback (frame: $terminalWheelFrame)"
 
             # #76: T3 sessions. Snap back to the live view (scrolled away
             # above), open a second tab with Ctrl+Shift+T, type a marker

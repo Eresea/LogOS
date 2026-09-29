@@ -150,6 +150,9 @@ const POINTER_COMMAND: u8 = 0xd4;
 const POINTER_ENABLE_AUX: u8 = 0xa8;
 const POINTER_ENABLE_STREAM: u8 = 0xf4;
 const POINTER_ACK: u8 = 0xfa;
+const POINTER_SET_SAMPLE_RATE: u8 = 0xf3;
+const POINTER_GET_ID: u8 = 0xf2;
+const POINTER_ID_INTELLIMOUSE: u8 = 3;
 const ACPI_SHUTDOWN_PORT: u16 = 0x604;
 const RESET_CONTROL_PORT: u16 = 0xcf9;
 const TIMER_VECTOR: u8 = 32;
@@ -205,6 +208,7 @@ static KEYBOARD_RING: AtomicUsize = AtomicUsize::new(0);
 static KEYBOARD_IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_IRQ_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static POINTER_RING: AtomicUsize = AtomicUsize::new(0);
+static POINTER_WHEEL: AtomicBool = AtomicBool::new(false);
 static POINTER_IRQ_AVAILABLE: AtomicBool = AtomicBool::new(false);
 static POINTER_IRQ_ENABLED: AtomicBool = AtomicBool::new(false);
 static POINTER_IRQ_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -1178,6 +1182,11 @@ pub(crate) fn publish_keyboard_ring(address: usize) {
 }
 
 pub(crate) fn publish_pointer_ring(address: usize) {
+    if address != 0 {
+        // The frame is identity-mapped in the kernel root (see the IRQ handler).
+        unsafe { &*(address as *const logos_abi::PointerByteRing) }
+            .set_wheel(POINTER_WHEEL.load(Ordering::Acquire));
+    }
     POINTER_RING.store(address, Ordering::Release);
 }
 
@@ -1901,48 +1910,58 @@ unsafe fn wait_keyboard_ack() -> bool {
     false
 }
 
-fn configure_pointer() -> bool {
-    unsafe {
-        let mut ready = false;
-        for _ in 0..1_000_000 {
-            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
-                out_port(KEYBOARD_COMMAND_PORT, POINTER_ENABLE_AUX);
-                ready = true;
-                break;
-            }
-        }
-        if !ready {
-            return false;
-        }
-        ready = false;
-        for _ in 0..1_000_000 {
-            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
-                out_port(KEYBOARD_COMMAND_PORT, POINTER_COMMAND);
-                ready = true;
-                break;
-            }
-        }
-        if !ready {
-            return false;
-        }
-        ready = false;
-        for _ in 0..1_000_000 {
-            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_INPUT_FULL == 0 {
-                out_port(KEYBOARD_DATA_PORT, POINTER_ENABLE_STREAM);
-                ready = true;
-                break;
-            }
-        }
-        if !ready {
-            return false;
-        }
-        for _ in 0..1_000_000 {
-            if in_port(KEYBOARD_STATUS_PORT) & KEYBOARD_OUTPUT_FULL != 0 {
-                return in_port(KEYBOARD_DATA_PORT) == POINTER_ACK;
-            }
+/// Wait for the controller input buffer to drain, then write one byte.
+unsafe fn controller_write(port: u16, byte: u8) -> bool {
+    for _ in 0..1_000_000 {
+        if unsafe { in_port(KEYBOARD_STATUS_PORT) } & KEYBOARD_INPUT_FULL == 0 {
+            unsafe { out_port(port, byte) };
+            return true;
         }
     }
     false
+}
+
+unsafe fn pointer_read() -> Option<u8> {
+    for _ in 0..1_000_000 {
+        if unsafe { in_port(KEYBOARD_STATUS_PORT) } & KEYBOARD_OUTPUT_FULL != 0 {
+            return Some(unsafe { in_port(KEYBOARD_DATA_PORT) });
+        }
+    }
+    None
+}
+
+/// Send one byte to the mouse and require an ACK.
+unsafe fn pointer_send(byte: u8) -> bool {
+    unsafe {
+        controller_write(KEYBOARD_COMMAND_PORT, POINTER_COMMAND)
+            && controller_write(KEYBOARD_DATA_PORT, byte)
+            && pointer_read() == Some(POINTER_ACK)
+    }
+}
+
+/// IntelliMouse negotiation (ADR-0092): sample rates 200, 100, 80, then
+/// read the device ID. ID 3 means 4-byte packets with a wheel; anything else
+/// (including 0) keeps plain 3-byte packets.
+unsafe fn negotiate_pointer_wheel() -> bool {
+    unsafe {
+        for rate in [200, 100, 80] {
+            if !(pointer_send(POINTER_SET_SAMPLE_RATE) && pointer_send(rate)) {
+                return false;
+            }
+        }
+        pointer_send(POINTER_GET_ID) && pointer_read() == Some(POINTER_ID_INTELLIMOUSE)
+    }
+}
+
+fn configure_pointer() -> bool {
+    unsafe {
+        if !controller_write(KEYBOARD_COMMAND_PORT, POINTER_ENABLE_AUX) {
+            return false;
+        }
+        // Best effort: a failed negotiation leaves a working 3-byte mouse.
+        POINTER_WHEEL.store(negotiate_pointer_wheel(), Ordering::Release);
+        pointer_send(POINTER_ENABLE_STREAM)
+    }
 }
 
 pub(crate) fn enable_keyboard_irq() {
