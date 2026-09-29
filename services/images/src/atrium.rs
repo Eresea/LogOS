@@ -1660,6 +1660,12 @@ pub extern "C" fn _start() -> ! {
                 if let Some(surface) = named {
                     // A same-surface repeat just reconfirms; capture the
                     // latest tab state for that surface unconditionally.
+                    // A pane's first report draws its tab strip; later
+                    // changes are drawn by the input that caused them.
+                    if terminal_tab_state(surface.reference) == 0 && terminal_request.tab_state != 0
+                    {
+                        pending_app_render = true;
+                    }
                     set_terminal_tab_state(surface.reference, terminal_request.tab_state);
                     queue_terminal_response(
                         &mut pending_client_response,
@@ -1673,7 +1679,6 @@ pub extern "C" fn _start() -> ! {
                     if let Some(slot) = app_scene_slot(surface.reference) {
                         last_terminal_bounds[slot] = surface.bounds;
                     }
-                    pending_app_render = true;
                 } else if terminal_request.surface.is_valid() {
                     // A pane closed while its report was in flight.
                     queue_terminal_response(
