@@ -701,12 +701,24 @@ fn render_app_scene(
     let tree = if surface.app == logos_atrium::AppId::Settings {
         let tree = unsafe { &mut *core::ptr::addr_of_mut!(SETTINGS_TREE) };
         // Only query the manager while About is open; other pages never show it.
-        let about_services = if atrium.settings_page() == logos_atrium::SettingsPage::About {
-            about_services_snapshot()
-        } else {
-            [ServiceManagerRecord::EMPTY; logos_atrium::MAX_ABOUT_SERVICES]
-        };
-        if !logos_atrium::build_settings_scene(tree, surface.bounds, atrium, &about_services) {
+        let (about_services, system) =
+            if atrium.settings_page() == logos_atrium::SettingsPage::About {
+                let system = common::system_info();
+                proof_about_system(system);
+                (about_services_snapshot(), system)
+            } else {
+                (
+                    [ServiceManagerRecord::EMPTY; logos_atrium::MAX_ABOUT_SERVICES],
+                    logos_abi::SystemInfo { cpus: 0, mem_total_mib: 0, mem_used_mib: 0 },
+                )
+            };
+        if !logos_atrium::build_settings_scene(
+            tree,
+            surface.bounds,
+            atrium,
+            &about_services,
+            system,
+        ) {
             return false;
         }
         tree
@@ -828,6 +840,42 @@ fn proof_settings_loaded(light_theme: bool) {
         b"LogOS vNext: Atrium settings loaded light_theme=0"
     });
 }
+
+/// QEMU proof marker (S3b, #95, ADR-0093): the system-info reading shown on
+/// the About page, once per boot, so the proof can compare `cpus=` to `-Cpus`.
+#[cfg(feature = "qemu-proof")]
+fn proof_about_system(info: logos_abi::SystemInfo) {
+    use core::fmt::Write as _;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    struct ProofLine {
+        bytes: [u8; 96],
+        length: usize,
+    }
+    impl core::fmt::Write for ProofLine {
+        fn write_str(&mut self, value: &str) -> core::fmt::Result {
+            let length = value.len().min(self.bytes.len().saturating_sub(self.length));
+            self.bytes[self.length..self.length + length]
+                .copy_from_slice(&value.as_bytes()[..length]);
+            self.length += length;
+            if length == value.len() { Ok(()) } else { Err(core::fmt::Error) }
+        }
+    }
+    let mut line = ProofLine { bytes: [0; 96], length: 0 };
+    let _ = write!(
+        line,
+        "LogOS vNext: Atrium about cpus={} mem_total={} mem_used={}",
+        info.cpus, info.mem_total_mib, info.mem_used_mib,
+    );
+    common::proof_line(&line.bytes[..line.length]);
+}
+
+#[cfg(not(feature = "qemu-proof"))]
+fn proof_about_system(_info: logos_abi::SystemInfo) {}
 
 struct SurfaceCommandQueue {
     requests: [Option<GuiSurfaceRequest>; MAX_PENDING_SURFACE_COMMANDS],

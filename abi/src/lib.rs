@@ -19,6 +19,7 @@ mod package_ipc;
 mod runtime_abi;
 mod service_manager;
 mod storage_api;
+mod sysinfo;
 mod user_api;
 mod walltime;
 
@@ -66,6 +67,7 @@ pub use storage_api::{
     STORAGE_API_MAP_LENGTH_BYTES, STORAGE_API_RESPONSE_DATA_BYTES, STORAGE_API_VERSION,
     StorageApiError, StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus,
 };
+pub use sysinfo::{SYSTEM_INFO_MAX_MIB, SystemInfo};
 pub use user_api::{
     ATRIUM_SETTINGS_RECORD_BYTES, AtriumSettingsOperation, AtriumSettingsRequest,
     AtriumSettingsResponse, AtriumSettingsStatus, NamespaceCapability, NamespaceCapabilityHandle,
@@ -81,7 +83,7 @@ pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
 /// 11: T3c session tags on Terminal/Session/Flow IPC (ADR-0090) and S4 Atrium settings edge (ADR-0091); both PRs shipped as 10.
 /// 12: wheel delta on `PointerEvent`/`MessageKind::Pointer` (ADR-0092).
-pub const ABI_VERSION: u16 = 12;
+pub const ABI_VERSION: u16 = 13;
 /// The product version/build string shown by the Terminal `version` command
 /// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
 /// release; it is not tied to `ABI_VERSION`.
@@ -316,6 +318,7 @@ pub const EVENT_SYSCALL: usize = 18;
 pub const CURRENT_TICKS_SYSCALL: usize = 19;
 pub const DEBUG_LINE_SYSCALL: usize = 20;
 pub const WALL_TIME_SYSCALL: usize = 21;
+pub const SYSTEM_INFO_SYSCALL: usize = 22;
 /// Ticks per second for the bounded APIC scheduler timer; see `arch::calibrate_timer`.
 pub const WALL_CLOCK_TICKS_PER_SECOND: u64 = 100;
 pub const MANAGER_SYSCALL: usize = 12;

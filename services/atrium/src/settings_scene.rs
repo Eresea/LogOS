@@ -1,4 +1,4 @@
-use logos_abi::{GuiRect, ManagerState, ServiceManagerRecord};
+use logos_abi::{GuiRect, ManagerState, ServiceManagerRecord, SystemInfo};
 use logos_ui::{UiBlueprint, UiComponentTree, UiIcon, UiNodeKind, UiStyle, UiStyleList, UiText};
 
 use crate::{
@@ -207,12 +207,14 @@ fn offset(bounds: GuiRect, rect: GuiRect) -> GuiRect {
 /// list on the left and the selected page on the right. `about_services` is
 /// a snapshot of the service-manager query (see
 /// `services/images/src/system.rs`, which the caller reuses rather than
-/// duplicating), shown only while the About page is open.
+/// duplicating), shown only while the About page is open, as is `system`
+/// (the ADR-0093 CPU and memory query).
 pub fn build_settings_scene(
     tree: &mut UiComponentTree,
     bounds: GuiRect,
     atrium: &Atrium,
     about_services: &[ServiceManagerRecord],
+    system: SystemInfo,
 ) -> bool {
     if tree.tree().len() != NODE_COUNT && !mount(tree) {
         return false;
@@ -410,7 +412,7 @@ pub fn build_settings_scene(
             return false;
         }
     }
-    build_about(tree, bounds, current == SettingsPage::About, about_services)
+    build_about(tree, bounds, current == SettingsPage::About, about_services, system)
 }
 
 /// Renders one `NAME: state` service row, truncated to fit a label's text
@@ -442,25 +444,75 @@ fn about_service_line(buffer: &mut [u8], record: &ServiceManagerRecord) -> usize
     len
 }
 
-/// Lays out the About page: the version line and up to `MAX_ABOUT_SERVICES`
+fn push_bytes(buffer: &mut [u8], len: &mut usize, text: &[u8]) {
+    let n = text.len().min(buffer.len() - *len);
+    buffer[*len..*len + n].copy_from_slice(&text[..n]);
+    *len += n;
+}
+
+fn push_number(buffer: &mut [u8], len: &mut usize, mut value: u32) {
+    let mut digits = [0u8; 10];
+    let mut count = 0;
+    loop {
+        digits[count] = b'0' + (value % 10) as u8;
+        count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    digits[..count].reverse();
+    push_bytes(buffer, len, &digits[..count]);
+}
+
+/// Renders the About system row, e.g. `4 CPUs - 512 MiB, 38 MiB used`. A
+/// zero memory total (no reading) leaves just the CPU part.
+fn about_system_line(buffer: &mut [u8], info: SystemInfo) -> usize {
+    let mut len = 0;
+    push_number(buffer, &mut len, u32::from(info.cpus));
+    push_bytes(buffer, &mut len, if info.cpus == 1 { b" CPU" } else { b" CPUs" });
+    if info.mem_total_mib > 0 {
+        push_bytes(buffer, &mut len, b" - ");
+        push_number(buffer, &mut len, info.mem_total_mib);
+        push_bytes(buffer, &mut len, b" MiB, ");
+        push_number(buffer, &mut len, info.mem_used_mib);
+        push_bytes(buffer, &mut len, b" MiB used");
+    }
+    len
+}
+
+/// Lays out the About page: the version line, the system row and up to `MAX_ABOUT_SERVICES`
 /// service rows, or hides them on other pages. Both reuse node slots that
 /// belong to the select/popover machinery (`SELECT_VALUE`, `OPTION_BASE..`):
 /// About never opens a select, so those slots are otherwise idle, and reusing
 /// them keeps the shared tree inside `MAX_GUI_NODES` instead of growing it
-/// per Settings page.
+/// per Settings page. The system row reuses `SELECT_CHEVRON` the same way
+/// (its "v" text is restored when leaving About).
 fn build_about(
     tree: &mut UiComponentTree,
     bounds: GuiRect,
     shown: bool,
     services: &[ServiceManagerRecord],
+    system: SystemInfo,
 ) -> bool {
     // Other pages own these slots for their own select/popover (already laid
-    // out above); touch nothing so their bounds stand.
+    // out above); touch nothing so their bounds stand, except the chevron's
+    // text, which About overwrites.
     if !shown {
-        return true;
+        return set_text(tree, SELECT_CHEVRON, b"v");
     }
+    let mut system_line = [0u8; 48];
+    let system_len = about_system_line(&mut system_line, system);
+    let system_row = GuiRect::new(
+        SETTINGS_SELECT_BOUNDS.x,
+        SETTINGS_SELECT_BOUNDS.y + SETTINGS_SELECT_BOUNDS.height as i32,
+        360,
+        24,
+    );
     if !set_bounds(tree, SELECT_VALUE, offset(bounds, SETTINGS_SELECT_BOUNDS))
         || !set_text(tree, SELECT_VALUE, logos_abi::LOGOS_VERSION)
+        || !set_bounds(tree, SELECT_CHEVRON, offset(bounds, system_row))
+        || !set_text(tree, SELECT_CHEVRON, &system_line[..system_len])
     {
         return false;
     }
@@ -613,6 +665,10 @@ mod tests {
             .settings_input(&InputMessage::pointer(x as i16, y as i16, buttons, state).unwrap());
     }
 
+    /// Worst-case system row: three-digit CPUs and eight-digit MiB figures.
+    const INFO: SystemInfo =
+        SystemInfo { cpus: 255, mem_total_mib: 99_999_999, mem_used_mib: 99_999_999 };
+
     /// A full, near-worst-case service list for the About page's scene
     /// budget: `MAX_ABOUT_SERVICES` rows, each with a long name and the
     /// longest state label (`starting`).
@@ -638,7 +694,10 @@ mod tests {
         let mut sink = ClearCountingSink(0);
         let about = about_worst_services();
         let mut check = |atrium: &Atrium, state: &str| {
-            assert!(build_settings_scene(&mut tree, bounds, atrium, &about), "{state}: build");
+            assert!(
+                build_settings_scene(&mut tree, bounds, atrium, &about, INFO),
+                "{state}: build"
+            );
             let scene = emit(surface, 1, &tree, UiSceneTheme::DEFAULT)
                 .unwrap_or_else(|error| panic!("{state}: {error:?}"));
             let upserts = scene
@@ -715,7 +774,7 @@ mod tests {
         atrium.authenticate();
         let mouse = settings_category_bounds(1);
         pointer(&mut atrium, mouse.x + 4, mouse.y + 4, false);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[], INFO));
         let state = |tree: &UiComponentTree, index: usize| {
             let node = tree.tree().node(tree.tree().handle_at(index).unwrap()).unwrap();
             (node.interaction.is_focused(), node.interaction.is_hovered())
@@ -727,7 +786,7 @@ mod tests {
         assert_eq!(state(&tree, mouse_row), (false, true));
 
         pointer(&mut atrium, 900, 600, false);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[], INFO));
         assert_eq!(state(&tree, mouse_row), (false, false));
     }
 
@@ -750,7 +809,7 @@ mod tests {
         atrium.authenticate();
         let row = settings_category_bounds(2);
         pointer(&mut atrium, row.x + 4, row.y + 4, true);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[], INFO));
         let blue = Accent::Blue.colors().focus;
         assert_eq!(fill_color_of(&tree, atrium.app_theme(), CATEGORY_BASE + 6), blue);
 
@@ -763,7 +822,7 @@ mod tests {
         assert_eq!(atrium.home_theme().accent, Accent::Teal.colors().accent);
         assert_eq!(atrium.app_theme().accent, 0x9f3b3b, "close control stays red");
         // The next Settings frame paints the selected row in the new accent.
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[], INFO));
         assert_eq!(fill_color_of(&tree, atrium.app_theme(), CATEGORY_BASE + 6), teal_focus);
         // The swatch fills are the fixed palette, independent of the theme.
         assert_eq!(
@@ -793,7 +852,7 @@ mod tests {
         assert!(!atrium.fps_overlay());
         assert!(atrium.reduced_motion());
         assert_eq!(atrium.appearance_flags(), logos_abi::APPEARANCE_REDUCED_MOTION);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[], INFO));
         assert!(tree.animator().reduced_motion());
         assert!(crate::build_home_scene(&mut home, &atrium, 0, wall));
         assert!(home.animator().reduced_motion());
@@ -815,7 +874,7 @@ mod tests {
         );
         assert_eq!(atrium.app_theme().surface, UiSceneTheme::LIGHT.surface);
         assert_eq!(atrium.home_theme().surface, UiSceneTheme::LIGHT.surface);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[], INFO));
         assert_eq!(text_of(&tree, SELECT_VALUE), b"Light theme");
         let select_track = tree.tree().handle_at(SELECT).unwrap();
         assert!(tree.tree().node(select_track).unwrap().interaction.is_focused());
@@ -829,7 +888,7 @@ mod tests {
         // the reused slots are idle everywhere but the Appearance page.
         let keyboard_row = settings_category_bounds(0);
         pointer(&mut atrium, keyboard_row.x + 4, keyboard_row.y + 4, true);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[], INFO));
         assert_eq!(text_of(&tree, SELECT_VALUE), b"AZERTY");
         assert!(!tree.tree().node(select_track).unwrap().interaction.is_focused());
     }
@@ -853,7 +912,7 @@ mod tests {
         let appearance_row = settings_category_bounds(2);
         pointer(&mut atrium, appearance_row.x + 4, appearance_row.y + 4, true);
         assert_eq!(atrium.settings_page(), SettingsPage::Appearance);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[]));
+        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &[], INFO));
 
         let card = tree.tree().node(tree.tree().handle_at(APPEARANCE_CARD).unwrap()).unwrap();
         let card_bottom = card.bounds.y + card.bounds.height as i32;
@@ -884,8 +943,15 @@ mod tests {
         // services[2..] stay empty: fewer than MAX_ABOUT_SERVICES services
         // must leave their rows hidden, not stale text.
 
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &services));
+        assert!(build_settings_scene(
+            &mut tree,
+            FULLSCREEN_SURFACE_BOUNDS,
+            &atrium,
+            &services,
+            INFO
+        ));
         assert_eq!(text_of(&tree, SELECT_VALUE), logos_abi::LOGOS_VERSION);
+        assert_eq!(text_of(&tree, SELECT_CHEVRON), b"255 CPUs - 99999999 MiB, 99999999 MiB used");
         assert_eq!(text_of(&tree, OPTION_BASE), b"input: running");
         assert_eq!(text_of(&tree, OPTION_BASE + 1), b"display: starting");
         for index in 2..MAX_ABOUT_SERVICES {
@@ -897,11 +963,32 @@ mod tests {
         // value there instead) and every service row.
         let keyboard_row = settings_category_bounds(0);
         pointer(&mut atrium, keyboard_row.x + 4, keyboard_row.y + 4, true);
-        assert!(build_settings_scene(&mut tree, FULLSCREEN_SURFACE_BOUNDS, &atrium, &services));
+        assert!(build_settings_scene(
+            &mut tree,
+            FULLSCREEN_SURFACE_BOUNDS,
+            &atrium,
+            &services,
+            INFO
+        ));
         assert_ne!(text_of(&tree, SELECT_VALUE), logos_abi::LOGOS_VERSION);
+        assert_eq!(text_of(&tree, SELECT_CHEVRON), b"v");
         for index in 0..MAX_ABOUT_SERVICES {
             let handle = tree.tree().handle_at(OPTION_BASE + index).unwrap();
             assert!(tree.tree().node(handle).unwrap().bounds.is_empty(), "row {index} hidden");
         }
+    }
+
+    #[test]
+    fn about_system_line_formats_fixed_inputs() {
+        let line = |info: SystemInfo| {
+            let mut buffer = [0u8; 48];
+            let len = about_system_line(&mut buffer, info);
+            buffer[..len].to_vec()
+        };
+        assert_eq!(
+            line(SystemInfo { cpus: 4, mem_total_mib: 512, mem_used_mib: 38 }),
+            b"4 CPUs - 512 MiB, 38 MiB used"
+        );
+        assert_eq!(line(SystemInfo { cpus: 1, mem_total_mib: 0, mem_used_mib: 0 }), b"1 CPU");
     }
 }

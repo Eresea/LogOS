@@ -3463,6 +3463,25 @@ pub(crate) fn bind_kernel_global_allocator(frames: &SmpFrameAllocator) -> Result
     KERNEL_GLOBAL_ALLOCATOR.bind(KernelHeap::new(frames, slots, records, leases))
 }
 
+/// Last `(total, used)` frame counts seen by [`frame_totals`].
+#[cfg(target_os = "uefi")]
+static FRAME_TOTALS: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+
+/// `(total, used)` physical frames for the system-info query (ADR-0093).
+/// Non-blocking so it is safe from the syscall path: if the heap lock is
+/// held it returns the previous snapshot. Frames cached per CPU count as used.
+#[cfg(target_os = "uefi")]
+pub(crate) fn frame_totals() -> (usize, usize) {
+    if let Some(bound) = KERNEL_GLOBAL_ALLOCATOR.heap.try_lock()
+        && let Some(heap) = bound.as_ref()
+    {
+        let total = heap.frames.capacity();
+        FRAME_TOTALS[0].store(total, Ordering::Relaxed);
+        FRAME_TOTALS[1].store(total.saturating_sub(heap.frames.available()), Ordering::Relaxed);
+    }
+    (FRAME_TOTALS[0].load(Ordering::Relaxed), FRAME_TOTALS[1].load(Ordering::Relaxed))
+}
+
 #[cfg(target_os = "uefi")]
 fn reclaim_kernel_frame_caches(_level: PressureLevel) -> usize {
     let Some(bound) = KERNEL_GLOBAL_ALLOCATOR.heap.try_lock() else {

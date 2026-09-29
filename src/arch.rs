@@ -2182,6 +2182,22 @@ pub(crate) fn wall_time() -> logos_abi::WallTime {
     logos_abi::advance_wall_time(anchor, elapsed_seconds)
 }
 
+/// The bounded read-only system-info query (ADR-0093): online CPU count plus
+/// physical memory total and used, in MiB. Memory is a lock-free snapshot of
+/// the frame accounting (see `memory::frame_totals`).
+pub(crate) fn system_info() -> logos_abi::SystemInfo {
+    #[cfg(target_os = "uefi")]
+    let (total, used) = crate::memory::frame_totals();
+    #[cfg(not(target_os = "uefi"))]
+    let (total, used) = (0, 0);
+    let mib = |frames: usize| (frames / (0x10_0000 / 4096)) as u32;
+    logos_abi::SystemInfo {
+        cpus: CPU_COUNT.load(Ordering::Acquire).min(255) as u8,
+        mem_total_mib: mib(total),
+        mem_used_mib: mib(used),
+    }
+}
+
 fn write_gs(local: &CpuLocal) {
     unsafe { wrmsr(0xc000_0101, local as *const CpuLocal as u64) };
 }
