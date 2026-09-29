@@ -461,7 +461,7 @@ function Framebuffer-HasHomeSelectedCard {
     $x = 200
     $y = 248
     $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
-    return $bytes[$index] -eq 75 -and $bytes[$index + 1] -eq 130 -and $bytes[$index + 2] -eq 242
+    return $bytes[$index] -eq 62 -and $bytes[$index + 1] -eq 114 -and $bytes[$index + 2] -eq 217
 }
 
 function Framebuffer-HasSystemStatusBar {
@@ -577,13 +577,13 @@ function Framebuffer-SettingsCategorySelected {
     $layout = Get-PpmLayout $bytes
     # Category rows start at surface (32, 164) and step 48 px (44 + 4 gap).
     # Sample each row's left padding, clear of its icon and label: the
-    # selected row carries the focus fill (0x4b82f2), idle rows show the
+    # selected row carries the focus fill (0x3e72d9), idle rows show the
     # navigation pane (0x182535) through their transparent fill.
     for ($row = 0; $row -lt 4; $row++) {
         $x = [int]$groups[1].Value + 36
         $y = [int]$groups[2].Value + 164 + 48 * $row + 22
         $index = $layout.Offset + (($y * $layout.Width + $x) * 3)
-        $accent = $bytes[$index] -eq 75 -and $bytes[$index + 1] -eq 130 -and $bytes[$index + 2] -eq 242
+        $accent = $bytes[$index] -eq 62 -and $bytes[$index + 1] -eq 114 -and $bytes[$index + 2] -eq 217
         $pane = $bytes[$index] -eq 24 -and $bytes[$index + 1] -eq 37 -and $bytes[$index + 2] -eq 53
         if (($row -eq $Selected -and -not $accent) -or ($row -ne $Selected -and -not $pane)) {
             return $false
