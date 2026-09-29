@@ -43,10 +43,10 @@ pub struct UiAccent {
 /// accent (`UiStyle::Swatch`), which stay this fixed palette in both themes
 /// (ADR-0089).
 pub const UI_ACCENTS: [UiAccent; 4] = [
-    UiAccent { accent: 0x356bd8, focus: 0x4b82f2 },
-    UiAccent { accent: 0x0f766e, focus: 0x14b8a6 },
-    UiAccent { accent: 0x6d28d9, focus: 0x8b5cf6 },
-    UiAccent { accent: 0xc2410c, focus: 0xf97316 },
+    UiAccent { accent: 0x356bd8, focus: 0x3e72d9 },
+    UiAccent { accent: 0x0f766e, focus: 0x26837b },
+    UiAccent { accent: 0x6d28d9, focus: 0x8a52e0 },
+    UiAccent { accent: 0xc2410c, focus: 0xc75020 },
 ];
 
 /// Light-theme counterpart of [`UI_ACCENTS`] (S5, #82): lighter tints of the
@@ -68,7 +68,7 @@ impl UiSceneTheme {
         input: 0x263548,
         border: 0x334155,
         accent: 0x356bd8,
-        focus: 0x4b82f2,
+        focus: 0x3e72d9,
         text: 0xffffff,
         muted: 0xb8c7da,
         success: 0x7ee787,
@@ -2032,14 +2032,6 @@ mod tests {
     /// `text` against every accent's `accent` fill (the close control) and
     /// `focus` fill (a selected list row, a hovered select, an "on" toggle
     /// track a label sits over -- the light-theme selector added here).
-    ///
-    /// `text` on a `focus` fill in the *dark* theme is the one exception:
-    /// it predates this change (the nav category highlight already shipped
-    /// this way) and two of its four accents don't even clear 3:1 (teal
-    /// 2.49:1, orange 2.80:1). Fixing the shipped dark palette is out of
-    /// S5's scope -- adding a light theme -- so this test documents the gap
-    /// instead of silently asserting past it. `docs/adr/0089-...` owns the
-    /// accent palette; a follow-up should retune dark `focus` there.
     #[test]
     fn theme_text_styles_meet_wcag_aa_against_every_background_they_draw_on() {
         const AA_BODY: f64 = 4.5;
@@ -2067,9 +2059,6 @@ mod tests {
                     "{theme_name}: text on accent[{index}].accent = {on_accent:.2}, need >= {AA_BODY}"
                 );
                 let on_focus = contrast_ratio(theme.text, accent.focus);
-                if theme_name == "dark" {
-                    continue; // pre-existing gap, see the doc comment above
-                }
                 assert!(
                     on_focus >= AA_BODY,
                     "{theme_name}: text on accent[{index}].focus = {on_focus:.2}, need >= {AA_BODY}"
