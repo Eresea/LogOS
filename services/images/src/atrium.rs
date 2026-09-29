@@ -2233,11 +2233,12 @@ pub extern "C" fn _start() -> ! {
                     let close_bounds = logos_atrium::surface_close_bounds(surface.bounds);
                     let close_clicked = pointer.state == PointerState::Down
                         && close_bounds.contains(local_x, local_y);
-                    let local = InputMessage::pointer(
+                    let local = InputMessage::pointer_wheel(
                         local_x.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
                         local_y.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16,
                         pointer.buttons,
                         pointer.state,
+                        pointer.wheel,
                     )
                     .unwrap_or(event);
                     if close_clicked {

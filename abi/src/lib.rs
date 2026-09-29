@@ -8,7 +8,7 @@
 use core::{
     cell::UnsafeCell,
     mem::MaybeUninit,
-    sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering},
 };
 
 mod atrium;
@@ -79,7 +79,7 @@ pub use user_api::{
 };
 pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
-pub const ABI_VERSION: u16 = 10;
+pub const ABI_VERSION: u16 = 11;
 /// The product version/build string shown by the Terminal `version` command
 /// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
 /// release; it is not tied to `ABI_VERSION`.
@@ -1464,6 +1464,9 @@ pub struct PointerEvent {
     pub y: i16,
     pub buttons: u8,
     pub state: PointerState,
+    /// Signed wheel notches since the previous event (positive = wheel up,
+    /// ADR-0092). Independent of `state`; zero for devices without a wheel.
+    pub wheel: i8,
 }
 
 pub const POINTER_BUTTONS_MASK: u8 = 0x07;
@@ -1646,6 +1649,17 @@ impl InputMessage {
     }
 
     pub const fn pointer(x: i16, y: i16, buttons: u8, state: PointerState) -> Option<Self> {
+        Self::pointer_wheel(x, y, buttons, state, 0)
+    }
+
+    /// Pointer event carrying a wheel delta in `text[0]` (ADR-0092).
+    pub const fn pointer_wheel(
+        x: i16,
+        y: i16,
+        buttons: u8,
+        state: PointerState,
+        wheel: i8,
+    ) -> Option<Self> {
         if buttons & !POINTER_BUTTONS_MASK != 0 {
             return None;
         }
@@ -1659,7 +1673,11 @@ impl InputMessage {
             code: x as u16,
             modifiers: y as u16,
             len: buttons as u16,
-            text: [0; MAX_TEXT_BYTES],
+            text: {
+                let mut text = [0; MAX_TEXT_BYTES];
+                text[0] = wheel as u8;
+                text
+            },
         })
     }
 
@@ -1677,6 +1695,7 @@ impl InputMessage {
             y: self.modifiers as i16,
             buttons: self.len as u8,
             state,
+            wheel: self.text[0] as i8,
         })
     }
 
@@ -2670,6 +2689,9 @@ pub struct KeyboardByteRing {
     head: AtomicU16,
     tail: AtomicU16,
     dropped: AtomicU64,
+    /// Kernel-published: the device streams 4-byte IntelliMouse packets
+    /// (pointer ring only, ADR-0092). Zero means plain 3-byte packets.
+    wheel: AtomicU8,
     bytes: [UnsafeCell<u8>; KEYBOARD_RING_CAPACITY],
 }
 
@@ -2681,6 +2703,7 @@ impl KeyboardByteRing {
             head: AtomicU16::new(0),
             tail: AtomicU16::new(0),
             dropped: AtomicU64::new(0),
+            wheel: AtomicU8::new(0),
             bytes: [const { UnsafeCell::new(0) }; KEYBOARD_RING_CAPACITY],
         }
     }
@@ -2717,6 +2740,14 @@ impl KeyboardByteRing {
 
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Acquire)
+    }
+
+    pub fn set_wheel(&self, enabled: bool) {
+        self.wheel.store(enabled as u8, Ordering::Release);
+    }
+
+    pub fn has_wheel(&self) -> bool {
+        self.wheel.load(Ordering::Acquire) != 0
     }
 }
 
@@ -3016,8 +3047,18 @@ mod tests {
         let pointer = InputMessage::pointer(-12, 34, 0b101, PointerState::Move).unwrap();
         assert_eq!(
             pointer.pointer_event(),
-            Some(PointerEvent { x: -12, y: 34, buttons: 0b101, state: PointerState::Move })
+            Some(PointerEvent {
+                x: -12,
+                y: 34,
+                buttons: 0b101,
+                state: PointerState::Move,
+                wheel: 0
+            })
         );
+        let wheel = InputMessage::pointer_wheel(5, 6, 0, PointerState::Move, -3).unwrap();
+        assert_eq!(wheel.pointer_event().map(|event| event.wheel), Some(-3));
+        let wheel = InputMessage::pointer_wheel(5, 6, 0, PointerState::Move, 7).unwrap();
+        assert_eq!(wheel.pointer_event().map(|event| event.wheel), Some(7));
         assert!(InputMessage::pointer(0, 0, 0b1000, PointerState::Down).is_none());
     }
 

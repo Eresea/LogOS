@@ -146,6 +146,7 @@ pub extern "C" fn _start() -> ! {
         }
         if pending_pointer.is_none() {
             if let Some(byte) = pointer.pop() {
+                pointer_decoder.set_wheel(pointer.has_wheel());
                 if let Some(event) = pointer_decoder.feed(byte) {
                     *pending_pointer = Some(event);
                     *pointer_sent_mask = 0;

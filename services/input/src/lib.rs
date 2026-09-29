@@ -214,12 +214,14 @@ impl InputDecoder {
     }
 }
 
-/// Bounded PS/2 three-byte mouse packet decoder. Coordinates are clamped to
+/// Bounded PS/2 three-byte (or, with a wheel, four-byte IntelliMouse) mouse packet decoder. Coordinates are clamped to
 /// the signed 16-bit surface coordinate range and never expose raw device bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PointerDecoder {
-    packet: [u8; 3],
+    packet: [u8; 4],
     packet_len: u8,
+    /// Device streams 4-byte packets (IntelliMouse ID 3, ADR-0092).
+    wheel: bool,
     x: i16,
     y: i16,
     x_remainder: i32,
@@ -231,8 +233,9 @@ pub struct PointerDecoder {
 impl PointerDecoder {
     pub const fn new() -> Self {
         Self {
-            packet: [0; 3],
+            packet: [0; 4],
             packet_len: 0,
+            wheel: false,
             x: (logos_abi::DEFAULT_SCREEN_WIDTH / 2) as i16,
             y: (logos_abi::DEFAULT_SCREEN_HEIGHT / 2) as i16,
             x_remainder: 0,
@@ -244,6 +247,13 @@ impl PointerDecoder {
 
     pub const fn position(&self) -> (i16, i16) {
         (self.x, self.y)
+    }
+
+    /// Switch between 3- and 4-byte packets; takes effect on the next packet boundary.
+    pub fn set_wheel(&mut self, wheel: bool) {
+        if self.packet_len == 0 {
+            self.wheel = wheel;
+        }
     }
 
     pub fn set_acceleration(&mut self, acceleration: MouseAcceleration) {
@@ -271,7 +281,7 @@ impl PointerDecoder {
         let index = self.packet_len as usize;
         self.packet[index] = byte;
         self.packet_len += 1;
-        if self.packet_len != 3 {
+        if self.packet_len != 3 + self.wheel as u8 {
             return None;
         }
         self.packet_len = 0;
@@ -286,15 +296,19 @@ impl PointerDecoder {
         self.x = self.x.clamp(0, (logos_abi::DEFAULT_SCREEN_WIDTH - 1) as i16);
         self.y = self.y.clamp(0, (logos_abi::DEFAULT_SCREEN_HEIGHT - 1) as i16);
         let buttons = status & logos_abi::POINTER_BUTTONS_MASK;
+        // Low nibble is a signed 4-bit Z delta (negative = wheel up); ID 4's
+        // extra buttons in the high bits are ignored (wheel only).
+        let wheel =
+            if self.wheel { -((((self.packet[3] << 4) as i8) >> 4) as i16) as i8 } else { 0 };
         let state = if buttons != self.buttons {
             if buttons & !self.buttons != 0 { PointerState::Down } else { PointerState::Up }
-        } else if dx != 0 || dy != 0 {
+        } else if dx != 0 || dy != 0 || wheel != 0 {
             PointerState::Move
         } else {
             return None;
         };
         self.buttons = buttons;
-        InputMessage::pointer(self.x, self.y, buttons, state)
+        InputMessage::pointer_wheel(self.x, self.y, buttons, state, wheel)
     }
 }
 
@@ -654,6 +668,52 @@ mod tests {
         let _ = decoder.feed(0x08);
         let _ = decoder.feed(0);
         assert_eq!(decoder.feed(0).unwrap().pointer_event().unwrap().state, PointerState::Up);
+    }
+
+    fn wheel_event(decoder: &mut PointerDecoder, status: u8, z: u8) -> Option<InputMessage> {
+        assert_eq!(decoder.feed(status), None);
+        assert_eq!(decoder.feed(0), None);
+        assert_eq!(decoder.feed(0), None);
+        decoder.feed(z)
+    }
+
+    #[test]
+    fn four_byte_packets_decode_signed_wheel() {
+        let mut decoder = PointerDecoder::new();
+        decoder.set_wheel(true);
+        // Z is negative for wheel up; the event reports up as positive.
+        let up = wheel_event(&mut decoder, 0x08, 0x0f).unwrap().pointer_event().unwrap();
+        assert_eq!((up.wheel, up.state, up.x), (1, PointerState::Move, 640));
+        let down = wheel_event(&mut decoder, 0x08, 0x02).unwrap().pointer_event().unwrap();
+        assert_eq!(down.wheel, -2);
+        // Signed 4-bit range: -8 saturates the nibble; ID-4 button bits are ignored.
+        let max = wheel_event(&mut decoder, 0x08, 0xf8).unwrap().pointer_event().unwrap();
+        assert_eq!(max.wheel, 8);
+        assert!(wheel_event(&mut decoder, 0x08, 0x30).is_none());
+        // Button change in a wheel packet keeps the wheel delta.
+        let click = wheel_event(&mut decoder, 0x09, 0x0e).unwrap().pointer_event().unwrap();
+        assert_eq!((click.state, click.wheel), (PointerState::Down, 2));
+    }
+
+    #[test]
+    fn three_byte_packets_keep_working_without_wheel_id() {
+        let mut decoder = PointerDecoder::new();
+        // Device reported ID 0: stays 3-byte and never reports a wheel.
+        decoder.set_wheel(false);
+        assert_eq!(decoder.feed(0x08), None);
+        assert_eq!(decoder.feed(4), None);
+        let event = decoder.feed(2).unwrap().pointer_event().unwrap();
+        assert_eq!((event.x, event.wheel), (643, 0));
+        // A mode switch mid-packet waits for the packet boundary.
+        assert_eq!(decoder.feed(0x08), None);
+        decoder.set_wheel(true);
+        assert_eq!(decoder.feed(4), None);
+        assert!(decoder.feed(2).is_some());
+        decoder.set_wheel(true);
+        assert_eq!(decoder.feed(0x08), None);
+        assert_eq!(decoder.feed(0), None);
+        assert_eq!(decoder.feed(0), None);
+        assert!(decoder.feed(0x0f).is_some());
     }
 
     #[test]
