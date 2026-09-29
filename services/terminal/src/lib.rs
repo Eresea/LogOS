@@ -16,6 +16,8 @@ const MAX_PARAMS: usize = 16;
 const REPLACEMENT_SCALAR: u32 = 0xfffd;
 /// Service-local storage cap; the ABI maximum is a protocol-wide ceiling.
 pub const TERMINAL_SCROLLBACK_LINES: usize = 64;
+/// Scrollback lines per mouse-wheel notch.
+const WHEEL_LINES: isize = 3;
 /// Half a blink period in timer ticks (100 Hz): 500 ms on, 500 ms off.
 pub const CURSOR_BLINK_TICKS: u64 = 50;
 /// Like GTK's cursor-blink-timeout: after 10 s without activity the cursor
@@ -992,6 +994,11 @@ impl<const CELL_COUNT: usize> TerminalState<CELL_COUNT> {
         if event.kind != MessageKind::Pointer {
             self.restart_blink();
         }
+        if let Some(pointer) = event.pointer_event() {
+            // Wheel up (positive) scrolls back; one notch is WHEEL_LINES (ADR-0092).
+            self.scroll_view(isize::from(pointer.wheel) * WHEEL_LINES);
+            return None;
+        }
         if event.kind == MessageKind::Key
             && matches!(event.state, KeyState::Pressed | KeyState::Repeat)
             && event.modifiers & MOD_SHIFT != 0
@@ -1105,6 +1112,7 @@ pub type Terminal = TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use logos_abi::PointerState;
 
     fn drain(terminal: &mut Terminal) -> usize {
         let mut count = 0;
@@ -1298,6 +1306,32 @@ mod tests {
         assert_eq!(terminal.view_offset, terminal.scrollback_len);
         terminal.scroll_view(isize::MIN);
         assert_eq!(terminal.view_offset, 0);
+    }
+
+    #[test]
+    fn wheel_scrolls_and_clamps_at_both_ends() {
+        let mut terminal = Terminal::new();
+        for _ in 0..(DEFAULT_ROWS + 4) {
+            terminal.feed(
+                b"x
+",
+            );
+        }
+        drain(&mut terminal);
+        let wheel =
+            |delta| InputMessage::pointer_wheel(0, 0, 0, PointerState::Move, delta).unwrap();
+        assert!(terminal.input(&wheel(1)).is_none());
+        assert_eq!(terminal.view_offset, WHEEL_LINES as usize);
+        terminal.input(&wheel(-1));
+        assert_eq!(terminal.view_offset, 0);
+        terminal.input(&wheel(-8));
+        assert_eq!(terminal.view_offset, 0);
+        terminal.input(&wheel(i8::MAX));
+        terminal.input(&wheel(i8::MAX));
+        assert_eq!(terminal.view_offset, terminal.scrollback_len);
+        // A plain move is not a scroll.
+        terminal.input(&InputMessage::pointer(0, 0, 0, PointerState::Move).unwrap());
+        assert_eq!(terminal.view_offset, terminal.scrollback_len);
     }
 
     #[test]

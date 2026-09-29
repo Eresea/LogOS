@@ -58,8 +58,11 @@ pub fn coalesce_pointer_move<F>(
 where
     F: FnMut(&mut InputMessage) -> bool,
 {
+    // Wheel deltas are not idempotent, so they are never coalesced away.
     let is_move = |event: InputMessage| {
-        event.pointer_event().is_some_and(|pointer| pointer.state == PointerState::Move)
+        event
+            .pointer_event()
+            .is_some_and(|pointer| pointer.state == PointerState::Move && pointer.wheel == 0)
     };
     if !is_move(first) {
         return (first, None);
@@ -1500,6 +1503,10 @@ impl Atrium {
         let pointer = input.pointer_event()?;
         if self.phase != AtriumPhase::Home {
             return None;
+        }
+        if pointer.wheel != 0 {
+            // Wheel notches go to the focused surface (ADR-0092).
+            return self.focused_surface();
         }
         let hit = || self.surface_at(i32::from(pointer.x), i32::from(pointer.y));
         let target = match pointer.state {
