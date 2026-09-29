@@ -19,7 +19,7 @@ so the pieces are fixed here:
 - **Decoder.** `PointerDecoder` reads the fourth byte's low nibble as a signed 4-bit Z delta. The
   device reports wheel-up as negative; the decoder negates it, so positive means up. A packet whose
   only change is Z produces a `Move`-state event; buttons and motion keep their existing meaning.
-- **ABI (`ABI_VERSION` 11).** `PointerEvent` gains `wheel: i8`. It travels in `InputMessage.text[0]`
+- **ABI (`ABI_VERSION` 12).** `PointerEvent` gains `wheel: i8`. It travels in `InputMessage.text[0]`
   of `MessageKind::Pointer` (previously always zero); no field, size or message kind was added.
   `InputMessage::pointer` keeps its signature (wheel 0); `pointer_wheel` sets it. All existing
   producers (host tests, lock-screen and Atrium synthetic events) therefore stay valid unchanged.

@@ -79,7 +79,9 @@ pub use user_api::{
 };
 pub use walltime::{RtcRegisters, WallTime, advance_wall_time, decode_rtc};
 
-pub const ABI_VERSION: u16 = 11;
+/// 11: T3c session tags on Terminal/Session/Flow IPC (ADR-0090) and S4 Atrium settings edge (ADR-0091); both PRs shipped as 10.
+/// 12: wheel delta on `PointerEvent`/`MessageKind::Pointer` (ADR-0092).
+pub const ABI_VERSION: u16 = 12;
 /// The product version/build string shown by the Terminal `version` command
 /// (`services/images/src/flow.rs`) and Settings' About page. Bump alongside a
 /// release; it is not tied to `ABI_VERSION`.
