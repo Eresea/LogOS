@@ -188,6 +188,11 @@ pub struct AtriumSurfaceRequest {
     pub tab_state: u16,
     pub request_id: u32,
     pub client: ServiceHandle,
+    /// Terminal-only (T3b, #97): the surface (pane) this request's
+    /// `tab_state` describes, or `EMPTY` for a first request that names no
+    /// surface yet. One Terminal client can own several tiled surfaces, so
+    /// Atrium can no longer infer the surface from the client alone.
+    pub surface: SurfaceHandle,
 }
 
 impl AtriumSurfaceRequest {
@@ -198,11 +203,16 @@ impl AtriumSurfaceRequest {
             tab_state: 0,
             request_id,
             client,
+            surface: SurfaceHandle::EMPTY,
         }
     }
 
     pub const fn with_tab_state(self, tab_state: u16) -> Self {
         Self { tab_state, ..self }
+    }
+
+    pub const fn with_surface(self, surface: SurfaceHandle) -> Self {
+        Self { surface, ..self }
     }
 
     pub const fn is_valid(self) -> bool {

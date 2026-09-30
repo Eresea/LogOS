@@ -9,7 +9,7 @@ use logos_abi::{
     APPEARANCE_LIGHT_THEME, APPEARANCE_REDUCED_MOTION, CELL_ATTR_BOLD, CELL_ATTR_DIM,
     CELL_ATTR_UNDERLINE, Cell, DEFAULT_COLUMNS, DEFAULT_ROWS, GuiRect, GuiTextGridRow,
     InputMessage, IpcBytes, KeyCode, KeyState, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT,
-    MessageKind, terminal_grid_metrics,
+    MessageKind, SurfaceHandle, pack_terminal_tab_state, terminal_grid_metrics,
 };
 
 const MAX_PARAMS: usize = 16;
@@ -151,7 +151,14 @@ pub struct TerminalState<const CELL_COUNT: usize> {
 /// T3 (#76): the Terminal service hosts up to this many independent
 /// sessions (grid + scrollback each), with a tab bar to switch between
 /// them. The cap is fixed; no reordering or drag-out (out of scope).
+/// T3b (#97): the cap is shared by every pane (Atrium surface) -- each
+/// session belongs to exactly one pane, so there can never be more panes
+/// than sessions, and never more than `MAX_GUI_TEXT_GRIDS` text grids.
 pub const MAX_TERMINAL_SESSIONS: usize = 4;
+/// One pane owns at least one session, so the pane bound equals the session
+/// bound; Display keeps one retained text grid per pane surface.
+pub const MAX_TERMINAL_PANES: usize = MAX_TERMINAL_SESSIONS;
+const _: () = assert!(MAX_TERMINAL_PANES <= logos_abi::MAX_GUI_TEXT_GRIDS);
 
 /// Generation-safe handle to a tab, mirroring the `slot`/`generation`
 /// pattern `SurfaceHandle` already uses elsewhere in the ABI: closing a tab
@@ -180,11 +187,13 @@ struct Session {
     terminal: TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }>,
     open: bool,
     generation: u8,
+    /// Index of the pane whose tab strip lists this session (T3b, #97).
+    owner: u8,
 }
 
 impl Session {
     const fn new() -> Self {
-        Self { terminal: TerminalState::new(), open: false, generation: 0 }
+        Self { terminal: TerminalState::new(), open: false, generation: 0, owner: 0 }
     }
 
     fn handle(&self, slot: usize) -> TabHandle {
@@ -192,9 +201,36 @@ impl Session {
     }
 }
 
+/// One Atrium Terminal surface (T3b, #97): the tab strip it shows is the
+/// set of sessions it owns, and `active` is the one whose grid it displays.
+#[derive(Clone, Copy)]
+struct Pane {
+    in_use: bool,
+    /// `EMPTY` for a retained pane whose surface was closed while it was the
+    /// last one: its sessions survive so reopening Terminal restores them.
+    surface: SurfaceHandle,
+    bounds: GuiRect,
+    active: u8,
+}
+
+impl Pane {
+    const EMPTY: Self =
+        Self { in_use: false, surface: SurfaceHandle::EMPTY, bounds: GuiRect::EMPTY, active: 0 };
+}
+
+/// `SessionClose` messages for the sessions a closed pane released.
+pub type PaneCloses = [Option<IpcBytes>; MAX_TERMINAL_SESSIONS];
+
 pub struct TerminalService {
     sessions: [Session; MAX_TERMINAL_SESSIONS],
-    active: usize,
+    panes: [Pane; MAX_TERMINAL_PANES],
+    /// The pane every tab and input method below acts on; the caller picks
+    /// it with `select` from the surface an event arrived for.
+    current: usize,
+    render_cursor: usize,
+    /// Last desktop appearance flags received, applied to every session
+    /// created afterwards (a new tab or pane must not start dark/animated).
+    appearance: u16,
 }
 
 const _: () =
@@ -206,78 +242,199 @@ impl TerminalService {
         let mut sessions = [SESSION; MAX_TERMINAL_SESSIONS];
         sessions[0].open = true;
         sessions[0].generation = 1;
-        Self { sessions, active: 0 }
+        let mut panes = [Pane::EMPTY; MAX_TERMINAL_PANES];
+        panes[0].in_use = true;
+        Self { sessions, panes, current: 0, render_cursor: 0, appearance: 0 }
+    }
+
+    fn active_slot_of(&self, pane: usize) -> usize {
+        self.panes[pane].active as usize
     }
 
     fn active_session(&mut self) -> &mut TerminalState<{ DEFAULT_COLUMNS * DEFAULT_ROWS }> {
-        &mut self.sessions[self.active].terminal
+        let slot = self.active_slot_of(self.current);
+        &mut self.sessions[slot].terminal
     }
 
-    /// The active tab's handle; always valid since the service always keeps
-    /// at least one tab open.
+    fn owns(&self, pane: usize, slot: usize) -> bool {
+        self.sessions[slot].open && self.sessions[slot].owner as usize == pane
+    }
+
+    /// The current pane's active tab handle; always valid since a pane
+    /// always keeps at least one tab open.
     pub fn active_tab(&self) -> TabHandle {
-        self.sessions[self.active].handle(self.active)
+        let slot = self.active_slot_of(self.current);
+        self.sessions[slot].handle(slot)
     }
 
-    pub const fn tab_count(&self) -> usize {
-        let mut count = 0;
-        let mut slot = 0;
-        while slot < MAX_TERMINAL_SESSIONS {
-            if self.sessions[slot].open {
-                count += 1;
-            }
-            slot += 1;
-        }
-        count
+    /// Tabs in the current pane.
+    pub fn tab_count(&self) -> usize {
+        (0..MAX_TERMINAL_SESSIONS).filter(|&slot| self.owns(self.current, slot)).count()
     }
 
-    /// Handle of the open tab at `slot`, for tab-bar rendering; `None` if
-    /// that slot is not currently open.
+    /// Open sessions across every pane: the shared cap counts these.
+    pub fn open_session_count(&self) -> usize {
+        self.sessions.iter().filter(|session| session.open).count()
+    }
+
+    /// Handle of the current pane's open tab at `slot`, for tab-bar
+    /// rendering; `None` if that slot is not one of its tabs.
     pub fn tab_at(&self, slot: usize) -> Option<TabHandle> {
-        self.sessions.get(slot).filter(|session| session.open).map(|session| session.handle(slot))
+        (slot < MAX_TERMINAL_SESSIONS && self.owns(self.current, slot))
+            .then(|| self.sessions[slot].handle(slot))
     }
 
-    /// Which slots are open, one bit per slot (bit 0 = slot 0), for
-    /// reporting tab-bar state to Atrium's scene builder.
+    fn bitmap_of(&self, pane: usize) -> u8 {
+        (0..MAX_TERMINAL_SESSIONS)
+            .filter(|&slot| self.owns(pane, slot))
+            .fold(0u8, |bitmap, slot| bitmap | (1 << slot))
+    }
+
+    /// Which slots are the current pane's tabs, one bit per slot (bit 0 =
+    /// slot 0), for reporting tab-bar state to Atrium's scene builder.
     pub fn open_bitmap(&self) -> u8 {
-        let mut bitmap = 0u8;
-        for (slot, session) in self.sessions.iter().enumerate() {
-            if session.open {
-                bitmap |= 1 << slot;
+        self.bitmap_of(self.current)
+    }
+
+    pub fn active_slot(&self) -> usize {
+        self.active_slot_of(self.current)
+    }
+
+    /// Makes the pane showing `surface` the one the other methods act on.
+    /// `false` (and no change) for a surface no pane is bound to.
+    pub fn select(&mut self, surface: SurfaceHandle) -> bool {
+        match self.pane_index(surface) {
+            Some(pane) => {
+                self.current = pane;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn pane_index(&self, surface: SurfaceHandle) -> Option<usize> {
+        if !surface.is_valid() {
+            return None;
+        }
+        self.panes.iter().position(|pane| pane.in_use && pane.surface == surface)
+    }
+
+    fn bound_pane_count(&self) -> usize {
+        self.panes.iter().filter(|pane| pane.in_use && pane.surface.is_valid()).count()
+    }
+
+    /// Surface and packed tab-bar state of pane `index`, for the caller to
+    /// report to Atrium; `None` for an unbound pane.
+    pub fn pane_report(&self, index: usize) -> Option<(SurfaceHandle, u16)> {
+        let pane = self.panes.get(index).filter(|p| p.in_use && p.surface.is_valid())?;
+        Some((pane.surface, pack_terminal_tab_state(self.bitmap_of(index), pane.active)))
+    }
+
+    /// The current pane's last known surface bounds.
+    pub fn pane_bounds(&self) -> GuiRect {
+        self.panes[self.current].bounds
+    }
+
+    /// Attaches a surface Atrium admitted (T3b, #97) and makes its pane
+    /// current. A surface already bound just takes the new `bounds`. The
+    /// first surface reuses the retained pane (and its sessions); each later
+    /// one gets a fresh pane with one new session. `false` if no session is
+    /// free for it, which the shared cap of `MAX_TERMINAL_SESSIONS` allows
+    /// only when Atrium raced a Terminal tab opening; that surface stays
+    /// blank until it is closed.
+    pub fn bind_surface(&mut self, surface: SurfaceHandle, bounds: GuiRect) -> bool {
+        if !surface.is_valid() {
+            return false;
+        }
+        if let Some(pane) = self.pane_index(surface) {
+            self.current = pane;
+            if self.panes[pane].bounds != bounds {
+                self.resize_to_surface(bounds);
+            }
+            return true;
+        }
+        if let Some(pane) = self.panes.iter().position(|p| p.in_use && !p.surface.is_valid()) {
+            self.panes[pane].surface = surface;
+            self.current = pane;
+            self.active_session().reset();
+            self.resize_to_surface(bounds);
+            self.active_session().force_redraw();
+            return true;
+        }
+        let Some(pane) = self.panes.iter().position(|p| !p.in_use) else { return false };
+        let Some(slot) = self.sessions.iter().position(|session| !session.open) else {
+            return false;
+        };
+        let session = &mut self.sessions[slot];
+        session.terminal = TerminalState::new();
+        session.terminal.set_reduced_motion(self.appearance & APPEARANCE_REDUCED_MOTION != 0);
+        session.terminal.set_light_theme(self.appearance & APPEARANCE_LIGHT_THEME != 0);
+        session.open = true;
+        session.owner = pane as u8;
+        session.generation = session.generation.wrapping_add(1).max(1);
+        self.panes[pane] =
+            Pane { in_use: true, surface, bounds: GuiRect::EMPTY, active: slot as u8 };
+        self.current = pane;
+        self.resize_to_surface(bounds);
+        self.active_session().force_redraw();
+        true
+    }
+
+    /// Detaches a closed (revoked) surface. While other surfaces remain,
+    /// its pane and every session it owned are freed (generation-safe) and
+    /// a `SessionClose` per session is returned for the caller to forward;
+    /// the last surface's pane is only unbound, keeping its sessions.
+    pub fn unbind_surface(&mut self, surface: SurfaceHandle) -> PaneCloses {
+        let mut closes = [None; MAX_TERMINAL_SESSIONS];
+        let Some(pane) = self.pane_index(surface) else { return closes };
+        if self.bound_pane_count() <= 1 {
+            self.panes[pane].surface = SurfaceHandle::EMPTY;
+            return closes;
+        }
+        for (slot, close) in closes.iter_mut().enumerate() {
+            if self.owns(pane, slot) {
+                let session = &mut self.sessions[slot];
+                session.open = false;
+                session.generation = session.generation.wrapping_add(1).max(1);
+                *close = Some(IpcBytes::empty(MessageKind::SessionClose).with_session(slot as u8));
             }
         }
-        bitmap
+        self.panes[pane] = Pane::EMPTY;
+        if self.current == pane {
+            self.current =
+                self.panes.iter().position(|p| p.in_use && p.surface.is_valid()).unwrap_or(0);
+        }
+        closes
     }
 
-    pub const fn active_slot(&self) -> usize {
-        self.active
-    }
-
-    /// Opens a new tab (a fresh session, reset to the current surface
-    /// bounds) and makes it active. `None` once `MAX_TERMINAL_SESSIONS` are
-    /// already open.
+    /// Opens a new tab in the current pane (a fresh session, reset to the
+    /// pane's size) and makes it active. `None` once `MAX_TERMINAL_SESSIONS`
+    /// are already open across all panes.
     pub fn open_tab(&mut self) -> Option<TabHandle> {
         let (columns, rows) = {
-            let active = &self.sessions[self.active].terminal;
+            let active = &self.sessions[self.active_slot_of(self.current)].terminal;
             (active.columns, active.rows)
         };
         let slot = self.sessions.iter().position(|session| !session.open)?;
         let session = &mut self.sessions[slot];
         session.terminal = TerminalState::new();
+        session.terminal.set_reduced_motion(self.appearance & APPEARANCE_REDUCED_MOTION != 0);
+        session.terminal.set_light_theme(self.appearance & APPEARANCE_LIGHT_THEME != 0);
         session.terminal.resize(columns, rows);
         session.open = true;
+        session.owner = self.current as u8;
         session.generation = session.generation.wrapping_add(1).max(1);
-        self.active = slot;
+        self.panes[self.current].active = slot as u8;
         self.sessions[slot].terminal.force_redraw();
         Some(self.sessions[slot].handle(slot))
     }
 
     /// Closes `handle`'s tab, freeing its slot for reuse (the slot's
     /// generation is bumped, so a stale handle into it is rejected). Never
-    /// closes the last remaining tab. Picks a new active tab if the closed
-    /// one was active. Returns a tagged `SessionClose` message (T3c, #98)
-    /// for the caller to forward to Session, so it cancels that session's
-    /// in-flight or queued command and frees its per-session state.
+    /// closes a pane's last remaining tab. Picks a new active tab if the
+    /// closed one was active. Returns a tagged `SessionClose` message (T3c,
+    /// #98) for the caller to forward to Session, so it cancels that
+    /// session's in-flight or queued command and frees its per-session state.
     pub fn close_tab(&mut self, handle: TabHandle) -> Option<IpcBytes> {
         if !self.is_valid(handle) || self.tab_count() <= 1 {
             return None;
@@ -285,54 +442,57 @@ impl TerminalService {
         let slot = handle.slot();
         self.sessions[slot].open = false;
         self.sessions[slot].generation = self.sessions[slot].generation.wrapping_add(1).max(1);
-        if self.active == slot {
-            self.active = (0..MAX_TERMINAL_SESSIONS)
-                .find(|&candidate| self.sessions[candidate].open)
+        if self.active_slot() == slot {
+            let next = (0..MAX_TERMINAL_SESSIONS)
+                .find(|&candidate| self.owns(self.current, candidate))
                 .unwrap_or(0);
-            self.sessions[self.active].terminal.force_redraw();
+            self.panes[self.current].active = next as u8;
+            self.active_session().force_redraw();
         }
         Some(IpcBytes::empty(MessageKind::SessionClose).with_session(slot as u8))
     }
 
-    /// Switches the active tab by click. Rejects a stale or closed handle.
+    /// Switches the active tab by click. Rejects a stale, closed, or
+    /// other-pane handle.
     pub fn switch_tab(&mut self, handle: TabHandle) -> bool {
         if !self.is_valid(handle) {
             return false;
         }
-        if self.active != handle.slot() {
-            self.active = handle.slot();
+        if self.active_slot() != handle.slot() {
+            self.panes[self.current].active = handle.slot() as u8;
             self.active_session().force_redraw();
         }
         true
     }
 
-    /// Ctrl+Tab: switches to the next open tab, wrapping around.
+    /// Ctrl+Tab: switches to the pane's next tab, wrapping around.
     pub fn next_tab(&mut self) {
-        let mut slot = (self.active + 1) % MAX_TERMINAL_SESSIONS;
-        while !self.sessions[slot].open {
+        let mut slot = (self.active_slot() + 1) % MAX_TERMINAL_SESSIONS;
+        while !self.owns(self.current, slot) {
             slot = (slot + 1) % MAX_TERMINAL_SESSIONS;
         }
-        self.active = slot;
+        self.panes[self.current].active = slot as u8;
         self.active_session().force_redraw();
     }
 
     fn is_valid(&self, handle: TabHandle) -> bool {
         handle.is_valid()
             && handle.slot() < MAX_TERMINAL_SESSIONS
-            && self.sessions[handle.slot()].open
+            && self.owns(self.current, handle.slot())
             && self.sessions[handle.slot()].generation == handle.generation
     }
 
-    /// Input routes only to the active session; Ctrl+Tab switches tabs and
-    /// Ctrl+Shift+T opens a new one (a conventional accelerator alongside
-    /// the tab bar's own new-tab button and per-tab close control),
-    /// instead of reaching the shell.
+    /// Input routes only to the current pane's active session; Ctrl+Tab
+    /// switches tabs and Ctrl+Shift+T opens a new one (a conventional
+    /// accelerator alongside the tab bar's own new-tab button and per-tab
+    /// close control), instead of reaching the shell.
     pub fn input(&mut self, event: &InputMessage) -> Option<IpcBytes> {
         // Applies to every tab, not just the active one: reduced motion and
         // the light theme (S5, #82) are desktop-wide, so a session the user
         // switches to later must already match instead of showing its old
         // appearance until it next redraws.
         if let Some(flags) = event.appearance_flags() {
+            self.appearance = flags;
             for session in &mut self.sessions {
                 session.terminal.set_reduced_motion(flags & APPEARANCE_REDUCED_MOTION != 0);
                 session.terminal.set_light_theme(flags & APPEARANCE_LIGHT_THEME != 0);
@@ -360,7 +520,8 @@ impl TerminalService {
         // keep this tab's line-editor and variables separate from every
         // other open tab's, even while another tab's command is still
         // running on the shared channel.
-        self.active_session().input(event).map(|message| message.with_session(self.active as u8))
+        let slot = self.active_slot();
+        self.active_session().input(event).map(|message| message.with_session(slot as u8))
     }
 
     pub fn session_output(&mut self, message: &IpcBytes) {
@@ -385,19 +546,44 @@ impl TerminalService {
         self.active_session().reset();
     }
 
+    /// Resizes every session of the current pane to its surface `bounds`.
     pub fn resize_to_surface(&mut self, bounds: GuiRect) {
         // Shared with Atrium's `TextGrid` scene-node sizing (#75) so both
         // sides always agree on the grid shape; see `terminal_grid_metrics`.
         let (columns, rows, _) = terminal_grid_metrics(bounds);
-        self.active_session().resize(columns, rows);
+        self.panes[self.current].bounds = bounds;
+        for slot in 0..MAX_TERMINAL_SESSIONS {
+            if self.owns(self.current, slot) {
+                self.sessions[slot].terminal.resize(columns, rows);
+            }
+        }
     }
 
+    /// Next dirty grid row of any bound pane's active session, addressed to
+    /// that pane's surface; panes take turns so one busy pane cannot starve
+    /// another.
     pub fn next_grid_row(&mut self) -> Option<GuiTextGridRow> {
-        self.active_session().next_grid_row()
+        for step in 0..MAX_TERMINAL_PANES {
+            let index = (self.render_cursor + step) % MAX_TERMINAL_PANES;
+            let pane = self.panes[index];
+            if !pane.in_use || !pane.surface.is_valid() {
+                continue;
+            }
+            if let Some(mut row) = self.sessions[pane.active as usize].terminal.next_grid_row() {
+                row.surface = pane.surface;
+                self.render_cursor = (index + 1) % MAX_TERMINAL_PANES;
+                return Some(row);
+            }
+        }
+        None
     }
 
     pub fn blink(&mut self, now_ticks: u64) {
-        self.active_session().blink(now_ticks);
+        for pane in self.panes {
+            if pane.in_use && pane.surface.is_valid() {
+                self.sessions[pane.active as usize].terminal.blink(now_ticks);
+            }
+        }
     }
 }
 
@@ -1114,6 +1300,20 @@ mod tests {
     use super::*;
     use logos_abi::PointerState;
 
+    fn pane_surface(id: u16) -> SurfaceHandle {
+        SurfaceHandle::new(id, 1, 7).unwrap()
+    }
+
+    const PANE_BOUNDS: GuiRect = GuiRect::new(0, 0, 1280, 720);
+
+    /// A service whose primary pane is bound to one surface, as it is once
+    /// Atrium has admitted Terminal's first surface.
+    fn bound_service() -> TerminalService {
+        let mut service = TerminalService::new();
+        assert!(service.bind_surface(pane_surface(0), PANE_BOUNDS));
+        service
+    }
+
     fn drain(terminal: &mut Terminal) -> usize {
         let mut count = 0;
         while terminal.next_grid_row().is_some() {
@@ -1138,7 +1338,7 @@ mod tests {
         // and `TERMINAL_CONTENT_PADDING` on every edge (#75, #76), matching
         // `terminal_grid_metrics` exactly so Atrium's grid node and this
         // resize can never disagree on shape.
-        let mut terminal = TerminalService::new();
+        let mut terminal = bound_service();
         terminal.resize_to_surface(GuiRect::new(0, 0, 640, 352));
         let mut rows_seen = 0;
         while let Some(message) = terminal.next_grid_row() {
@@ -1154,7 +1354,7 @@ mod tests {
         // raw `RenderCells`. Feeding session bytes should surface as a
         // dirty row whose cells carry the fed codepoints, addressed by
         // row index rather than a flat cell position.
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         drain_service(&mut service);
         service.session_output_bytes(0, b"hi");
         let row = service.next_grid_row().unwrap();
@@ -1484,7 +1684,7 @@ mod tests {
 
     #[test]
     fn light_theme_appearance_reaches_every_tab_not_just_the_active_one() {
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         service.open_tab();
         assert!(
             service.input(&InputMessage::appearance(APPEARANCE_LIGHT_THEME)).is_none(),
@@ -1592,7 +1792,7 @@ mod tests {
     fn session_cap_is_enforced_at_four_tabs() {
         // #76: the service starts with one tab open; three more can be
         // opened up to MAX_TERMINAL_SESSIONS, and a fifth is refused.
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         assert_eq!(service.tab_count(), 1);
         for _ in 0..(MAX_TERMINAL_SESSIONS - 1) {
             assert!(service.open_tab().is_some());
@@ -1604,7 +1804,7 @@ mod tests {
 
     #[test]
     fn closing_a_tab_frees_and_reuses_its_slot_generation_safely() {
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         let second = service.open_tab().unwrap();
         assert_eq!(service.tab_count(), 2);
         assert!(service.close_tab(second).is_some());
@@ -1621,7 +1821,7 @@ mod tests {
 
     #[test]
     fn closing_a_tab_returns_a_session_close_tagged_with_its_slot() {
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         let second = service.open_tab().unwrap();
         let message = service.close_tab(second).expect("closing an open tab");
         assert_eq!(message.kind, MessageKind::SessionClose);
@@ -1630,7 +1830,7 @@ mod tests {
 
     #[test]
     fn the_last_remaining_tab_cannot_be_closed() {
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         let only = service.active_tab();
         assert!(service.close_tab(only).is_none());
         assert_eq!(service.tab_count(), 1);
@@ -1641,7 +1841,7 @@ mod tests {
         // T3c (#98): Session and Flow tell tabs apart by this tag alone,
         // so it must always match whichever tab is focused, not just the
         // first one.
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         let second = service.open_tab().unwrap();
         assert_eq!(service.active_tab(), second);
         let key = InputMessage::text(b"a").unwrap();
@@ -1654,7 +1854,7 @@ mod tests {
         // Session/Flow (T3c, #98) tag every reply with the session that
         // produced it; Terminal just trusts the tag, regardless of which
         // tab is currently focused.
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         let tab_one = service.active_tab();
         let tab_two = service.open_tab().unwrap();
         assert_eq!(service.active_tab(), tab_two);
@@ -1681,7 +1881,7 @@ mod tests {
 
     #[test]
     fn output_for_a_closed_tabs_slot_is_dropped() {
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         let tab_two = service.open_tab().unwrap();
         let closed_slot = tab_two.slot() as u8;
         assert!(service.close_tab(tab_two).is_some());
@@ -1698,7 +1898,7 @@ mod tests {
 
     #[test]
     fn ctrl_tab_switches_sessions_without_reaching_the_shell() {
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         let first = service.active_tab();
         let second = service.open_tab().unwrap();
         assert_eq!(service.active_tab(), second);
@@ -1711,7 +1911,7 @@ mod tests {
 
     #[test]
     fn ctrl_shift_t_opens_a_new_tab_without_reaching_the_shell() {
-        let mut service = TerminalService::new();
+        let mut service = bound_service();
         assert_eq!(service.tab_count(), 1);
         let new_tab =
             InputMessage::key(KeyCode::character(b't'), KeyState::Pressed, MOD_CTRL | MOD_SHIFT);
@@ -1730,5 +1930,163 @@ mod tests {
             }
         }
         assert!(saw_second_row);
+    }
+
+    // T3b (#97): panes.
+
+    #[test]
+    fn two_surfaces_map_to_distinct_sessions() {
+        let mut service = bound_service();
+        let first = service.active_tab();
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        let second = service.active_tab();
+        assert_ne!(first.slot(), second.slot());
+        // Each pane lists only its own session.
+        assert_eq!(service.open_bitmap(), 1 << second.slot());
+        assert!(service.select(pane_surface(0)));
+        assert_eq!(service.open_bitmap(), 1 << first.slot());
+        assert_eq!(service.open_session_count(), 2);
+        // Tab state reported per surface.
+        let (surface, state) = service.pane_report(1).unwrap();
+        assert_eq!(surface, pane_surface(1));
+        assert_eq!(logos_abi::terminal_tab_open_bitmap(state), 1 << second.slot());
+    }
+
+    #[test]
+    fn output_and_rows_stay_with_their_own_pane() {
+        let mut service = bound_service();
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        drain_service(&mut service);
+        service.session_output_bytes(0, b"left");
+        service.session_output_bytes(1, b"right");
+        let mut rows = std::vec::Vec::new();
+        while let Some(row) = service.next_grid_row() {
+            if row.cells[0].codepoint != b' ' as u32 {
+                rows.push((row.surface, row.cells[0].codepoint));
+            }
+        }
+        assert!(rows.contains(&(pane_surface(0), b'l' as u32)));
+        assert!(rows.contains(&(pane_surface(1), b'r' as u32)));
+        assert!(!rows.contains(&(pane_surface(0), b'r' as u32)));
+        assert!(!rows.contains(&(pane_surface(1), b'l' as u32)));
+    }
+
+    #[test]
+    fn input_routes_only_to_the_selected_panes_session() {
+        let mut service = bound_service();
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        let key = InputMessage::text(b"a").unwrap();
+        assert!(service.select(pane_surface(0)));
+        assert_eq!(service.input(&key).unwrap().session(), 0);
+        assert!(service.select(pane_surface(1)));
+        assert_eq!(service.input(&key).unwrap().session(), 1);
+        // An unknown surface selects nothing and leaves the focus alone.
+        assert!(!service.select(pane_surface(5)));
+        assert_eq!(service.input(&key).unwrap().session(), 1);
+    }
+
+    #[test]
+    fn tab_operations_cannot_reach_another_panes_sessions() {
+        let mut service = bound_service();
+        let left = service.active_tab();
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        // The right pane cannot switch to or close the left pane's tab.
+        assert!(!service.switch_tab(left));
+        assert!(service.close_tab(left).is_none());
+        assert!(service.tab_at(left.slot()).is_none());
+        // Ctrl+Tab cycles only inside its own pane.
+        let only = service.active_tab();
+        service.next_tab();
+        assert_eq!(service.active_tab(), only);
+    }
+
+    #[test]
+    fn the_session_cap_is_shared_across_tabs_and_panes() {
+        let mut service = bound_service();
+        assert!(service.open_tab().is_some());
+        assert!(service.open_tab().is_some());
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        assert_eq!(service.open_session_count(), MAX_TERMINAL_SESSIONS);
+        // No session left for a tab or for a third pane.
+        assert!(service.open_tab().is_none());
+        assert!(!service.bind_surface(pane_surface(2), PANE_BOUNDS));
+        assert!(service.select(pane_surface(0)));
+        assert!(service.open_tab().is_none());
+        assert_eq!(service.open_session_count(), MAX_TERMINAL_SESSIONS);
+    }
+
+    #[test]
+    fn closing_a_pane_frees_its_sessions_generation_safely() {
+        let mut service = bound_service();
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        let right = service.active_tab();
+        let closes = service.unbind_surface(pane_surface(1));
+        let closed: std::vec::Vec<_> = closes.iter().flatten().collect();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].kind, MessageKind::SessionClose);
+        assert_eq!(closed[0].session(), right.slot() as u8);
+        assert_eq!(service.open_session_count(), 1);
+        // The surviving pane is current again and the stale handle is dead.
+        assert_eq!(service.active_tab().slot(), 0);
+        assert!(!service.switch_tab(right));
+        // Output for the freed slot is dropped.
+        drain_service(&mut service);
+        service.session_output_bytes(right.slot() as u8, b"ghost");
+        assert!(service.next_grid_row().is_none());
+        // A new pane reuses the slot under a fresh generation.
+        assert!(service.bind_surface(pane_surface(2), PANE_BOUNDS));
+        let reused = service.active_tab();
+        assert_eq!(reused.slot(), right.slot());
+        assert_ne!(reused, right);
+    }
+
+    #[test]
+    fn closing_the_last_surface_keeps_its_sessions_for_the_next_one() {
+        let mut service = bound_service();
+        assert!(service.open_tab().is_some());
+        let closes = service.unbind_surface(pane_surface(0));
+        assert!(closes.iter().all(Option::is_none));
+        assert_eq!(service.open_session_count(), 2);
+        assert!(service.next_grid_row().is_none());
+        // Reopening Terminal reattaches the same two tabs.
+        assert!(service.bind_surface(pane_surface(3), PANE_BOUNDS));
+        assert_eq!(service.tab_count(), 2);
+        assert_eq!(service.open_session_count(), 2);
+    }
+
+    #[test]
+    fn closing_a_pane_with_several_tabs_closes_each_of_them() {
+        let mut service = bound_service();
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        assert!(service.open_tab().is_some());
+        assert!(service.open_tab().is_some());
+        let closes = service.unbind_surface(pane_surface(1));
+        assert_eq!(closes.iter().flatten().count(), 3);
+        assert_eq!(service.open_session_count(), 1);
+    }
+
+    #[test]
+    fn resizing_a_pane_resizes_only_its_own_sessions() {
+        let mut service = bound_service();
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        let (columns, rows, _) = terminal_grid_metrics(PANE_BOUNDS);
+        let small = GuiRect::new(0, 0, 400, 300);
+        let (small_columns, small_rows, _) = terminal_grid_metrics(small);
+        assert!(small_columns < columns && small_rows < rows);
+        assert!(service.select(pane_surface(0)));
+        service.resize_to_surface(small);
+        assert_eq!(service.sessions[0].terminal.columns, small_columns);
+        assert_eq!(service.sessions[1].terminal.columns, columns);
+    }
+
+    #[test]
+    fn rows_alternate_between_busy_panes() {
+        let mut service = bound_service();
+        assert!(service.bind_surface(pane_surface(1), PANE_BOUNDS));
+        service.session_output_bytes(0, b"a");
+        service.session_output_bytes(1, b"b");
+        let first = service.next_grid_row().unwrap().surface;
+        let second = service.next_grid_row().unwrap().surface;
+        assert_ne!(first, second);
     }
 }

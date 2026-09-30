@@ -709,6 +709,57 @@ function Test-BytesEqual {
     return $true
 }
 
+# Every Terminal surface Atrium published a scene for (T3b, #97: one per
+# split pane), in publish order, with the bounds it had at that moment.
+function Get-TerminalSceneMarkers {
+    $found = [regex]::Matches((Get-Content $log -Raw), 'app=Terminal scene published surface=(\d+/\d+) bounds=(-?\d+),(-?\d+),(\d+),(\d+)')
+    foreach ($match in $found) {
+        $g = $match.Groups
+        @{ Surface = $g[1].Value; X = [int]$g[2].Value; Y = [int]$g[3].Value; Width = [int]$g[4].Value; Height = [int]$g[5].Value }
+    }
+}
+
+# A rect of the framebuffer (hashtable X/Y/Width/Height, bottom 40 px
+# excluded like Get-TerminalContentBytes) as a flat byte array.
+function Get-PpmRectBytes {
+    param([byte[]]$Bytes, [hashtable]$Rect)
+    $layout = Get-PpmLayout $Bytes
+    $left = [Math]::Max($Rect.X, 0)
+    $top = [Math]::Max($Rect.Y, 0)
+    $right = [Math]::Min($Rect.X + $Rect.Width, $layout.Width)
+    $bottom = [Math]::Min($Rect.Y + $Rect.Height, $layout.Height - 40)
+    $rowLength = [Math]::Max($right - $left, 0) * 3
+    $rows = [Math]::Max($bottom - $top, 0)
+    $content = [byte[]]::new($rows * $rowLength)
+    for ($y = $top; $y -lt $bottom; $y++) {
+        $rowStart = $layout.Offset + ($y * $layout.Width + $left) * 3
+        [Array]::Copy($Bytes, $rowStart, $content, ($y - $top) * $rowLength, $rowLength)
+    }
+    return $content
+}
+
+# Like Wait-QmpTerminalContentSettled, for an explicit rect (one split pane).
+function Wait-QmpRectSettled {
+    param([hashtable]$Qmp, [string]$Path, [hashtable]$Rect, [int]$TimeoutSeconds)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+    $previous = Get-PpmRectBytes ([IO.File]::ReadAllBytes($Path)) $Rect
+    $stableStreak = 0
+    while ([DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
+        $current = Get-PpmRectBytes ([IO.File]::ReadAllBytes($Path)) $Rect
+        if (Test-BytesEqual $previous $current) {
+            $stableStreak++
+            if ($stableStreak -ge 3) { return $true }
+        } else {
+            $stableStreak = 0
+        }
+        $previous = $current
+    }
+    return $false
+}
+
 # Screendumps repeatedly until the Terminal's own content rect stops
 # changing between two consecutive dumps (session/Flow output has finished
 # draining), or gives up at the deadline and returns the last dump taken.
@@ -1300,6 +1351,110 @@ try {
             if (Test-BytesEqual $tabOneAfterFlightContent $tabTwoInFlightContent) {
                 throw 'The first tab shows the second tab''s content after its own command completed.'
             }
+
+            # T3b (#97): a Terminal opened into a split pane attaches its
+            # own session. Tab one is active in the first pane. Open a third
+            # tab there (so the fourth and last session is the only one left
+            # for a pane), split the pane horizontally (Ctrl+Shift+H) and
+            # launch Terminal (Ctrl+3) into the waiting half: Atrium admits a
+            # second Terminal surface instead of refocusing the first. Type
+            # in it and prove (a) the new pane has its own distinct output,
+            # (b) the first pane's content did not change (input routes only
+            # to the focused pane), then close the pane (Alt+F4) and attach
+            # again, which only succeeds if closing freed its session.
+            Send-QmpKey $qmp 'ctrl-shift-t'
+            Start-Sleep -Milliseconds 500
+            $preSplit = @(Get-TerminalSceneMarkers)
+            if ($preSplit.Count -eq 0) { throw 'No Terminal scene marker before the split proof.' }
+            $firstPane = $preSplit[$preSplit.Count - 1]
+
+            $paneMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium app=Terminal scene published'
+            Send-QmpKey $qmp 'ctrl-shift-h'
+            Start-Sleep -Milliseconds 500
+            Send-QmpKey $qmp 'ctrl-3'
+            if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium app=Terminal scene published' $paneMarker $TimeoutSeconds)) {
+                throw 'Launching Terminal into a split pane did not publish a second Terminal surface.'
+            }
+            $secondPane = @(Get-TerminalSceneMarkers)[-1]
+            if ($secondPane.Surface -eq $firstPane.Surface) {
+                throw 'The split Terminal pane reused the first pane''s surface instead of creating its own.'
+            }
+            if ($secondPane.X -ne $firstPane.X -or $secondPane.Width -ne $firstPane.Width -or $secondPane.Y -le $firstPane.Y) {
+                throw "Unexpected split geometry: first $($firstPane.X),$($firstPane.Y),$($firstPane.Width),$($firstPane.Height) second $($secondPane.X),$($secondPane.Y),$($secondPane.Width),$($secondPane.Height)."
+            }
+            # Content rects (below the 32 px chrome and 28 px tab strip): the
+            # first pane now ends where the second begins.
+            $firstRect = @{ X = $firstPane.X; Y = $firstPane.Y + 60; Width = $firstPane.Width; Height = $secondPane.Y - $firstPane.Y - 60 }
+            $secondRect = @{ X = $secondPane.X; Y = $secondPane.Y + 60; Width = $secondPane.Width; Height = $secondPane.Height - 60 }
+
+            $splitBeforeFrame = Join-Path $repoRoot "target\qemu-terminal-split-before-$PID.ppm"
+            if (-not (Wait-QmpRectSettled $qmp $splitBeforeFrame $firstRect $TimeoutSeconds)) {
+                throw 'First Terminal pane did not settle after the split.'
+            }
+            if (-not (Wait-QmpRectSettled $qmp $splitBeforeFrame $secondRect $TimeoutSeconds)) {
+                throw 'Second Terminal pane did not settle before typing.'
+            }
+            # Both panes are idle: read both from one dump so a cursor
+            # blink phase cannot differ between them.
+            Invoke-QmpCommand $qmp.Writer $qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $splitBeforeFrame } } | Out-Null
+            $beforeBytes = [IO.File]::ReadAllBytes($splitBeforeFrame)
+            $firstBefore = Get-PpmRectBytes $beforeBytes $firstRect
+            $secondBefore = Get-PpmRectBytes $beforeBytes $secondRect
+
+            # The new pane is focused: this reaches only its session.
+            Send-QmpText $qmp 'echo("panetwo")'
+            Send-QmpKey $qmp 'ret'
+            Start-Sleep -Seconds 3
+            $splitAfterFrame = Join-Path $repoRoot "target\qemu-terminal-split-$PID.ppm"
+            if (-not (Wait-QmpRectSettled $qmp $splitAfterFrame $secondRect $TimeoutSeconds)) {
+                throw 'Second Terminal pane did not settle after typing.'
+            }
+            $secondAfter = Get-PpmRectBytes ([IO.File]::ReadAllBytes($splitAfterFrame)) $secondRect
+            if (Test-BytesEqual $secondBefore $secondAfter) {
+                throw 'Typing in the second Terminal pane did not change its content.'
+            }
+            $firstAfter = Get-PpmRectBytes ([IO.File]::ReadAllBytes($splitAfterFrame)) $firstRect
+            if (-not (Test-BytesEqual $firstBefore $firstAfter)) {
+                throw 'Typing in the second Terminal pane changed the first pane (input leaked across panes).'
+            }
+            $commonHeight = [Math]::Min($firstRect.Height, $secondRect.Height)
+            $firstCrop = Get-PpmRectBytes ([IO.File]::ReadAllBytes($splitAfterFrame)) @{ X = $firstRect.X; Y = $firstRect.Y; Width = $firstRect.Width; Height = $commonHeight }
+            $secondCrop = Get-PpmRectBytes ([IO.File]::ReadAllBytes($splitAfterFrame)) @{ X = $secondRect.X; Y = $secondRect.Y; Width = $secondRect.Width; Height = $commonHeight }
+            if (Test-BytesEqual $firstCrop $secondCrop) {
+                throw 'The two Terminal panes show identical content (sessions are not distinct).'
+            }
+            if (-not (Framebuffer-HasTerminalGlyphs $splitAfterFrame)) {
+                throw 'The second Terminal pane published no glyph pixels.'
+            }
+            Write-Host "Terminal split panes show distinct sessions (frame: $splitAfterFrame)"
+
+            # Close the second pane; its session must be free again, so the
+            # same split-and-launch attaches a pane a second time (with the
+            # first pane at three tabs, a leaked session would leave none).
+            Send-QmpKey $qmp 'alt-f4'
+            Start-Sleep -Milliseconds 500
+            $paneMarker = Get-ProofMarkerCount 'LogOS vNext: Atrium app=Terminal scene published'
+            Send-QmpKey $qmp 'ctrl-shift-h'
+            Start-Sleep -Milliseconds 500
+            Send-QmpKey $qmp 'ctrl-3'
+            if (-not (Wait-ProofMarkerAfter 'LogOS vNext: Atrium app=Terminal scene published' $paneMarker $TimeoutSeconds)) {
+                throw 'A Terminal pane could not be attached again after closing the previous one (session not freed).'
+            }
+            $reattached = @(Get-TerminalSceneMarkers)[-1]
+            $reattachedRect = @{ X = $reattached.X; Y = $reattached.Y + 60; Width = $reattached.Width; Height = $reattached.Height - 60 }
+            Send-QmpText $qmp 'echo("panethree")'
+            Send-QmpKey $qmp 'ret'
+            Start-Sleep -Seconds 3
+            $splitAgainFrame = Join-Path $repoRoot "target\qemu-terminal-split-again-$PID.ppm"
+            if (-not (Wait-QmpRectSettled $qmp $splitAgainFrame $reattachedRect $TimeoutSeconds)) {
+                throw 'The re-attached Terminal pane did not settle.'
+            }
+            if (-not (Framebuffer-HasTerminalGlyphs $splitAgainFrame)) {
+                throw 'The re-attached Terminal pane published no glyph pixels (no session bound).'
+            }
+            Write-Host "Terminal pane re-attached a freed session (frame: $splitAgainFrame)"
+            Send-QmpKey $qmp 'alt-f4'
+            Start-Sleep -Milliseconds 500
 
             # S5 (#82): the light theme. Everything above ran in the dark
             # theme (default) and its pixel checks are dark-coded, so the

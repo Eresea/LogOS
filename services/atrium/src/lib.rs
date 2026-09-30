@@ -1542,7 +1542,9 @@ impl Atrium {
         if !client.is_valid() {
             return Err(AtriumError::InvalidSurface);
         }
-        if self.surface_for_client(client, app).is_some() {
+        // Terminal alone may own several tiled surfaces (T3b, #97); every
+        // other app keeps one surface per client.
+        if app != AppId::Terminal && self.surface_for_client(client, app).is_some() {
             return Err(AtriumError::AlreadyRegistered);
         }
         if !self.surfaces.iter().any(Option::is_none) {
@@ -2158,6 +2160,13 @@ impl Atrium {
                 .find_leaf(Some(first), surface_id)
                 .or_else(|| self.find_leaf(Some(second), surface_id)),
         }
+    }
+
+    /// True while a split pane is waiting for its application (T3b, #97):
+    /// launching Terminal into it attaches a new Terminal surface instead of
+    /// refocusing the existing one.
+    pub fn has_empty_leaf(&self) -> bool {
+        self.find_empty_leaf(self.layout_root).is_some()
     }
 
     fn find_empty_leaf(&self, node: Option<usize>) -> Option<usize> {
@@ -3609,6 +3618,27 @@ mod tests {
         );
         assert!(atrium.request_surface(AppId::Terminal, client(1)).is_ok());
         assert!(atrium.request_surface(AppId::Files, client(2)).is_ok());
+    }
+
+    #[test]
+    fn terminal_may_own_a_surface_per_split_pane() {
+        // T3b (#97): a waiting split pane can take a second Terminal surface
+        // from the same client; other apps still get one per client.
+        let mut atrium = Atrium::new();
+        atrium.authenticate();
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(12)).unwrap();
+        assert!(!atrium.has_empty_leaf());
+        atrium.apply_action(AtriumAction::Split(SplitDirection::Vertical)).unwrap();
+        assert!(atrium.has_empty_leaf());
+        let request = atrium.request_surface(AppId::Terminal, client(1)).unwrap();
+        atrium.spawn_surface(request, surface(13)).unwrap();
+        assert!(!atrium.has_empty_leaf());
+        assert_eq!(atrium.surfaces().filter(|surface| surface.app == AppId::Terminal).count(), 2);
+        // Closing one pane leaves the other and collapses the split.
+        atrium.close_reference(surface(13)).unwrap();
+        assert!(atrium.surface_by_reference(surface(12)).is_some());
+        assert!(atrium.surface_by_reference(surface(13)).is_none());
     }
 
     #[test]

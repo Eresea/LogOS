@@ -189,11 +189,45 @@ static mut APP_SCENE_TREE: logos_ui::UiComponentTree = logos_ui::UiComponentTree
 /// rebuilds it. 0 means "not yet published" (`GuiTextGridRow::is_valid`
 /// rejects `node_id == 0`), so a row arriving before the first publish is
 /// simply dropped rather than mis-addressed (#74).
-static mut TERMINAL_GRID_NODE_ID: u32 = 0;
-/// Packed tab-bar state Terminal last reported on its surface request
-/// (#76; see `pack_terminal_tab_state`), read by `build_app_scene_tree` when
-/// laying out the tab strip.
-static mut TERMINAL_TAB_STATE: u16 = 0;
+///
+/// One per Atrium surface slot (T3b, #97): several Terminal panes can be
+/// live at once, each with its own text-grid node.
+static mut TERMINAL_GRID_NODE_IDS: [u32; logos_atrium::MAX_ATRIUM_SURFACES] =
+    [0; logos_atrium::MAX_ATRIUM_SURFACES];
+/// Packed tab-bar state Terminal last reported on each pane's surface
+/// request (#76; see `pack_terminal_tab_state`), indexed by surface slot and
+/// read by `build_app_scene_tree` when laying out the tab strip.
+static mut TERMINAL_TAB_STATES: [u16; logos_atrium::MAX_ATRIUM_SURFACES] =
+    [0; logos_atrium::MAX_ATRIUM_SURFACES];
+
+/// Slot-indexed grid node id of a live Terminal surface; 0 if unpublished.
+fn terminal_grid_node_id(surface: SurfaceHandle) -> u32 {
+    app_scene_slot(surface)
+        .map_or(0, |slot| unsafe { (*core::ptr::addr_of!(TERMINAL_GRID_NODE_IDS))[slot] })
+}
+
+fn terminal_tab_state(surface: SurfaceHandle) -> u16 {
+    app_scene_slot(surface)
+        .map_or(0, |slot| unsafe { (*core::ptr::addr_of!(TERMINAL_TAB_STATES))[slot] })
+}
+
+fn set_terminal_tab_state(surface: SurfaceHandle, state: u16) {
+    if let Some(slot) = app_scene_slot(surface) {
+        unsafe { (*core::ptr::addr_of_mut!(TERMINAL_TAB_STATES))[slot] = state };
+    }
+}
+
+/// Session slots (bit N = slot N) currently shown as tabs across every
+/// Terminal pane. Each session belongs to exactly one pane, so the popcount
+/// is how many of the shared `MAX_TERMINAL_SESSIONS` are taken (T3b, #97).
+fn terminal_open_session_bitmap(atrium: &logos_atrium::Atrium) -> u8 {
+    atrium.surfaces().filter(|surface| surface.app == logos_atrium::AppId::Terminal).fold(
+        0u8,
+        |bitmap, surface| {
+            bitmap | logos_abi::terminal_tab_open_bitmap(terminal_tab_state(surface.reference))
+        },
+    )
+}
 
 #[cfg(feature = "qemu-proof")]
 fn proof_line(message: &[u8]) {
@@ -516,7 +550,7 @@ fn build_app_scene_tree(
             // add-tab button, laid out from the same shared geometry
             // Terminal's own pointer hit-testing uses, so a click always
             // lands on what's actually drawn there.
-            let tab_state = unsafe { *core::ptr::addr_of!(TERMINAL_TAB_STATE) };
+            let tab_state = terminal_tab_state(surface.reference);
             let open_bitmap = logos_abi::terminal_tab_open_bitmap(tab_state);
             let active_slot = logos_abi::terminal_tab_active_slot(tab_state);
             let mut active_styles = logos_ui::UiStyleList::EMPTY;
@@ -594,8 +628,10 @@ fn build_app_scene_tree(
                 return false;
             };
             let node_id = (grid.slot as u32).saturating_mul(3).saturating_add(1);
-            unsafe {
-                *core::ptr::addr_of_mut!(TERMINAL_GRID_NODE_ID) = node_id;
+            if let Some(slot) = app_scene_slot(surface.reference) {
+                unsafe {
+                    (*core::ptr::addr_of_mut!(TERMINAL_GRID_NODE_IDS))[slot] = node_id;
+                }
             }
         }
         _ => return false,
@@ -625,6 +661,8 @@ fn bind_app_scene_publisher(surface: logos_atrium::Surface) {
         let sequences = &mut *core::ptr::addr_of_mut!(APP_SCENE_SEQUENCES);
         let reported = &mut *core::ptr::addr_of_mut!(APP_SCENE_REPORTED);
         if surfaces[slot] != surface.reference {
+            (*core::ptr::addr_of_mut!(TERMINAL_GRID_NODE_IDS))[slot] = 0;
+            (*core::ptr::addr_of_mut!(TERMINAL_TAB_STATES))[slot] = 0;
             publishers[slot].reset();
             surfaces[slot] = surface.reference;
             sequences[slot] = 0;
@@ -641,6 +679,8 @@ fn unbind_app_scene_publisher(surface: SurfaceHandle) {
         let sequences = &mut *core::ptr::addr_of_mut!(APP_SCENE_SEQUENCES);
         let reported = &mut *core::ptr::addr_of_mut!(APP_SCENE_REPORTED);
         if surfaces[slot] == surface {
+            (*core::ptr::addr_of_mut!(TERMINAL_GRID_NODE_IDS))[slot] = 0;
+            (*core::ptr::addr_of_mut!(TERMINAL_TAB_STATES))[slot] = 0;
             publishers[slot].reset();
             surfaces[slot] = SurfaceHandle::EMPTY;
             sequences[slot] = 0;
@@ -955,8 +995,8 @@ fn queue_surface_updates(
     queue: &mut SurfaceCommandQueue,
     atrium: &logos_atrium::Atrium,
     next: &mut u32,
-    pending_terminal_update: &mut Option<AtriumSurfaceResponse>,
-    last_terminal_bounds: &mut GuiRect,
+    pending_terminal_update: &mut TerminalUpdates,
+    last_terminal_bounds: &mut TerminalBounds,
 ) {
     for surface in atrium.surfaces() {
         send_surface_command(
@@ -971,26 +1011,37 @@ fn queue_surface_updates(
     queue_terminal_surface_update(pending_terminal_update, last_terminal_bounds, atrium, next);
 }
 
+/// Per-surface-slot Terminal bounds updates waiting to be sent, and the
+/// bounds last sent for each (T3b, #97: several panes can move at once when
+/// a divider is dragged).
+type TerminalUpdates = [Option<AtriumSurfaceResponse>; logos_atrium::MAX_ATRIUM_SURFACES];
+type TerminalBounds = [GuiRect; logos_atrium::MAX_ATRIUM_SURFACES];
+
 fn queue_terminal_surface_update(
-    pending: &mut Option<AtriumSurfaceResponse>,
-    last_bounds: &mut GuiRect,
+    pending: &mut TerminalUpdates,
+    last_bounds: &mut TerminalBounds,
     atrium: &logos_atrium::Atrium,
     next: &mut u32,
 ) {
-    let Some(surface) = atrium.surface_for_app(logos_atrium::AppId::Terminal) else {
-        *pending = None;
-        *last_bounds = GuiRect::EMPTY;
-        return;
-    };
-    if surface.bounds == *last_bounds {
-        return;
+    let mut live = [false; logos_atrium::MAX_ATRIUM_SURFACES];
+    for surface in atrium.surfaces().filter(|s| s.app == logos_atrium::AppId::Terminal) {
+        let Some(slot) = app_scene_slot(surface.reference) else { continue };
+        live[slot] = true;
+        if surface.bounds != last_bounds[slot] {
+            last_bounds[slot] = surface.bounds;
+            pending[slot] = Some(AtriumSurfaceResponse::update(
+                next_request_id(next),
+                surface.reference,
+                surface.bounds,
+            ));
+        }
     }
-    *last_bounds = surface.bounds;
-    *pending = Some(AtriumSurfaceResponse::update(
-        next_request_id(next),
-        surface.reference,
-        surface.bounds,
-    ));
+    for (slot, is_live) in live.iter().enumerate() {
+        if !is_live {
+            pending[slot] = None;
+            last_bounds[slot] = GuiRect::EMPTY;
+        }
+    }
 }
 
 fn is_fps_toggle(input: &InputMessage) -> bool {
@@ -1025,9 +1076,13 @@ fn queue_terminal_response(
     *pending = Some(response);
 }
 
+/// Terminal revokes waiting behind an occupied `pending_client_response`
+/// (T3b, #97: logout revokes every Terminal pane at once).
+type DeferredRevokes = [SurfaceHandle; logos_atrium::MAX_ATRIUM_SURFACES];
+
 fn queue_terminal_revoke(
     pending: &mut Option<AtriumSurfaceResponse>,
-    deferred: &mut Option<SurfaceHandle>,
+    deferred: &mut DeferredRevokes,
     next: &mut u32,
     surface: SurfaceHandle,
 ) {
@@ -1036,9 +1091,19 @@ fn queue_terminal_revoke(
     }
     if pending.is_none() {
         *pending = Some(AtriumSurfaceResponse::revoke(next_request_id(next), surface));
-    } else {
-        *deferred = Some(surface);
+    } else if let Some(free) = deferred.iter_mut().find(|slot| !slot.is_valid()) {
+        *free = surface;
     }
+}
+
+/// Every live Terminal surface, for revoking them all on logout.
+fn terminal_surfaces(atrium: &logos_atrium::Atrium) -> DeferredRevokes {
+    let mut list = [SurfaceHandle::EMPTY; logos_atrium::MAX_ATRIUM_SURFACES];
+    let terminals = atrium.surfaces().filter(|s| s.app == logos_atrium::AppId::Terminal);
+    for (entry, surface) in list.iter_mut().zip(terminals) {
+        *entry = surface.reference;
+    }
+    list
 }
 
 fn queue_system_revoke(
@@ -1301,9 +1366,12 @@ pub extern "C" fn _start() -> ! {
     // when the startup directory snapshot was not ready yet.
     let mut system_client = logos_abi::ServiceHandle::EMPTY;
     let mut pending_client_response: Option<AtriumSurfaceResponse> = None;
-    let mut pending_terminal_update: Option<AtriumSurfaceResponse> = None;
-    let mut last_terminal_bounds = GuiRect::EMPTY;
-    let mut deferred_terminal_revoke: Option<SurfaceHandle> = None;
+    let mut pending_terminal_update: TerminalUpdates = [None; logos_atrium::MAX_ATRIUM_SURFACES];
+    let mut last_terminal_bounds: TerminalBounds =
+        [GuiRect::EMPTY; logos_atrium::MAX_ATRIUM_SURFACES];
+    let mut deferred_terminal_admit: Option<AtriumSurfaceResponse> = None;
+    let mut deferred_terminal_revoke: DeferredRevokes =
+        [SurfaceHandle::EMPTY; logos_atrium::MAX_ATRIUM_SURFACES];
     let mut deferred_system_revoke: Option<SurfaceHandle> = None;
     let mut pending_render: Option<GuiTextGridRow> = None;
     let mut pending_draw: Option<GuiSceneOp> = None;
@@ -1461,7 +1529,13 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if pending_client_response.is_none() {
-            if let Some(surface) = deferred_terminal_revoke.take() {
+            if let Some(admitted) = deferred_terminal_admit.take() {
+                pending_client_response = Some(admitted);
+            } else if let Some(surface) = deferred_terminal_revoke
+                .iter_mut()
+                .find(|surface| surface.is_valid())
+                .map(|surface| core::mem::replace(surface, SurfaceHandle::EMPTY))
+            {
                 pending_client_response = Some(AtriumSurfaceResponse::revoke(
                     next_request_id(&mut next_request),
                     surface,
@@ -1497,17 +1571,18 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if pending_client_response.is_none() {
-            if let Some(update) = pending_terminal_update {
+            for slot in 0..pending_terminal_update.len() {
+                let Some(update) = pending_terminal_update[slot] else { continue };
                 match common::ipc_send_handle(terminal_surface_response, &update) {
-                    IpcStatus::Ok => pending_terminal_update = None,
-                    IpcStatus::Full => {}
+                    IpcStatus::Ok => pending_terminal_update[slot] = None,
+                    IpcStatus::Full => break,
                     IpcStatus::Stale
                     | IpcStatus::Disconnected
                     | IpcStatus::Unauthorized
                     | IpcStatus::Malformed
                     | IpcStatus::Empty => {
-                        pending_terminal_update = None;
-                        last_terminal_bounds = GuiRect::EMPTY;
+                        pending_terminal_update[slot] = None;
+                        last_terminal_bounds[slot] = GuiRect::EMPTY;
                     }
                 }
             }
@@ -1567,15 +1642,31 @@ pub extern "C" fn _start() -> ! {
             } else {
                 terminal_client = terminal_request.client();
                 last_terminal_request = Some(terminal_request);
-                // Terminal re-sends this request whenever its tab bar
-                // changes (#76); a same-surface repeat below just
-                // reconfirms, so capture the latest tab state unconditionally.
-                unsafe {
-                    *core::ptr::addr_of_mut!(TERMINAL_TAB_STATE) = terminal_request.tab_state;
-                }
-                if let Some(surface) = atrium
-                    .surface_for_client(terminal_request.client(), logos_atrium::AppId::Terminal)
-                {
+                // Terminal re-sends this request whenever a pane's tab bar
+                // changes (#76), naming that pane's surface (T3b, #97). A
+                // request that names none (its first) means the client's
+                // first surface, if it has one.
+                let named = if terminal_request.surface.is_valid() {
+                    atrium.surface_by_reference(terminal_request.surface).filter(|surface| {
+                        surface.app == logos_atrium::AppId::Terminal
+                            && surface.client == terminal_request.client()
+                    })
+                } else {
+                    atrium.surface_for_client(
+                        terminal_request.client(),
+                        logos_atrium::AppId::Terminal,
+                    )
+                };
+                if let Some(surface) = named {
+                    // A same-surface repeat just reconfirms; capture the
+                    // latest tab state for that surface unconditionally.
+                    // A pane's first report draws its tab strip; later
+                    // changes are drawn by the input that caused them.
+                    if terminal_tab_state(surface.reference) == 0 && terminal_request.tab_state != 0
+                    {
+                        pending_app_render = true;
+                    }
+                    set_terminal_tab_state(surface.reference, terminal_request.tab_state);
                     queue_terminal_response(
                         &mut pending_client_response,
                         terminal_request,
@@ -1585,7 +1676,17 @@ pub extern "C" fn _start() -> ! {
                     if let Some(response) = pending_client_response.as_mut() {
                         response.bounds = surface.bounds;
                     }
-                    last_terminal_bounds = surface.bounds;
+                    if let Some(slot) = app_scene_slot(surface.reference) {
+                        last_terminal_bounds[slot] = surface.bounds;
+                    }
+                } else if terminal_request.surface.is_valid() {
+                    // A pane closed while its report was in flight.
+                    queue_terminal_response(
+                        &mut pending_client_response,
+                        terminal_request,
+                        logos_abi::GuiStatus::NotFound,
+                        SurfaceHandle::EMPTY,
+                    );
                 } else if let Some(surface) = atrium.surface_for_app(logos_atrium::AppId::Terminal)
                 {
                     if atrium.close_reference(surface.reference).is_ok() {
@@ -1785,12 +1886,11 @@ pub extern "C" fn _start() -> ! {
                 authenticated = false;
                 pending_surface_for_client = false;
                 pending_client_request = None;
-                let terminal_surface =
-                    atrium.surface_for_app(logos_atrium::AppId::Terminal).map(|s| s.reference);
+                let terminal_surface_list = terminal_surfaces(atrium);
                 let system_surface =
                     atrium.surface_for_app(logos_atrium::AppId::System).map(|s| s.reference);
                 hide_surfaces(display_control, &mut surface_commands, atrium, &mut next_request);
-                if let Some(surface) = terminal_surface {
+                for surface in terminal_surface_list {
                     queue_terminal_revoke(
                         &mut pending_client_response,
                         &mut deferred_terminal_revoke,
@@ -1935,18 +2035,34 @@ pub extern "C" fn _start() -> ! {
                     Ok(surface) if for_client => {
                         bind_app_scene_publisher(surface);
                         if let Some(client_request) = pending_client_request.take() {
-                            queue_terminal_response(
-                                &mut pending_client_response,
-                                client_request,
-                                logos_abi::GuiStatus::Ok,
-                                surface.reference,
-                            );
                             if client_request.app() == Some(AtriumApp::Terminal) {
-                                if let Some(response) = pending_client_response.as_mut() {
-                                    response.bounds = surface.bounds;
+                                // Never dropped for a busy response slot: a
+                                // lost admission would leave the new pane
+                                // blank, since Terminal learns of each pane
+                                // only from this response (T3b, #97).
+                                let mut admitted = AtriumSurfaceResponse::new(
+                                    client_request,
+                                    logos_abi::GuiStatus::Ok,
+                                );
+                                admitted.surface = surface.reference;
+                                admitted.bounds = surface.bounds;
+                                if pending_client_response.is_none() {
+                                    pending_client_response = Some(admitted);
+                                } else {
+                                    deferred_terminal_admit = Some(admitted);
                                 }
-                                last_terminal_bounds = surface.bounds;
-                            } else if client_request.app() == Some(AtriumApp::System) {
+                                if let Some(slot) = app_scene_slot(surface.reference) {
+                                    last_terminal_bounds[slot] = surface.bounds;
+                                }
+                            } else {
+                                queue_terminal_response(
+                                    &mut pending_client_response,
+                                    client_request,
+                                    logos_abi::GuiStatus::Ok,
+                                    surface.reference,
+                                );
+                            }
+                            if client_request.app() == Some(AtriumApp::System) {
                                 if let Some(response) =
                                     pending_client_response.as_mut().filter(|response| {
                                         response.request_id == client_request.request_id
@@ -2039,8 +2155,9 @@ pub extern "C" fn _start() -> ! {
 
         if pending_render.is_none() {
             let mut row = GuiTextGridRow::EMPTY;
-            let grid_node_id = unsafe { *core::ptr::addr_of!(TERMINAL_GRID_NODE_ID) };
             while common::ipc_receive_handle(terminal_render, &mut row) == IpcStatus::Ok {
+                // Each pane's surface has its own text-grid node (T3b, #97).
+                let grid_node_id = terminal_grid_node_id(row.surface);
                 let terminal_surface_is_live = row.surface.is_valid()
                     && grid_node_id != 0
                     && atrium.surface_by_reference(row.surface).is_some_and(|surface| {
@@ -2354,7 +2471,16 @@ pub extern "C" fn _start() -> ! {
             match action {
                 logos_atrium::AtriumAction::Launch(app) if pending_surface.is_none() => {
                     atrium.close_command_menu();
-                    if let Some(surface) = atrium.surface_for_app(app) {
+                    // Launching Terminal into a split pane that is waiting
+                    // for its app attaches a new Terminal surface (T3b,
+                    // #97) while a session is free; a plain launch keeps
+                    // refocusing the existing one.
+                    let new_terminal_pane = app == logos_atrium::AppId::Terminal
+                        && atrium.has_empty_leaf()
+                        && (terminal_open_session_bitmap(atrium).count_ones() as usize)
+                            < logos_abi::TERMINAL_MAX_TABS;
+                    let existing = atrium.surface_for_app(app).filter(|_| !new_terminal_pane);
+                    if let Some(surface) = existing {
                         if atrium.focus(surface.id).is_ok() {
                             send_surface_command(
                                 display_control,
@@ -2405,8 +2531,7 @@ pub extern "C" fn _start() -> ! {
                 }
                 logos_atrium::AtriumAction::Logout => {
                     let home_surface = atrium.home_surface();
-                    let terminal_surface =
-                        atrium.surface_for_app(logos_atrium::AppId::Terminal).map(|s| s.reference);
+                    let terminal_surface_list = terminal_surfaces(atrium);
                     let system_surface =
                         atrium.surface_for_app(logos_atrium::AppId::System).map(|s| s.reference);
                     let _ = atrium.apply_action(action);
@@ -2429,7 +2554,7 @@ pub extern "C" fn _start() -> ! {
                             &mut next_request,
                         );
                     }
-                    if let Some(surface) = terminal_surface {
+                    for surface in terminal_surface_list {
                         queue_terminal_revoke(
                             &mut pending_client_response,
                             &mut deferred_terminal_revoke,
@@ -2437,8 +2562,8 @@ pub extern "C" fn _start() -> ! {
                             surface,
                         );
                     }
-                    pending_terminal_update = None;
-                    last_terminal_bounds = GuiRect::EMPTY;
+                    pending_terminal_update = [None; logos_atrium::MAX_ATRIUM_SURFACES];
+                    last_terminal_bounds = [GuiRect::EMPTY; logos_atrium::MAX_ATRIUM_SURFACES];
                     if let Some(surface) = system_surface {
                         queue_system_revoke(
                             &mut pending_client_response,
@@ -2744,73 +2869,111 @@ mod terminal_scene_tests {
             IpcStatus::Ok
         }
     }
-
-    /// The first (untiled) surface always gets `DESKTOP_SURFACE_BOUNDS`
-    /// (`Atrium::initial_surface_bounds`) -- the worst-case, largest
-    /// Terminal content region.
-    fn terminal_surface() -> logos_atrium::Surface {
+    /// Two tiled Terminal panes (a vertical split) owned by one client. The
+    /// first (untiled) surface starts with `DESKTOP_SURFACE_BOUNDS`, the
+    /// worst-case, largest content region; after the split each is half of
+    /// that (T3b, #97).
+    fn terminal_panes() -> (logos_atrium::Atrium, [logos_atrium::Surface; 2]) {
         let mut atrium = logos_atrium::Atrium::new();
         atrium.authenticate();
         let client = logos_abi::ServiceHandle::new(1, 1).unwrap();
         let request = atrium.request_surface(logos_atrium::AppId::Terminal, client).unwrap();
-        let reference = SurfaceHandle::new(0, 1, 7).unwrap();
-        atrium.spawn_surface(request, reference).unwrap()
+        let first = atrium.spawn_surface(request, SurfaceHandle::new(0, 1, 7).unwrap()).unwrap();
+        atrium
+            .apply_action(logos_atrium::AtriumAction::Split(logos_atrium::SplitDirection::Vertical))
+            .unwrap();
+        assert!(atrium.has_empty_leaf());
+        let request = atrium.request_surface(logos_atrium::AppId::Terminal, client).unwrap();
+        let second = atrium.spawn_surface(request, SurfaceHandle::new(1, 1, 7).unwrap()).unwrap();
+        assert!(!atrium.has_empty_leaf());
+        let first = atrium.surface_by_reference(first.reference).unwrap();
+        (atrium, [first, second])
     }
 
-    /// SCENE-BUDGET (#69/#74/#76): the Terminal scene carries its chrome
+    /// SCENE-BUDGET (#69/#74/#76/#97): the Terminal scene carries its chrome
     /// (title bar, close control), the tab strip and one `TextGrid` content
-    /// node. Both the empty tab bar and its worst case — all
-    /// `TERMINAL_MAX_TABS` open, every chip/close control plus the add
-    /// button — must fit `MAX_GUI_NODES`/`MAX_UI_SCENE_OPS` and publish
-    /// within `MAX_UI_SCENE_PUBLISHER_BYTES`, matching the existing
-    /// Settings/Home scene budget tests. Both cases run in one test (rather
-    /// than two `#[test]`s) because `APP_SCENE_TREE`/`TERMINAL_TAB_STATE`
-    /// are process-wide `static mut`s that `cargo test`'s default parallel
-    /// threads would otherwise race.
+    /// node. With two panes sharing the four-session cap, the worst cases
+    /// are one pane holding every session (all `TERMINAL_MAX_TABS` chips,
+    /// close controls and the add button) and a 3 + 1 split; each pane's
+    /// scene must fit `MAX_GUI_NODES`/`MAX_UI_SCENE_OPS` and publish within
+    /// `MAX_UI_SCENE_PUBLISHER_BYTES`, matching the existing Settings/Home
+    /// scene budget tests. Everything runs in one test (rather than several
+    /// `#[test]`s) because `APP_SCENE_TREE` and the tab-state/grid-node
+    /// tables are process-wide `static mut`s that `cargo test`'s default
+    /// parallel threads would otherwise race.
     #[test]
-    fn terminal_scene_with_text_grid_fits_the_scene_budget() {
-        let surface = terminal_surface();
+    fn two_terminal_panes_with_worst_case_tabs_fit_the_scene_budget() {
+        let (atrium, panes) = terminal_panes();
         let calculator = logos_atrium::Calculator::new();
+        assert_ne!(panes[0].reference, panes[1].reference);
+        assert!(panes[0].bounds.width < logos_atrium::DESKTOP_SURFACE_BOUNDS.width);
 
-        for tab_state in
-            [0u16, logos_abi::pack_terminal_tab_state(0b1111, 3) /* worst case: 4 tabs open */]
-        {
-            unsafe {
-                *core::ptr::addr_of_mut!(TERMINAL_TAB_STATE) = tab_state;
+        let configs = [
+            [0u16, 0],
+            [logos_abi::pack_terminal_tab_state(0b1111, 3), 0],
+            [
+                logos_abi::pack_terminal_tab_state(0b0111, 2),
+                logos_abi::pack_terminal_tab_state(0b1000, 3),
+            ],
+        ];
+        for config in configs {
+            for (surface, state) in panes.iter().zip(config) {
+                set_terminal_tab_state(surface.reference, state);
             }
-            assert!(build_app_scene_tree(surface, &calculator));
-
-            let tree = unsafe { &mut *core::ptr::addr_of_mut!(APP_SCENE_TREE) };
-            assert!(tree.tree().len() <= logos_ui::MAX_UI_NODES);
-            assert!(tree.tree().len() <= logos_abi::MAX_GUI_NODES);
-
-            let mut publisher = logos_ui_graphics::UiScenePublisher::new();
-            let mut sink = CollectingSceneSink::default();
-            let (status, sent) = publisher
-                .publish(
-                    surface.reference,
-                    1,
-                    tree,
-                    logos_atrium::Atrium::new().app_theme(),
-                    None,
-                    &mut sink,
-                )
-                .unwrap();
-            assert_eq!(status, IpcStatus::Ok);
-            assert!(sent <= logos_ui_graphics::MAX_UI_SCENE_OPS);
+            // Never more sessions open than the shared cap allows.
             assert!(
-                core::mem::size_of::<logos_ui_graphics::UiScenePublisher>()
-                    <= logos_ui_graphics::MAX_UI_SCENE_PUBLISHER_BYTES
+                (terminal_open_session_bitmap(&atrium).count_ones() as usize)
+                    <= logos_abi::TERMINAL_MAX_TABS
             );
+            for surface in panes {
+                assert!(build_app_scene_tree(surface, &calculator));
 
-            let node_id = unsafe { *core::ptr::addr_of!(TERMINAL_GRID_NODE_ID) };
-            assert_ne!(node_id, 0);
-            assert!(sink.operations.iter().any(|operation| operation.node_id == node_id
-                && operation.command.kind == logos_abi::GuiDrawKind::TextGrid));
+                let tree = unsafe { &mut *core::ptr::addr_of_mut!(APP_SCENE_TREE) };
+                assert!(tree.tree().len() <= logos_ui::MAX_UI_NODES);
+                assert!(tree.tree().len() <= logos_abi::MAX_GUI_NODES);
+
+                let mut publisher = logos_ui_graphics::UiScenePublisher::new();
+                let mut sink = CollectingSceneSink::default();
+                let (status, sent) = publisher
+                    .publish(
+                        surface.reference,
+                        1,
+                        tree,
+                        logos_atrium::Atrium::new().app_theme(),
+                        None,
+                        &mut sink,
+                    )
+                    .unwrap();
+                assert_eq!(status, IpcStatus::Ok);
+                assert!(sent <= logos_ui_graphics::MAX_UI_SCENE_OPS);
+                assert!(
+                    core::mem::size_of::<logos_ui_graphics::UiScenePublisher>()
+                        <= logos_ui_graphics::MAX_UI_SCENE_PUBLISHER_BYTES
+                );
+
+                let node_id = terminal_grid_node_id(surface.reference);
+                assert_ne!(node_id, 0);
+                assert!(sink.operations.iter().any(|operation| operation.node_id == node_id
+                    && operation.command.kind == logos_abi::GuiDrawKind::TextGrid));
+            }
         }
 
-        unsafe {
-            *core::ptr::addr_of_mut!(TERMINAL_TAB_STATE) = 0;
+        // Tab state is per surface: pane one's chips never leak into pane two.
+        set_terminal_tab_state(panes[0].reference, logos_abi::pack_terminal_tab_state(0b0011, 0));
+        set_terminal_tab_state(panes[1].reference, logos_abi::pack_terminal_tab_state(0b0100, 2));
+        assert_eq!(
+            logos_abi::terminal_tab_open_bitmap(terminal_tab_state(panes[0].reference)),
+            0b0011
+        );
+        assert_eq!(
+            logos_abi::terminal_tab_open_bitmap(terminal_tab_state(panes[1].reference)),
+            0b0100
+        );
+        assert_eq!(terminal_open_session_bitmap(&atrium), 0b0111);
+
+        for surface in panes {
+            unbind_app_scene_publisher(surface.reference);
+            set_terminal_tab_state(surface.reference, 0);
         }
     }
 }

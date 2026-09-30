@@ -7,7 +7,7 @@ mod common;
 use logos_abi::{
     AtriumApp, AtriumSurfaceInput, AtriumSurfaceRequest, AtriumSurfaceResponse, GuiRect,
     GuiTextGridRow, InputMessage, IpcBytes, IpcStatus, KeyCode, KeyState, MessageKind,
-    PointerState, SurfaceHandle, TerminalTabHit, pack_terminal_tab_state, terminal_tab_bar_hit,
+    PointerState, SurfaceHandle, TerminalTabHit, terminal_tab_bar_hit,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -51,6 +51,11 @@ const SESSION_OUTPUT_CAPABILITY: common::CapabilitySpec = common::capability_con
 static mut TERMINAL: logos_terminal::TerminalService = logos_terminal::TerminalService::new();
 static mut PENDING_RENDER: Option<GuiTextGridRow> = None;
 static mut PENDING_SESSION_INPUT: Option<IpcBytes> = None;
+/// `SessionClose` messages for the sessions of a pane Atrium closed
+/// (T3b, #97), flushed before any further session input so a reused slot
+/// never sees its old owner's state.
+static mut PENDING_CLOSES: logos_terminal::PaneCloses =
+    [None; logos_terminal::MAX_TERMINAL_SESSIONS];
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -58,6 +63,7 @@ pub extern "C" fn _start() -> ! {
     let terminal = unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL) };
     let pending_render = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_RENDER) };
     let pending_session_input = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_SESSION_INPUT) };
+    let pending_closes = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_CLOSES) };
     let input_capability = match common::capability_handle(INPUT_CAPABILITY) {
         Ok(capability) => capability,
         Err(_) => common::idle(),
@@ -93,32 +99,46 @@ pub extern "C" fn _start() -> ! {
     // tick would race that gate and auto-attach a surface as soon as Home
     // is reached, before the user ever asked for one.
     let mut surface_request_sent = false;
-    let mut terminal_surface = SurfaceHandle::EMPTY;
-    let mut terminal_bounds = GuiRect::EMPTY;
-    // Re-sent whenever the tab bar changes (open/close/switch) once a
-    // surface already exists: Atrium's "surface already exists for this
+    // Re-sent per pane whenever its tab bar changes (open/close/switch)
+    // once its surface exists: Atrium's "surface already exists for this
     // client" path already reconfirms the same surface on a repeat
     // request, so this doubles as the tab-state channel without a new
-    // message kind (#76).
-    let mut last_sent_tab_state: Option<u16> = None;
+    // message kind (#76). Since T3b (#97) each request names its pane's
+    // surface, because one Terminal client can own several.
+    let mut last_sent: [Option<(SurfaceHandle, u16)>; logos_terminal::MAX_TERMINAL_PANES] =
+        [None; logos_terminal::MAX_TERMINAL_PANES];
     loop {
         if pending_render.is_some() {
             common::heartbeat();
         } else {
             common::heartbeat_tick(&mut heartbeat_ticks);
         }
-        let tab_state =
-            pack_terminal_tab_state(terminal.open_bitmap(), terminal.active_slot() as u8);
-        let surface_request = base_surface_request.with_tab_state(tab_state);
-        let want_send = (!surface_request_sent && !terminal_surface.is_valid())
-            || (terminal_surface.is_valid() && last_sent_tab_state != Some(tab_state));
-        if want_send {
-            match common::ipc_send_handle(atrium_surface_request_capability, &surface_request) {
-                IpcStatus::Ok => {
-                    surface_request_sent = true;
-                    last_sent_tab_state = Some(tab_state);
-                }
-                IpcStatus::Full => {}
+        let any_pane_bound = (0..logos_terminal::MAX_TERMINAL_PANES)
+            .any(|pane| terminal.pane_report(pane).is_some());
+        if !surface_request_sent && !any_pane_bound {
+            match common::ipc_send_handle(atrium_surface_request_capability, &base_surface_request)
+            {
+                IpcStatus::Ok => surface_request_sent = true,
+                IpcStatus::Full
+                | IpcStatus::Stale
+                | IpcStatus::Disconnected
+                | IpcStatus::Unauthorized
+                | IpcStatus::Malformed
+                | IpcStatus::Empty => {}
+            }
+        }
+        for (pane, sent) in last_sent.iter_mut().enumerate() {
+            let Some((surface, tab_state)) = terminal.pane_report(pane) else {
+                *sent = None;
+                continue;
+            };
+            if *sent == Some((surface, tab_state)) {
+                continue;
+            }
+            let request = base_surface_request.with_tab_state(tab_state).with_surface(surface);
+            match common::ipc_send_handle(atrium_surface_request_capability, &request) {
+                IpcStatus::Ok => *sent = Some((surface, tab_state)),
+                IpcStatus::Full => break,
                 IpcStatus::Stale
                 | IpcStatus::Disconnected
                 | IpcStatus::Unauthorized
@@ -127,33 +147,46 @@ pub extern "C" fn _start() -> ! {
             }
         }
         let mut surface_response =
-            AtriumSurfaceResponse::new(surface_request, logos_abi::GuiStatus::Malformed);
+            AtriumSurfaceResponse::new(base_surface_request, logos_abi::GuiStatus::Malformed);
         while common::ipc_receive_handle(atrium_surface_response_capability, &mut surface_response)
             == IpcStatus::Ok
         {
-            if surface_response.is_update() && surface_response.surface == terminal_surface {
-                terminal_bounds = surface_response.bounds;
-                terminal.resize_to_surface(surface_response.bounds);
-            } else if surface_response.is_valid_for(surface_request)
+            if surface_response.is_update() {
+                if terminal.select(surface_response.surface) {
+                    terminal.resize_to_surface(surface_response.bounds);
+                }
+            } else if surface_response.is_valid_for(base_surface_request)
                 && surface_response.status == logos_abi::GuiStatus::Ok
                 && surface_response.surface.is_valid()
             {
-                if surface_response.surface != terminal_surface {
-                    terminal.reset();
-                    terminal_bounds = surface_response.bounds;
-                    terminal.resize_to_surface(surface_response.bounds);
-                } else if surface_response.bounds != terminal_bounds {
-                    // A same-surface reconfirmation just echoes the tab
-                    // state we sent; only re-layout if bounds actually
-                    // moved (tiling), so switching tabs never forces a
-                    // spurious resize/redraw of the active session.
-                    terminal_bounds = surface_response.bounds;
-                    terminal.resize_to_surface(surface_response.bounds);
+                // A same-surface reconfirmation just echoes the tab state
+                // we sent; `bind_surface` only re-lays out if the bounds
+                // actually moved (tiling), so switching tabs never forces a
+                // spurious resize/redraw of the active session. An unseen
+                // surface attaches to the retained pane or a new one (T3b).
+                terminal.bind_surface(surface_response.surface, surface_response.bounds);
+            } else if surface_response.is_revoke() {
+                if pending_render.is_some_and(|row| row.surface == surface_response.surface) {
+                    *pending_render = None;
                 }
-                terminal_surface = surface_response.surface;
-            } else if surface_response.is_revoke() && surface_response.surface == terminal_surface {
-                terminal_surface = SurfaceHandle::EMPTY;
-                *pending_render = None;
+                let closes = terminal.unbind_surface(surface_response.surface);
+                for (slot, close) in closes.iter().enumerate() {
+                    if close.is_some() {
+                        pending_closes[slot] = *close;
+                    }
+                }
+            }
+        }
+        for slot in pending_closes.iter_mut() {
+            let Some(message) = *slot else { continue };
+            match common::ipc_send_handle(session_input_capability, &message) {
+                IpcStatus::Full => break,
+                IpcStatus::Ok
+                | IpcStatus::Stale
+                | IpcStatus::Disconnected
+                | IpcStatus::Unauthorized
+                | IpcStatus::Malformed
+                | IpcStatus::Empty => *slot = None,
             }
         }
         if let Some(message) = *pending_session_input {
@@ -169,7 +202,7 @@ pub extern "C" fn _start() -> ! {
                 | IpcStatus::Empty => *pending_session_input = None,
             }
         }
-        if pending_session_input.is_none() {
+        if pending_session_input.is_none() && pending_closes.iter().all(Option::is_none) {
             let mut event = AtriumSurfaceInput::new(
                 SurfaceHandle::EMPTY,
                 InputMessage::key(KeyCode::Unknown, KeyState::Released, 0),
@@ -181,10 +214,12 @@ pub extern "C" fn _start() -> ! {
                     let _ = terminal.input(&event.input);
                     continue;
                 }
-                if !event.is_valid() || event.surface != terminal_surface {
+                // Input is addressed to one pane's surface (T3b, #97); the
+                // service then acts on that pane's sessions only.
+                if !event.is_valid() || !terminal.select(event.surface) {
                     continue;
                 }
-                if let Some(close) = handle_tab_bar_click(terminal, terminal_bounds, &event.input) {
+                if let Some(close) = handle_tab_bar_click(terminal, &event.input) {
                     if let Some(message) = close {
                         // Best-effort: a dropped close on backpressure just
                         // leaves Session's queued/in-flight command running
@@ -219,22 +254,10 @@ pub extern "C" fn _start() -> ! {
         if pending_render.is_none() {
             *pending_render = terminal.next_grid_row();
         }
-        if let Some(mut row) = *pending_render {
-            if !terminal_surface.is_valid() {
-                common::wait_on_capabilities(&[
-                    input_capability,
-                    session_input_capability,
-                    session_output_capability,
-                    atrium_render_capability,
-                    atrium_surface_request_capability,
-                    atrium_surface_response_capability,
-                ]);
-                continue;
-            }
+        if let Some(row) = *pending_render {
             // `node_id` is left at 0: only Atrium knows this surface's own
             // text-grid node id, and fills it in before relaying the row
-            // to Display (#74).
-            row.surface = terminal_surface;
+            // to Display (#74). The service addressed `row.surface`.
             match common::ipc_send_handle(atrium_render_capability, &row) {
                 IpcStatus::Ok => {
                     *pending_render = terminal.next_grid_row();
@@ -273,13 +296,13 @@ pub extern "C" fn _start() -> ! {
 /// for a closed tab's session to be forwarded to Session.
 fn handle_tab_bar_click(
     terminal: &mut logos_terminal::TerminalService,
-    bounds: GuiRect,
     input: &InputMessage,
 ) -> Option<Option<IpcBytes>> {
     let pointer = input.pointer_event()?;
     if pointer.state != PointerState::Down || pointer.buttons & 1 == 0 {
         return None;
     }
+    let bounds = terminal.pane_bounds();
     let local_bounds = GuiRect::new(0, 0, bounds.width, bounds.height);
     match terminal_tab_bar_hit(local_bounds, i32::from(pointer.x), i32::from(pointer.y))? {
         TerminalTabHit::Tab(slot) => {
