@@ -617,6 +617,28 @@ function Framebuffer-SettingsCategorySelected {
     return $false
 }
 
+# A pointer click can be dropped (decoder still draining the walk, surface not
+# yet accepting input). Re-walk from the (0, 0) clamp and click again until
+# the frame condition holds, instead of trusting one blind click (#109).
+function Invoke-QmpClickUntil {
+    param([hashtable]$Qmp, [int]$X, [int]$Y, [scriptblock]$Condition, [int]$Attempts = 4)
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        Send-QmpPointerWalk2 $Qmp -3000 -2000
+        Send-QmpPointerWalkPixels $Qmp $X $Y
+        Start-Sleep -Milliseconds 150
+        Send-QmpPointerButton $Qmp $true
+        # Hold the button across at least one Atrium frame: with the
+        # compositor drawing ~1 frame/s under TCG, a 100 ms press/release
+        # pair can start and end between two frames and be seen as no click
+        # (the cursor hovers the row but it never selects). Hold longer on
+        # each retry.
+        Start-Sleep -Milliseconds (500 * [Math]::Pow(2, $attempt))
+        Send-QmpPointerButton $Qmp $false
+        if (& $Condition) { return $true }
+    }
+    return $false
+}
+
 function Wait-QmpSettingsCategory {
     param([hashtable]$Qmp, [string]$Path, [int]$Selected, [int]$TimeoutSeconds)
     # Require the matching frame twice in a row so the whole page update,
@@ -764,7 +786,11 @@ function Wait-QmpRectSettled {
 # changing between two consecutive dumps (session/Flow output has finished
 # draining), or gives up at the deadline and returns the last dump taken.
 function Wait-QmpTerminalContentSettled {
-    param([hashtable]$Qmp, [string]$Path, [int]$TimeoutSeconds)
+    # -NotEqualTo: content the screen must first move away from (#109). With
+    # a step that switches tabs and types, a slow drain can leave the old
+    # frame unchanged for longer than the stable streak, which would settle
+    # on the stale frame before the step's effect has painted at all.
+    param([hashtable]$Qmp, [string]$Path, [int]$TimeoutSeconds, $NotEqualTo = $null)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
     $previous = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($Path))
@@ -773,7 +799,9 @@ function Wait-QmpTerminalContentSettled {
         Start-Sleep -Milliseconds 500
         Invoke-QmpCommand $Qmp.Writer $Qmp.Reader @{ execute = 'screendump'; arguments = @{ filename = $Path } } | Out-Null
         $current = Get-TerminalContentBytes ([IO.File]::ReadAllBytes($Path))
-        if (Test-BytesEqual $previous $current) {
+        if ($null -ne $NotEqualTo -and (Test-BytesEqual $NotEqualTo $current)) {
+            $stableStreak = 0
+        } elseif (Test-BytesEqual $previous $current) {
             # Require 3 consecutive identical dumps (not just 2): a slow,
             # bursty drain can otherwise leave a multi-hundred-ms gap between
             # bursts that looks "stable" for one interval but isn't done yet.
@@ -1333,7 +1361,7 @@ try {
             Send-QmpText $qmp 'echo("tabtwoinflight")'
             Send-QmpKey $qmp 'ret'
             $terminalTabTwoInFlightFrame = Join-Path $repoRoot "target\qemu-terminal-tab2-inflight-$PID.ppm"
-            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalTabTwoInFlightFrame $TimeoutSeconds)) {
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalTabTwoInFlightFrame $TimeoutSeconds $tabOneContentAfterSwitch)) {
                 throw 'Second tab did not settle after typing while the first tab had a command in flight.'
             }
             $tabTwoInFlightContent =
@@ -1343,7 +1371,7 @@ try {
             }
             Send-QmpKey $qmp 'ctrl-tab'
             $terminalTabOneAfterFlightFrame = Join-Path $repoRoot "target\qemu-terminal-tab1-after-flight-$PID.ppm"
-            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalTabOneAfterFlightFrame $TimeoutSeconds)) {
+            if (-not (Wait-QmpTerminalContentSettled $qmp $terminalTabOneAfterFlightFrame $TimeoutSeconds $tabTwoInFlightContent)) {
                 throw 'First tab did not settle on its own reply after its command was submitted concurrently.'
             }
             $tabOneAfterFlightContent =
@@ -1507,12 +1535,9 @@ try {
             # the raw-to-pixel ratio), so every walk below is relative to a
             # known origin.
             Send-QmpPointerWalk2 $qmp -3000 -2000
-            Send-QmpPointerWalkPixels $qmp ($settingsOriginX + 136) ($settingsOriginY + 282)
-            Start-Sleep -Milliseconds 150
-            Send-QmpPointerButton $qmp $true
-            Send-QmpPointerButton $qmp $false
             $settingsAppearanceDarkFrame = Join-Path $repoRoot "target\qemu-settings-appearance-predark-$PID.ppm"
-            if (-not (Wait-QmpSettingsCategory $qmp $settingsAppearanceDarkFrame 2 $TimeoutSeconds)) {
+            if (-not (Invoke-QmpClickUntil $qmp ($settingsOriginX + 136) ($settingsOriginY + 282) {
+                        Wait-QmpSettingsCategory $qmp $settingsAppearanceDarkFrame 2 6 })) {
                 throw 'Settings did not reopen on the Appearance category before the light-theme click.'
             }
             # Click the Light theme row (services/atrium/src/lib.rs
@@ -1521,17 +1546,13 @@ try {
             # instead of its own three nodes -- MAX_GUI_NODES has no spare
             # node for a third toggle). Re-clamp to (0, 0) first since the
             # category click above already moved the cursor.
-            Send-QmpPointerWalk2 $qmp -3000 -2000
-            Send-QmpPointerWalkPixels $qmp ($settingsOriginX + 630) ($settingsOriginY + 378)
-            Start-Sleep -Milliseconds 150
-            Send-QmpPointerButton $qmp $true
-            Send-QmpPointerButton $qmp $false
             # Row 0 (Keyboard) is unselected and idle, so its pane pixel
             # reads the theme's `panel` colour directly -- white in
             # `UiSceneTheme::LIGHT`, unlike the accent- or focus-filled
             # pixels `Framebuffer-SettingsCategorySelected` samples.
             $settingsAppearanceLightFrame = Join-Path $repoRoot "target\qemu-settings-appearance-light-$PID.ppm"
-            if (-not (Wait-QmpPixelIsWhite $qmp $settingsAppearanceLightFrame ($settingsOriginX + 36) ($settingsOriginY + 186) $TimeoutSeconds)) {
+            if (-not (Invoke-QmpClickUntil $qmp ($settingsOriginX + 630) ($settingsOriginY + 378) {
+                        Wait-QmpPixelIsWhite $qmp $settingsAppearanceLightFrame ($settingsOriginX + 36) ($settingsOriginY + 186) 6 })) {
                 throw 'Settings did not switch to the light theme after the toggle click.'
             }
             # S4 (#81, ADR-0091): the light-theme toggle above also queues a
