@@ -3165,6 +3165,38 @@ mod tests {
         assert!(!restored_after_namespace_commit.is_claimed());
     }
 
+    /// Storage startup (`ensure_user_catalog`) on a fresh disk: a write that
+    /// fails at any point of the first catalog save must leave a disk the next
+    /// boot can open and either load the catalog or create it (issue #110).
+    #[test]
+    fn first_catalog_save_failure_at_any_write_is_recoverable_on_next_boot() {
+        for fail_at in 0.. {
+            let mut store = CommitPublicationStore::new();
+            let mut fs = DurableNamespaceV5::format_v5(store).unwrap();
+            // Arm after format, like a write failing during the first boot save.
+            fs.store.arm(fail_at);
+            let mut buffer = [0; USER_SNAPSHOT_BYTES];
+            let _ = UserCatalog::new().save_to(&mut fs, &mut buffer);
+            store = fs.into_store();
+            if !store.triggered {
+                break;
+            }
+
+            let mut reopened = DurableNamespaceV5::open_v5(store).unwrap();
+            let mut catalog = Box::new(UserCatalog::new());
+            match UserCatalogStore::load(&mut reopened, &mut buffer) {
+                Ok(length) => {
+                    assert_ne!(length, 0, "fail_at={fail_at}");
+                    catalog.restore_snapshot(&buffer[..length]).unwrap();
+                }
+                Err(UserError::NotFound) => {
+                    catalog.save_to(&mut reopened, &mut buffer).unwrap();
+                }
+                Err(error) => panic!("fail_at={fail_at}: {error:?}"),
+            }
+        }
+    }
+
     #[test]
     fn multi_extent_files_reopen_and_reclaim_old_space() {
         let mut fs = DurableNamespace::format(heap_store()).unwrap();

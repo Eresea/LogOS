@@ -85,7 +85,20 @@ fn storage_error_status(error: virtio_device::DeviceError) -> logos_abi::Storage
         virtio_device::DeviceError::ReadOnly => logos_abi::StorageStatus::ReadOnly,
         virtio_device::DeviceError::StaleCompletion => logos_abi::StorageStatus::Stale,
         virtio_device::DeviceError::Unsupported => logos_abi::StorageStatus::Unsupported,
-        _ => logos_abi::StorageStatus::Io,
+        other => {
+            #[cfg(feature = "qemu-proof")]
+            proof_line(match other {
+                virtio_device::DeviceError::Timeout => b"LogOS vNext: storage device io=timeout",
+                virtio_device::DeviceError::NotFound => b"LogOS vNext: storage device io=notfound",
+                virtio_device::DeviceError::Io => b"LogOS vNext: storage device io=device-status",
+                virtio_device::DeviceError::InvalidCompletion => {
+                    b"LogOS vNext: storage device io=invalid-completion"
+                }
+                _ => b"LogOS vNext: storage device io=other",
+            });
+            let _ = other;
+            logos_abi::StorageStatus::Io
+        }
     }
 }
 
