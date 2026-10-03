@@ -478,15 +478,22 @@ impl<B: BlockStore, V: NamespaceVolume> StorageApi<B, V> {
     }
 
     fn stat(&self, request: &StorageApiRequest<'_>) -> ResponsePayload {
-        let object = match self.namespace.resolve_path(request.path) {
-            Ok(object) => object,
-            Err(error) => return ResponsePayload::empty(map_error(error), 0),
+        let transaction_id = request.transaction_id;
+        let info = if transaction_id == 0 {
+            self.namespace.resolve_path(request.path).and_then(|object| self.namespace.stat(object))
+        } else {
+            match self.transaction(transaction_id) {
+                Ok(transaction) => {
+                    transaction.stat(self.namespace.transaction_base(), request.path)
+                }
+                Err(status) => return ResponsePayload::empty(status, transaction_id),
+            }
         };
-        let info = match self.namespace.stat(object) {
+        let info = match info {
             Ok(info) => info,
-            Err(error) => return ResponsePayload::empty(map_error(error), 0),
+            Err(error) => return ResponsePayload::empty(map_error(error), transaction_id),
         };
-        let mut response = ResponsePayload::empty(StorageApiStatus::Ok, 0);
+        let mut response = ResponsePayload::empty(StorageApiStatus::Ok, transaction_id);
         response.data[0..2].copy_from_slice(&info.id.slot().to_le_bytes());
         response.data[2..6].copy_from_slice(&info.id.generation().to_le_bytes());
         response.data[6..8].copy_from_slice(&info.parent.slot().to_le_bytes());
@@ -546,6 +553,9 @@ impl<B: BlockStore, V: NamespaceVolume> StorageApi<B, V> {
     }
 
     fn fsync(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
+        if request.transaction_id != 0 {
+            return ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id);
+        }
         match self.namespace.flush() {
             Ok(()) => ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id),
             Err(error) => ResponsePayload::empty(map_error(error), request.transaction_id),
@@ -557,7 +567,10 @@ impl<B: BlockStore, V: NamespaceVolume> StorageApi<B, V> {
             Ok(object) => object,
             Err(status) => return ResponsePayload::empty(status, request.transaction_id),
         };
-        let length = u32::from_le_bytes(request.data.try_into().unwrap()) as usize;
+        let Ok(length) = <[u8; 4]>::try_from(request.data) else {
+            return ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id);
+        };
+        let length = u32::from_le_bytes(length) as usize;
         let Some(slot) = self.maps.iter().position(|map| map.mapping.is_none()) else {
             return ResponsePayload::empty(StorageApiStatus::Capacity, request.transaction_id);
         };
@@ -598,7 +611,15 @@ impl<B: BlockStore, V: NamespaceVolume> StorageApi<B, V> {
     }
 
     fn mkdir(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
-        match self.namespace.mkdir_path(request.path) {
+        let result = if request.transaction_id == 0 {
+            self.namespace.mkdir_path(request.path)
+        } else {
+            match self.transaction_mut_with_base(request.transaction_id) {
+                Ok((base, transaction)) => transaction.create_directory(base, request.path),
+                Err(status) => return ResponsePayload::empty(status, request.transaction_id),
+            }
+        };
+        match result {
             Ok(_) => ResponsePayload::empty(StorageApiStatus::Ok, request.transaction_id),
             Err(error) => ResponsePayload::empty(map_error(error), request.transaction_id),
         }
@@ -708,6 +729,10 @@ impl<B: BlockStore, V: NamespaceVolume> StorageApi<B, V> {
     fn stage_begin(&mut self, request: &StorageApiRequest<'_>) -> ResponsePayload {
         if request.transaction_id != 0 || request.path.len() > STAGE_PATH_BYTES {
             return ResponsePayload::empty(StorageApiStatus::Invalid, request.transaction_id);
+        }
+        // Like Begin, an open stage must be committed or aborted by its owner first.
+        if self.staged.is_some() {
+            return ResponsePayload::empty(StorageApiStatus::Busy, 0);
         }
         let handle = self.next_stage;
         self.next_stage = self.next_stage.wrapping_add(1).max(1);
@@ -1875,5 +1900,119 @@ mod tests {
         assert_eq!(response.status, StorageApiStatus::Ok);
         assert_eq!(response.data, b"installed generation 1\r\n");
         assert!(api.into_namespace().lookup_package(ServiceId::Flow).is_ok());
+    }
+    #[test]
+    fn commit_is_stale_after_mkdir_reuses_a_pending_slot() {
+        let namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let txid = status(
+            &api.handle(&request(StorageApiOperation::Begin, 0, b"", b"", b"", 0, 1)).unwrap(),
+        )
+        .transaction_id;
+        let created = api
+            .handle(&request(StorageApiOperation::CreateFile, txid, b"/x", b"", b"", 0, 2))
+            .unwrap();
+        assert_eq!(status(&created).status, StorageApiStatus::Ok);
+        for (request_id, path) in [(3, &b"/d"[..]), (4, b"/d/child")] {
+            let mkdir = StorageApiRequest::encode_extension(
+                StorageApiOperation::Mkdir,
+                0,
+                request_id,
+                0,
+                0,
+                path,
+                b"",
+                b"",
+            )
+            .unwrap();
+            assert_eq!(status(&api.handle(&mkdir).unwrap()).status, StorageApiStatus::Ok);
+        }
+        let commit =
+            api.handle(&request(StorageApiOperation::Commit, txid, b"", b"", b"", 0, 5)).unwrap();
+        assert_eq!(status(&commit).status, StorageApiStatus::Stale);
+
+        let namespace = DurableNamespace::open(api.into_namespace().into_store()).unwrap();
+        assert!(namespace.resolve_path(b"/d/child").is_ok());
+        assert_eq!(namespace.resolve_path(b"/x"), Err(NamespaceError::NotFound));
+    }
+
+    #[test]
+    fn commit_is_stale_after_a_concurrent_staged_write() {
+        let mut namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        namespace.create_file(namespace.root(), b"f").unwrap();
+        let mut api = StorageApi::new(namespace);
+        let txid = status(
+            &api.handle(&request(StorageApiOperation::Begin, 0, b"", b"", b"", 0, 1)).unwrap(),
+        )
+        .transaction_id;
+        let write = request(
+            StorageApiOperation::Write,
+            txid,
+            b"/f",
+            b"",
+            b"tx",
+            STORAGE_API_FLAG_REPLACE,
+            2,
+        );
+        assert_eq!(status(&api.handle(&write).unwrap()).status, StorageApiStatus::Ok);
+        let stage = status(
+            &api.handle(&request(StorageApiOperation::StageWriteBegin, 0, b"/f", b"", b"", 0, 3))
+                .unwrap(),
+        )
+        .transaction_id;
+        for (operation, data, request_id) in [
+            (StorageApiOperation::StageWriteChunk, &b"staged"[..], 4),
+            (StorageApiOperation::StageWriteCommit, b"", 5),
+        ] {
+            let response = api.handle(&request(operation, stage, b"", b"", data, 0, request_id));
+            assert_eq!(status(&response.unwrap()).status, StorageApiStatus::Ok);
+        }
+        let commit =
+            api.handle(&request(StorageApiOperation::Commit, txid, b"", b"", b"", 0, 6)).unwrap();
+        assert_eq!(status(&commit).status, StorageApiStatus::Stale);
+        let read =
+            api.handle(&request(StorageApiOperation::Read, 0, b"/f", b"", b"", 0, 7)).unwrap();
+        assert_eq!(status(&read).data, b"staged");
+    }
+    fn extension(operation: StorageApiOperation, txid: u64, path: &[u8], id: u32) -> IpcBytes {
+        StorageApiRequest::encode_extension(operation, 0, id, txid, 0, path, b"", b"").unwrap()
+    }
+
+    #[test]
+    fn mkdir_and_stat_follow_the_transaction_and_fsync_rejects_it() {
+        let namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let txid = status(
+            &api.handle(&request(StorageApiOperation::Begin, 0, b"", b"", b"", 0, 1)).unwrap(),
+        )
+        .transaction_id;
+        let mkdir = api.handle(&extension(StorageApiOperation::Mkdir, txid, b"/d", 2)).unwrap();
+        assert_eq!(status(&mkdir).status, StorageApiStatus::Ok);
+        let inside = api.handle(&extension(StorageApiOperation::Stat, txid, b"/d", 3)).unwrap();
+        assert_eq!(status(&inside).status, StorageApiStatus::Ok);
+        assert_eq!(status(&inside).data[12], crate::ObjectKind::Directory as u8);
+        let outside = api.handle(&extension(StorageApiOperation::Stat, 0, b"/d", 4)).unwrap();
+        assert_eq!(status(&outside).status, StorageApiStatus::NotFound);
+        let fsync = api.handle(&extension(StorageApiOperation::Fsync, txid, b"", 5)).unwrap();
+        assert_eq!(status(&fsync).status, StorageApiStatus::Invalid);
+        let stale = api.handle(&extension(StorageApiOperation::Mkdir, txid + 1, b"/e", 6)).unwrap();
+        assert_eq!(status(&stale).status, StorageApiStatus::Stale);
+        let commit =
+            api.handle(&request(StorageApiOperation::Commit, txid, b"", b"", b"", 0, 7)).unwrap();
+        assert_eq!(status(&commit).status, StorageApiStatus::Ok);
+        let after = api.handle(&extension(StorageApiOperation::Stat, 0, b"/d", 8)).unwrap();
+        assert_eq!(status(&after).status, StorageApiStatus::Ok);
+    }
+
+    #[test]
+    fn second_stage_begin_is_busy_until_the_first_is_aborted() {
+        let namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let begin = |id| request(StorageApiOperation::StageWriteBegin, 0, b"/s", b"", b"", 0, id);
+        let first = status(&api.handle(&begin(1)).unwrap()).transaction_id;
+        assert_eq!(status(&api.handle(&begin(2)).unwrap()).status, StorageApiStatus::Busy);
+        let abort = request(StorageApiOperation::StageWriteAbort, first, b"", b"", b"", 0, 3);
+        assert_eq!(status(&api.handle(&abort).unwrap()).status, StorageApiStatus::Ok);
+        assert_eq!(status(&api.handle(&begin(4)).unwrap()).status, StorageApiStatus::Ok);
     }
 }
