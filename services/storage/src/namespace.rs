@@ -1685,7 +1685,7 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
     }
 
     pub fn begin_transaction(&self) -> NamespaceTransaction {
-        NamespaceTransaction::new()
+        NamespaceTransaction::new(self.volume.generation())
     }
 
     pub(crate) fn transaction_base(&self) -> &ObjectNamespace {
@@ -2024,6 +2024,9 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
                     &block,
                 )?;
             }
+        }
+        if self.retired_file_extent_count + old_extent_count > self.retired_file_extents.len() {
+            return Err(NamespaceError::Capacity);
         }
         self.namespace.set_file_extents(id, &new_extents[..new_extent_count], new_length)?;
         self.queue_retired_file_extents(&old_extents[..old_extent_count])?;
@@ -2513,16 +2516,18 @@ pub struct NamespaceTransaction {
     changes: [Option<ObjectRecord>; MAX_OBJECTS],
     retired_extents: [CowExtent; MAX_OBJECTS * MAX_FILE_EXTENTS],
     retired_extent_count: usize,
+    base_generation: u64,
 }
 
 impl NamespaceTransaction {
-    fn new() -> Self {
+    fn new(base_generation: u64) -> Self {
         Self {
             records: [PendingRecord::EMPTY; MAX_TRANSACTION_RECORDS],
             count: 0,
             changes: [None; MAX_OBJECTS],
             retired_extents: [CowExtent::EMPTY; MAX_OBJECTS * MAX_FILE_EXTENTS],
             retired_extent_count: 0,
+            base_generation,
         }
     }
 
@@ -2904,6 +2909,11 @@ impl NamespaceTransaction {
         namespace: &mut DurableNamespace<B, V>,
     ) -> Result<u64, NamespaceError> {
         let previous_generation = namespace.volume.generation();
+        // Changes hold whole records copied from the base; publishing them over a newer base
+        // would drop concurrent updates and can orphan records reusing the same slot.
+        if previous_generation != self.base_generation {
+            return Err(NamespaceError::Stale);
+        }
         for slot in 0..MAX_OBJECTS {
             if let Some(record) = self.changes[slot] {
                 namespace.namespace.records[slot] = record;

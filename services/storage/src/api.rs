@@ -1876,4 +1876,77 @@ mod tests {
         assert_eq!(response.data, b"installed generation 1\r\n");
         assert!(api.into_namespace().lookup_package(ServiceId::Flow).is_ok());
     }
+    #[test]
+    fn commit_is_stale_after_mkdir_reuses_a_pending_slot() {
+        let namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let mut api = StorageApi::new(namespace);
+        let txid = status(
+            &api.handle(&request(StorageApiOperation::Begin, 0, b"", b"", b"", 0, 1)).unwrap(),
+        )
+        .transaction_id;
+        let created = api
+            .handle(&request(StorageApiOperation::CreateFile, txid, b"/x", b"", b"", 0, 2))
+            .unwrap();
+        assert_eq!(status(&created).status, StorageApiStatus::Ok);
+        for (request_id, path) in [(3, &b"/d"[..]), (4, b"/d/child")] {
+            let mkdir = StorageApiRequest::encode_extension(
+                StorageApiOperation::Mkdir,
+                0,
+                request_id,
+                0,
+                0,
+                path,
+                b"",
+                b"",
+            )
+            .unwrap();
+            assert_eq!(status(&api.handle(&mkdir).unwrap()).status, StorageApiStatus::Ok);
+        }
+        let commit =
+            api.handle(&request(StorageApiOperation::Commit, txid, b"", b"", b"", 0, 5)).unwrap();
+        assert_eq!(status(&commit).status, StorageApiStatus::Stale);
+
+        let namespace = DurableNamespace::open(api.into_namespace().into_store()).unwrap();
+        assert!(namespace.resolve_path(b"/d/child").is_ok());
+        assert_eq!(namespace.resolve_path(b"/x"), Err(NamespaceError::NotFound));
+    }
+
+    #[test]
+    fn commit_is_stale_after_a_concurrent_staged_write() {
+        let mut namespace = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        namespace.create_file(namespace.root(), b"f").unwrap();
+        let mut api = StorageApi::new(namespace);
+        let txid = status(
+            &api.handle(&request(StorageApiOperation::Begin, 0, b"", b"", b"", 0, 1)).unwrap(),
+        )
+        .transaction_id;
+        let write = request(
+            StorageApiOperation::Write,
+            txid,
+            b"/f",
+            b"",
+            b"tx",
+            STORAGE_API_FLAG_REPLACE,
+            2,
+        );
+        assert_eq!(status(&api.handle(&write).unwrap()).status, StorageApiStatus::Ok);
+        let stage = status(
+            &api.handle(&request(StorageApiOperation::StageWriteBegin, 0, b"/f", b"", b"", 0, 3))
+                .unwrap(),
+        )
+        .transaction_id;
+        for (operation, data, request_id) in [
+            (StorageApiOperation::StageWriteChunk, &b"staged"[..], 4),
+            (StorageApiOperation::StageWriteCommit, b"", 5),
+        ] {
+            let response = api.handle(&request(operation, stage, b"", b"", data, 0, request_id));
+            assert_eq!(status(&response.unwrap()).status, StorageApiStatus::Ok);
+        }
+        let commit =
+            api.handle(&request(StorageApiOperation::Commit, txid, b"", b"", b"", 0, 6)).unwrap();
+        assert_eq!(status(&commit).status, StorageApiStatus::Stale);
+        let read =
+            api.handle(&request(StorageApiOperation::Read, 0, b"/f", b"", b"", 0, 7)).unwrap();
+        assert_eq!(status(&read).data, b"staged");
+    }
 }
