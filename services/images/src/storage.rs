@@ -398,6 +398,14 @@ fn storage_startup_marker(_marker: &[u8]) {}
 
 #[cfg(feature = "qemu-proof")]
 fn storage_startup_provisioned_error(error: NamespaceError) {
+    storage_startup_error_line("LogOS vNext: storage startup provisioned error=", error);
+}
+
+#[cfg(not(feature = "qemu-proof"))]
+fn storage_startup_error_line(_prefix: &str, _error: impl core::fmt::Debug) {}
+
+#[cfg(feature = "qemu-proof")]
+fn storage_startup_error_line(prefix: &str, error: impl core::fmt::Debug) {
     use core::fmt::Write;
 
     struct Line {
@@ -415,12 +423,7 @@ fn storage_startup_provisioned_error(error: NamespaceError) {
     }
 
     let mut line = Line { bytes: [0; 160], len: 0 };
-    if core::fmt::write(
-        &mut line,
-        format_args!("LogOS vNext: storage startup provisioned error={error:?}"),
-    )
-    .is_ok()
-    {
+    if core::fmt::write(&mut line, format_args!("{prefix}{error:?}")).is_ok() {
         common::proof_line(&line.bytes[..line.len]);
     }
 }
@@ -554,7 +557,11 @@ fn ensure_user_catalog(
     let buffer = unsafe { &mut *core::ptr::addr_of_mut!(USER_CATALOG_BUFFER) };
     match UserCatalogStore::load(filesystem, buffer) {
         Ok(length) if length != 0 => {
-            if catalog.restore_snapshot(&buffer[..length]).is_err() {
+            if let Err(error) = catalog.restore_snapshot(&buffer[..length]) {
+                storage_startup_error_line(
+                    "LogOS vNext: storage startup catalog FAIL branch=restore err=",
+                    error,
+                );
                 return false;
             }
             unsafe {
@@ -564,7 +571,11 @@ fn ensure_user_catalog(
         }
         Err(logos_user::UserError::NotFound) => {
             *catalog = UserCatalog::new();
-            if catalog.save_to(filesystem, buffer).is_err() {
+            if let Err(error) = catalog.save_to(filesystem, buffer) {
+                storage_startup_error_line(
+                    "LogOS vNext: storage startup catalog FAIL branch=save err=",
+                    error,
+                );
                 return false;
             }
             unsafe {
@@ -572,7 +583,17 @@ fn ensure_user_catalog(
             }
             true
         }
-        _ => false,
+        Ok(_) => {
+            storage_startup_marker(b"LogOS vNext: storage startup catalog FAIL branch=load-empty");
+            false
+        }
+        Err(error) => {
+            storage_startup_error_line(
+                "LogOS vNext: storage startup catalog FAIL branch=load err=",
+                error,
+            );
+            false
+        }
     }
 }
 
