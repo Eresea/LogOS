@@ -511,9 +511,14 @@ struct ParsedExpression<'a> {
 }
 
 /// Resolve shell paths against the fixed root because the shell has no cwd.
+/// Trailing slashes are trimmed because Storage accepts only canonical paths.
 pub fn root_relative_path<'a>(path: &[u8], output: &'a mut [u8]) -> Option<&'a [u8]> {
     if path.is_empty() {
         return Some(&output[..0]);
+    }
+    let mut path = path;
+    while path.len() > 1 && path.ends_with(b"/") {
+        path = &path[..path.len() - 1];
     }
     let prefix = usize::from(path.first().copied() != Some(b'/'));
     let length = prefix.checked_add(path.len())?;
@@ -2083,6 +2088,9 @@ mod tests {
         assert_eq!(root_relative_path(b"marker", &mut output), Some(&b"/marker"[..]));
         assert_eq!(root_relative_path(b"/marker", &mut output), Some(&b"/marker"[..]));
         assert_eq!(root_relative_path(b"", &mut output), Some(&b""[..]));
+        assert_eq!(root_relative_path(b"bin/", &mut output), Some(&b"/bin"[..]));
+        assert_eq!(root_relative_path(b"/bin//", &mut output), Some(&b"/bin"[..]));
+        assert_eq!(root_relative_path(b"/", &mut output), Some(&b"/"[..]));
         assert_eq!(root_relative_path(b"toolong", &mut [0; 8]), Some(&b"/toolong"[..]));
         assert_eq!(root_relative_path(b"toolong", &mut [0; 7]), None);
     }

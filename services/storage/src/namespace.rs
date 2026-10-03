@@ -520,6 +520,15 @@ impl ObjectNamespace {
         Ok(record)
     }
 
+    /// New names must also avoid `.` and `..`, which path clients may treat as navigation.
+    /// Stored records keep the older rule so existing volumes still open.
+    fn validate_new_name(name: &[u8]) -> Result<(), NamespaceError> {
+        if name == b"." || name == b".." {
+            return Err(NamespaceError::InvalidName);
+        }
+        Self::validate_name(name)
+    }
+
     fn validate_name(name: &[u8]) -> Result<(), NamespaceError> {
         if name.is_empty()
             || name.len() > MAX_COMPONENT_BYTES
@@ -557,7 +566,7 @@ impl ObjectNamespace {
         if self.object_record(parent)?.kind != ObjectKind::Directory {
             return Err(NamespaceError::NotDirectory);
         }
-        Self::validate_name(name)?;
+        Self::validate_new_name(name)?;
         if self.find_child(parent, name)?.is_some() {
             return Err(NamespaceError::AlreadyExists);
         }
@@ -784,7 +793,7 @@ impl ObjectNamespace {
         if path == b"/" {
             return Ok(ObjectId::ROOT);
         }
-        if path.is_empty() || path[0] != b'/' {
+        if path.is_empty() || path[0] != b'/' || path[path.len() - 1] == b'/' {
             return Err(NamespaceError::InvalidPath);
         }
         let mut current = ObjectId::ROOT;
@@ -1722,11 +1731,17 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         self.persist_snapshot_with(transaction)
     }
 
-    fn recover_persist_error(&mut self, previous_generation: u64) -> Result<u64, NamespaceError> {
+    fn recover_persist_error(
+        &mut self,
+        previous_generation: u64,
+        error: NamespaceError,
+    ) -> Result<u64, NamespaceError> {
         match self.reopen() {
             Ok(()) if self.volume.generation() > previous_generation => {
                 Ok(self.volume.generation())
             }
+            // Bounds failures are deterministic: report the cause, not a generic recovery.
+            Ok(()) if is_bounds_error(error) => Err(error),
             Ok(()) => Err(NamespaceError::CommitNotPublished),
             Err(recovery) => Err(recovery),
         }
@@ -1799,8 +1814,8 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         self.namespace.apply_record(kind, payload)?;
         self.queue_retired_file_extents(&retired[..retired_count])?;
         let previous_generation = self.volume.generation();
-        if self.persist_snapshot().is_err() {
-            return self.recover_persist_error(previous_generation).map(|_| ());
+        if let Err(error) = self.persist_snapshot() {
+            return self.recover_persist_error(previous_generation, error).map(|_| ());
         }
         Ok(())
     }
@@ -1850,7 +1865,7 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         if self.namespace.object_record(parent)?.kind != ObjectKind::Directory {
             return Err(NamespaceError::NotDirectory);
         }
-        ObjectNamespace::validate_name(name)?;
+        ObjectNamespace::validate_new_name(name)?;
         if self.namespace.find_child(parent, name)?.is_some_and(|child| child != id) {
             return Err(NamespaceError::AlreadyExists);
         }
@@ -1921,8 +1936,8 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
             self.namespace.apply_record(WRITE_KIND, record.payload)?;
         }
         let previous_generation = self.volume.generation();
-        if self.persist_snapshot().is_err() {
-            return self.recover_persist_error(previous_generation).map(|_| input.len());
+        if let Err(error) = self.persist_snapshot() {
+            return self.recover_persist_error(previous_generation, error).map(|_| input.len());
         }
         Ok(input.len())
     }
@@ -1955,6 +1970,11 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         record: ObjectRecord,
         end: usize,
     ) -> Result<usize, NamespaceError> {
+        if record.extent_count != 0
+            && let Some(written) = self.write_extent_range(id, offset, input, record, end)?
+        {
+            return Ok(written);
+        }
         let length = record.length as usize;
         let new_length = length.max(end);
         let mut remaining_blocks = new_length.div_ceil(BLOCK_BYTES);
@@ -2031,10 +2051,87 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
         self.namespace.set_file_extents(id, &new_extents[..new_extent_count], new_length)?;
         self.queue_retired_file_extents(&old_extents[..old_extent_count])?;
         let previous_generation = self.volume.generation();
-        if self.persist_snapshot_with(transaction).is_err() {
-            return self.recover_persist_error(previous_generation).map(|_| input.len());
+        if let Err(error) = self.persist_snapshot_with(transaction) {
+            return self.recover_persist_error(previous_generation, error).map(|_| input.len());
         }
         Ok(input.len())
+    }
+
+    /// Copy-on-write only the blocks a handle write touches; untouched extents stay shared.
+    /// Returns `None` when the resulting layout would exceed `MAX_FILE_EXTENTS`, so the caller
+    /// can fall back to rewriting the file into fewer extents.
+    fn write_extent_range(
+        &mut self,
+        id: ObjectId,
+        offset: usize,
+        input: &[u8],
+        record: ObjectRecord,
+        end: usize,
+    ) -> Result<Option<usize>, NamespaceError> {
+        let (old_extents, old_extent_count) = self.namespace.file_extents(id)?;
+        let old = &old_extents[..old_extent_count];
+        let old_blocks = old.iter().map(|extent| extent.blocks as usize).sum::<usize>();
+        let first = (offset / BLOCK_BYTES).min(old_blocks);
+        let last = end.div_ceil(BLOCK_BYTES);
+        let mut layout = ExtentLayout::new();
+        let mut retired = ExtentLayout::new();
+        if !layout.push_logical(old, 0, first)
+            || !retired.push_logical(old, first, last.min(old_blocks))
+        {
+            return Ok(None);
+        }
+        let mut transaction = self.volume.begin(&mut self.store)?;
+        let mut logical_block = first;
+        while logical_block < last {
+            let mut requested = (last - logical_block).min(u32::MAX as usize) as u32;
+            let extent = loop {
+                match transaction.allocate_blocks(&mut self.store, requested) {
+                    Ok(extent) => break extent,
+                    Err(CowError::OutOfSpace) if requested > 1 => {
+                        requested = requested.div_ceil(2);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            if !layout.push(extent) {
+                return Ok(None);
+            }
+            for extent_block in 0..extent.blocks as usize {
+                let block_start = logical_block * BLOCK_BYTES;
+                let mut block = Block::zero();
+                if logical_block < old_blocks {
+                    self.read_logical_block(old, logical_block, &mut block)?;
+                }
+                let input_start = offset.max(block_start);
+                let input_end = end.min(block_start + BLOCK_BYTES);
+                if input_start < input_end {
+                    block.as_bytes_mut()[input_start - block_start..input_end - block_start]
+                        .copy_from_slice(&input[input_start - offset..input_end - offset]);
+                }
+                transaction.write_block(
+                    &mut self.store,
+                    BlockIndex::new(extent.start.get() + extent_block as u64),
+                    &block,
+                )?;
+                logical_block += 1;
+            }
+        }
+        if !layout.push_logical(old, last, old_blocks) {
+            return Ok(None);
+        }
+        if self.retired_file_extent_count + retired.count > self.retired_file_extents.len() {
+            return Err(NamespaceError::Capacity);
+        }
+        let new_length = (record.length as usize).max(end);
+        self.namespace.set_file_extents(id, layout.as_slice(), new_length)?;
+        self.queue_retired_file_extents(retired.as_slice())?;
+        let previous_generation = self.volume.generation();
+        if let Err(error) = self.persist_snapshot_with(transaction) {
+            return self
+                .recover_persist_error(previous_generation, error)
+                .map(|_| Some(input.len()));
+        }
+        Ok(Some(input.len()))
     }
 
     fn read_logical_block(
@@ -2249,9 +2346,9 @@ impl<B: BlockStore, V: NamespaceVolume> DurableNamespace<B, V> {
             self.queue_retired_package_extents(&retired[..retired_count])?;
         }
         let previous_generation = self.volume.generation();
-        if self.persist_snapshot().is_err() {
+        if let Err(error) = self.persist_snapshot() {
             return self
-                .recover_persist_error(previous_generation)
+                .recover_persist_error(previous_generation, error)
                 .map(|_| PackageHandle { target: install.target, generation });
         }
         Ok(PackageHandle { target: install.target, generation })
@@ -2356,7 +2453,7 @@ impl<'a> NamespaceView<'a> {
         if self.object_record(parent)?.kind != ObjectKind::Directory {
             return Err(NamespaceError::NotDirectory);
         }
-        ObjectNamespace::validate_name(name)?;
+        ObjectNamespace::validate_new_name(name)?;
         if self.find_child(parent, name)?.is_some() {
             return Err(NamespaceError::AlreadyExists);
         }
@@ -2412,7 +2509,7 @@ impl<'a> NamespaceView<'a> {
         if path == b"/" {
             return Ok(ObjectId::ROOT);
         }
-        if path.is_empty() || path[0] != b'/' {
+        if path.is_empty() || path[0] != b'/' || path[path.len() - 1] == b'/' {
             return Err(NamespaceError::InvalidPath);
         }
         let mut current = ObjectId::ROOT;
@@ -2769,11 +2866,27 @@ impl NamespaceTransaction {
         base: &ObjectNamespace,
         path: &[u8],
     ) -> Result<ObjectId, NamespaceError> {
+        self.create(base, path, ObjectKind::File)
+    }
+
+    pub fn create_directory(
+        &mut self,
+        base: &ObjectNamespace,
+        path: &[u8],
+    ) -> Result<ObjectId, NamespaceError> {
+        self.create(base, path, ObjectKind::Directory)
+    }
+
+    fn create(
+        &mut self,
+        base: &ObjectNamespace,
+        path: &[u8],
+        kind: ObjectKind,
+    ) -> Result<ObjectId, NamespaceError> {
         let (id, payload) = {
             let view = self.view(base);
             let (parent, name) = view.parent_and_name(path)?;
-            let (id, payload) = view.plan_create(parent, ObjectKind::File, name)?;
-            (id, payload)
+            view.plan_create(parent, kind, name)?
         };
         self.push_record(base, CREATE_KIND, &payload)?;
         Ok(id)
@@ -2893,6 +3006,7 @@ impl NamespaceTransaction {
         if id == ObjectId::ROOT {
             return Err(NamespaceError::Root);
         }
+        ObjectNamespace::validate_new_name(name)?;
         let mut payload = [0; 2 + 4 + 2 + 4 + 2 + MAX_COMPONENT_BYTES];
         put_u16(&mut payload, 0, id.slot);
         put_u32(&mut payload, 2, id.generation);
@@ -2923,13 +3037,72 @@ impl NamespaceTransaction {
         namespace.retired_file_extent_count = self.retired_extent_count;
         match namespace.persist_snapshot() {
             Ok(generation) => Ok(generation.saturating_sub(1)),
-            Err(_) => namespace
-                .recover_persist_error(previous_generation)
+            Err(error) => namespace
+                .recover_persist_error(previous_generation, error)
                 .map(|generation| generation.saturating_sub(1)),
         }
     }
 
     pub fn abort(self) {}
+}
+
+/// Bounded extent list that merges physically contiguous runs as they are appended.
+struct ExtentLayout {
+    extents: [CowExtent; MAX_FILE_EXTENTS],
+    count: usize,
+}
+
+impl ExtentLayout {
+    const fn new() -> Self {
+        Self { extents: [CowExtent::EMPTY; MAX_FILE_EXTENTS], count: 0 }
+    }
+
+    fn as_slice(&self) -> &[CowExtent] {
+        &self.extents[..self.count]
+    }
+
+    fn push(&mut self, extent: CowExtent) -> bool {
+        if let Some(previous) = self.count.checked_sub(1).map(|index| &mut self.extents[index])
+            && previous.start.get() + previous.blocks as u64 == extent.start.get()
+            && let Some(blocks) = previous.blocks.checked_add(extent.blocks)
+        {
+            previous.blocks = blocks;
+            return true;
+        }
+        if self.count == MAX_FILE_EXTENTS {
+            return false;
+        }
+        self.extents[self.count] = extent;
+        self.count += 1;
+        true
+    }
+
+    /// Append the physical runs backing logical blocks `[from, to)` of `extents`.
+    fn push_logical(&mut self, extents: &[CowExtent], from: usize, to: usize) -> bool {
+        let mut logical = 0;
+        for extent in extents {
+            let low = from.max(logical);
+            let high = to.min(logical + extent.blocks as usize);
+            if low < high {
+                let start = BlockIndex::new(extent.start.get() + (low - logical) as u64);
+                let Some(run) = CowExtent::new(start, (high - low) as u32) else {
+                    return false;
+                };
+                if !self.push(run) {
+                    return false;
+                }
+            }
+            logical += extent.blocks as usize;
+        }
+        true
+    }
+}
+
+fn is_bounds_error(error: NamespaceError) -> bool {
+    matches!(
+        error,
+        NamespaceError::TooLarge | NamespaceError::Capacity | NamespaceError::GenerationExhausted
+    )
 }
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -3258,11 +3431,15 @@ mod tests {
                 &mut bitmap,
             )
             .unwrap();
-        for extent in old_extents[..old_extent_count].iter() {
-            for index in extent.start.get()..extent.start.get() + extent.blocks as u64 {
-                assert_eq!(bitmap.as_bytes()[index as usize / 8] & (1 << (index % 8)), 0);
-            }
-        }
+        let (new_extents, new_extent_count) =
+            reopened.namespace.file_extents(reopened_file).unwrap();
+        assert_eq!(new_extent_count, 2);
+        assert_eq!(new_extents[0], old_extents[0], "untouched block stays shared");
+        assert_ne!(new_extents[1], old_extents[1], "patched block is copied on write");
+        let allocated =
+            |index: u64| bitmap.as_bytes()[index as usize / 8] & (1 << (index % 8)) != 0;
+        assert!(allocated(old_extents[0].start.get()));
+        assert!(!allocated(old_extents[1].start.get()));
     }
 
     #[test]
@@ -3718,5 +3895,78 @@ mod tests {
             DurableNamespace::open(legacy_store),
             Err(NamespaceError::Format(logos_storage::FormatError::UnsupportedVersion))
         ));
+    }
+    #[test]
+    fn new_names_reject_dot_components_and_paths_are_canonical() {
+        let mut fs = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let dir = fs.create_directory(fs.root(), b"dir").unwrap();
+        for name in [&b"."[..], b".."] {
+            assert_eq!(fs.create_file(fs.root(), name), Err(NamespaceError::InvalidName));
+            assert_eq!(fs.rename(dir, fs.root(), name), Err(NamespaceError::InvalidName));
+        }
+        assert_eq!(fs.resolve_path(b"/dir/"), Err(NamespaceError::InvalidPath));
+        assert_eq!(fs.mkdir_path(b"/dir/"), Err(NamespaceError::InvalidPath));
+        let mut transaction = fs.begin_transaction();
+        let base = fs.transaction_base();
+        assert_eq!(transaction.stat(base, b"/dir/").err(), Some(NamespaceError::InvalidPath));
+        assert_eq!(transaction.rename(base, b"/dir", b"/.."), Err(NamespaceError::InvalidName));
+        assert_eq!(transaction.create_directory(base, b"/."), Err(NamespaceError::InvalidName));
+    }
+
+    #[test]
+    fn unpublished_bounds_errors_keep_their_cause() {
+        let mut fs = DurableNamespace::format(MemoryBlockStore::<16>::new()).unwrap();
+        let generation = fs.volume.generation();
+        assert_eq!(
+            fs.recover_persist_error(generation, NamespaceError::TooLarge),
+            Err(NamespaceError::TooLarge)
+        );
+        assert_eq!(
+            fs.recover_persist_error(generation, NamespaceError::Block(BlockError::Io)),
+            Err(NamespaceError::CommitNotPublished)
+        );
+    }
+
+    #[test]
+    fn extent_writes_copy_only_touched_blocks_and_fall_back_when_fragmented() {
+        let mut fs = DurableNamespace::format(heap_store()).unwrap();
+        let file = fs.create_file(fs.root(), b"stream").unwrap();
+        let mut expected = vec![0u8; MAX_FILE_BYTES + 3 * BLOCK_BYTES];
+        for (index, byte) in expected.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        fs.write_handle(file, 0, &expected).unwrap();
+        let (before, _) = fs.namespace.file_extents(file).unwrap();
+
+        // An append keeps the existing prefix shared.
+        let tail = [0xa5; 100];
+        fs.write_handle(file, expected.len(), &tail).unwrap();
+        expected.extend_from_slice(&tail);
+        let (after, _) = fs.namespace.file_extents(file).unwrap();
+        assert_eq!(after[0].start, before[0].start);
+
+        // A write past the end zero-fills the gap.
+        let gap_offset = expected.len() + BLOCK_BYTES + 7;
+        fs.write_handle(file, gap_offset, b"far").unwrap();
+        expected.resize(gap_offset, 0);
+        expected.extend_from_slice(b"far");
+
+        // Patching every other block would exceed MAX_FILE_EXTENTS without the fallback.
+        let blocks = expected.len().div_ceil(BLOCK_BYTES);
+        for block in (0..blocks).step_by(2) {
+            let offset = block * BLOCK_BYTES + 1;
+            fs.write_handle(file, offset, &[0xee]).unwrap();
+            expected[offset] = 0xee;
+            assert!(
+                usize::from(fs.namespace.object_record(file).unwrap().extent_count)
+                    <= MAX_FILE_EXTENTS
+            );
+        }
+
+        let mut reopened = DurableNamespace::open(fs.into_store()).unwrap();
+        let file = reopened.resolve_path(b"/stream").unwrap();
+        let mut output = vec![0; expected.len()];
+        assert_eq!(reopened.read(file, 0, &mut output).unwrap(), expected.len());
+        assert!(output == expected);
     }
 }
