@@ -12,11 +12,11 @@ mod common;
 use logos_abi::{
     COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
     DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, FetchBodyChunk, FetchControl,
-    FetchPhase, FetchRequest, FetchResponse, FetchStatus, FlowControl, GuiSessionContext,
-    IPC_FLAG_MORE, IpcBytes, IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation,
-    NetworkRequest, NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE,
-    StorageApiOperation, StorageApiRequest, StorageApiResponse, StorageApiStatus, UserOperation,
-    UserRequest, UserResponse, UserStatus,
+    FetchPhase, FetchRequest, FetchResponse, FetchStatus, FlowControl, GuiSessionContext, IpcBytes,
+    IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest,
+    NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation,
+    StorageApiRequest, StorageApiResponse, StorageApiStatus, UserOperation, UserRequest,
+    UserResponse, UserStatus,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -154,6 +154,59 @@ fn wait_for_ipc() {
         capabilities.user_receive,
         capabilities.shell_context,
     ]);
+}
+
+/// The real `logos_flow::Transport` adapter: maps a `Port` to the capability
+/// handles discovered at startup and drives the `common::ipc_*` syscalls.
+struct IpcTransport;
+
+impl logos_flow::Transport for IpcTransport {
+    fn send<T: Copy>(&mut self, port: logos_flow::Port, message: &T) -> IpcStatus {
+        let capabilities = ipc_capabilities();
+        let capability = match port {
+            logos_flow::Port::Storage => capabilities.storage_send,
+            logos_flow::Port::Network => capabilities.network_send,
+            logos_flow::Port::Fetch => capabilities.fetch_send,
+            logos_flow::Port::Device => capabilities.device_send,
+            logos_flow::Port::User => capabilities.user_send,
+            logos_flow::Port::Input => capabilities.input,
+            logos_flow::Port::Output => capabilities.output,
+        };
+        common::ipc_send_handle(capability, message)
+    }
+
+    fn receive<T: Copy>(&mut self, port: logos_flow::Port, message: &mut T) -> IpcStatus {
+        let capabilities = ipc_capabilities();
+        let capability = match port {
+            logos_flow::Port::Storage => capabilities.storage_receive,
+            logos_flow::Port::Network => capabilities.network_receive,
+            logos_flow::Port::Fetch => capabilities.fetch_receive,
+            logos_flow::Port::Device => capabilities.device_receive,
+            logos_flow::Port::User => capabilities.user_receive,
+            logos_flow::Port::Input => capabilities.input,
+            logos_flow::Port::Output => capabilities.output,
+        };
+        common::ipc_receive_handle(capability, message)
+    }
+
+    fn wait(&mut self) {
+        wait_for_ipc();
+    }
+
+    fn next_request_id(&mut self, space: logos_flow::IdSpace) -> u32 {
+        match space {
+            logos_flow::IdSpace::Network => next_network_request_id(),
+            logos_flow::IdSpace::Device => next_device_request_id(),
+            logos_flow::IdSpace::User => next_user_request_id(),
+        }
+    }
+
+    fn proof_line(&mut self, line: &[u8]) {
+        #[cfg(feature = "fetch-proof")]
+        common::proof_line(line);
+        #[cfg(not(feature = "fetch-proof"))]
+        let _ = line;
+    }
 }
 
 static NEXT_MANAGER_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
@@ -410,7 +463,7 @@ impl FetchClient {
         IpcStatus::Malformed
     }
 
-    fn drive(&mut self, pending: &mut PendingOutput) -> bool {
+    fn drive(&mut self, pending: &mut logos_flow::PendingOutput) -> bool {
         if let Some(response) = self.initial_progress {
             match forward_fetch_progress(response) {
                 IpcStatus::Ok => self.initial_progress = None,
@@ -1014,65 +1067,6 @@ fn flow_is_foreground(bytes: &[u8]) -> bool {
     trim_flow_input(bytes).starts_with(b"await ")
 }
 
-struct PendingOutput {
-    bytes: [u8; logos_flow::MAX_OUTPUT_BYTES],
-    len: usize,
-    offset: usize,
-    pending: bool,
-}
-
-impl PendingOutput {
-    const fn new() -> Self {
-        Self { bytes: [0; logos_flow::MAX_OUTPUT_BYTES], len: 0, offset: 0, pending: false }
-    }
-
-    fn stage(&mut self, bytes: &[u8]) {
-        let count = bytes.len().min(self.bytes.len());
-        self.bytes[..count].copy_from_slice(&bytes[..count]);
-        self.len = count;
-        self.offset = 0;
-        self.pending = true;
-    }
-
-    /// Tags every chunk with `session` (T3c, #98): Flow only ever has one
-    /// session's command in flight at a time (see `ACTIVE_SESSION`), but
-    /// Session and Terminal still need the tag to route the reply back to
-    /// the right tab.
-    fn flush(&mut self, capability: logos_abi::CapabilityHandle, session: u8) -> bool {
-        let mut progressed = false;
-        while self.offset < self.len {
-            let end = (self.offset + logos_abi::MAX_IPC_BYTES).min(self.len);
-            let Some(mut message) =
-                IpcBytes::from_bytes(MessageKind::SessionOutput, &self.bytes[self.offset..end])
-            else {
-                break;
-            };
-            if end < self.len {
-                message.flags = IPC_FLAG_MORE;
-            }
-            message = message.with_session(session);
-            if common::ipc_send_handle(capability, &message) != IpcStatus::Ok {
-                break;
-            }
-            self.offset = end;
-            progressed = true;
-        }
-        if self.pending && self.offset == self.len {
-            let message = IpcBytes::empty(MessageKind::SessionOutput).with_session(session);
-            if self.len == 0 && common::ipc_send_handle(capability, &message) == IpcStatus::Ok {
-                self.pending = false;
-                progressed = true;
-            }
-        }
-        if self.pending && self.offset == self.len && self.len != 0 {
-            self.len = 0;
-            self.offset = 0;
-            self.pending = false;
-        }
-        progressed
-    }
-}
-
 #[derive(Clone, Copy)]
 enum StorageWork {
     List,
@@ -1309,7 +1303,7 @@ impl PackageClient {
         self.done = true;
     }
 
-    fn take_result(&mut self, pending: &mut PendingOutput) {
+    fn take_result(&mut self, pending: &mut logos_flow::PendingOutput) {
         if self.done {
             pending.stage(&self.result[..self.result_len]);
             self.done = false;
@@ -1403,7 +1397,7 @@ impl DeviceClient {
         self.done = true;
     }
 
-    fn take_result(&mut self, pending: &mut PendingOutput) {
+    fn take_result(&mut self, pending: &mut logos_flow::PendingOutput) {
         if self.done {
             pending.stage(&self.result[..self.result_len]);
             self.done = false;
@@ -1596,7 +1590,7 @@ impl UserClient {
         self.finish(message);
     }
 
-    fn take_result(&mut self, pending: &mut PendingOutput) {
+    fn take_result(&mut self, pending: &mut logos_flow::PendingOutput) {
         if self.done {
             pending.stage(&self.result[..self.result_len]);
             self.done = false;
@@ -2062,7 +2056,7 @@ impl StorageClient {
         self.done = true;
     }
 
-    fn take_result(&mut self, pending: &mut PendingOutput) {
+    fn take_result(&mut self, pending: &mut logos_flow::PendingOutput) {
         if self.done {
             #[cfg(feature = "fetch-proof")]
             if self.result[..self.result_len] == *b"LogOS-Fetch\r\n" {
@@ -2147,12 +2141,16 @@ impl StorageProof {
         true
     }
 
-    fn start_next(&mut self, storage: &mut StorageClient, pending: &PendingOutput) -> bool {
+    fn start_next(
+        &mut self,
+        storage: &mut StorageClient,
+        pending: &logos_flow::PendingOutput,
+    ) -> bool {
         if self.active
             || self.step == u8::MAX
             || storage.active()
             || storage.done
-            || pending.pending
+            || pending.is_pending()
         {
             return false;
         }
@@ -2254,7 +2252,10 @@ fn manager_error(status: logos_abi::ManagerStatus) -> &'static [u8] {
     }
 }
 
-fn program_command(command: logos_flow::ProgramCommand<'_>, pending: &mut PendingOutput) {
+fn program_command(
+    command: logos_flow::ProgramCommand<'_>,
+    pending: &mut logos_flow::PendingOutput,
+) {
     let (operation, name) = match command {
         logos_flow::ProgramCommand::Start { name } => {
             (logos_abi::ManagerOperation::ProgramStart, name)
@@ -2320,7 +2321,10 @@ fn manager_record(name: &[u8]) -> Result<Option<logos_abi::ServiceManagerRecord>
     }
 }
 
-fn service_command(command: logos_flow::ServiceCommand<'_>, pending: &mut PendingOutput) {
+fn service_command(
+    command: logos_flow::ServiceCommand<'_>,
+    pending: &mut logos_flow::PendingOutput,
+) {
     let (operation, name, list, property) = match command {
         logos_flow::ServiceCommand::List => {
             (logos_abi::ManagerOperation::List, &[][..], true, logos_flow::ServiceProperty::Record)
@@ -2440,7 +2444,7 @@ fn network_command(
     command: logos_flow::NetworkCommand<'_>,
     client: &mut NetworkClient,
     fetch: &mut FetchClient,
-    pending: &mut PendingOutput,
+    pending: &mut logos_flow::PendingOutput,
 ) {
     if let logos_flow::NetworkCommand::Fetch { url, destination } = command {
         if !fetch.start(url, destination) {
@@ -2660,7 +2664,10 @@ fn manager_restart_network() -> bool {
 }
 
 #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
-fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClient) -> bool {
+fn manager_command_probe(
+    pending: &mut logos_flow::PendingOutput,
+    network: &mut NetworkClient,
+) -> bool {
     let Some(initial_storage) = manager_record(b"storage").ok().flatten() else {
         return false;
     };
@@ -2672,26 +2679,20 @@ fn manager_command_probe(pending: &mut PendingOutput, network: &mut NetworkClien
         return network_proof_probe(network);
     }
     service_command(logos_flow::ServiceCommand::List, pending);
-    let list = &pending.bytes[..pending.len];
-    let list_valid = pending.pending
+    let list = pending.staged();
+    let list_valid = pending.is_pending()
         && list
             .windows(b"storage running\r\n".len())
             .any(|window| window == b"storage running\r\n")
         && !list.windows(b"vacant".len()).any(|window| window == b"vacant");
-    pending.len = 0;
-    pending.offset = 0;
-    pending.pending = false;
+    pending.discard();
     if !list_valid {
         return false;
     }
     service_command(logos_flow::ServiceCommand::Stop { name: b"input" }, pending);
     let expected = b"service dependency violation\r\n";
-    let dependency_valid = pending.pending
-        && pending.len == expected.len()
-        && pending.bytes[..pending.len] == *expected;
-    pending.len = 0;
-    pending.offset = 0;
-    pending.pending = false;
+    let dependency_valid = pending.is_pending() && pending.staged() == *expected;
+    pending.discard();
     if !dependency_valid {
         return false;
     }
@@ -2710,7 +2711,7 @@ static mut FLOWS: [logos_flow::FlowService; logos_abi::MAX_SHELL_SESSIONS] =
 /// served; every reply Flow sends out is tagged with it until the next
 /// `SessionInput`/`CompletionRequest` picks a new one.
 static mut ACTIVE_SESSION: u8 = 0;
-static mut PENDING: PendingOutput = PendingOutput::new();
+static mut PENDING: logos_flow::PendingOutput = logos_flow::PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
 static mut PACKAGE: PackageClient = PackageClient::new();
 static mut DEVICE: DeviceClient = DeviceClient::new();
@@ -2772,9 +2773,10 @@ pub extern "C" fn _start() -> ! {
     }
     #[cfg(feature = "storage-proof")]
     let mut proof = StorageProof::new();
+    let mut transport = IpcTransport;
     let mut heartbeat_ticks = 0u16;
     loop {
-        if pending.pending
+        if pending.is_pending()
             || pending_completion.is_some()
             || storage.active()
             || package.active()
@@ -2786,7 +2788,7 @@ pub extern "C" fn _start() -> ! {
         } else {
             common::heartbeat_tick(&mut heartbeat_ticks);
         }
-        let mut progressed = pending.flush(ipc_capabilities().output, active_session());
+        let mut progressed = pending.flush(&mut transport, active_session());
         while common::ipc_receive_handle(ipc_capabilities().shell_context, &mut shell_context)
             == IpcStatus::Ok
         {
@@ -2829,7 +2831,7 @@ pub extern "C" fn _start() -> ! {
                 _ => fetch.cancel_pending = false,
             }
         }
-        if pending.pending {
+        if pending.is_pending() {
             if !progressed {
                 wait_for_ipc();
             }
@@ -3417,19 +3419,6 @@ mod tests {
         assert_eq!(&output[..length], b"session-a");
         let length = flows[1].copy_string_variable(b"text", &mut output).unwrap();
         assert_eq!(&output[..length], b"session-b");
-    }
-
-    #[test]
-    fn pending_output_flush_tags_every_chunk_with_its_session() {
-        // An invalid capability makes `ipc_send_handle` return `Malformed`
-        // without touching real IPC state (see `common::ipc_send_raw`),
-        // so this exercises `flush`'s tagging and chunking logic on the
-        // host without a live endpoint. Delivery itself is proved in
-        // QEMU.
-        let mut pending = PendingOutput::new();
-        pending.stage(b"ok\r\n");
-        assert!(!pending.flush(logos_abi::CapabilityHandle::EMPTY, 2));
-        assert!(pending.pending, "an undeliverable message stays queued, not silently dropped");
     }
 
     #[test]

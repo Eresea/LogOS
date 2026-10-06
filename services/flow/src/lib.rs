@@ -1,12 +1,17 @@
 #![no_std]
 
+pub mod client;
 pub mod interpreter;
+pub mod transport;
 
 pub use interpreter::{
     FlowEvalError, FlowParseError, FlowRuntime, FlowType, FlowTypeError, NamespaceKind,
     OperationRegistry, OperationSignature, Program as FlowProgram, PromiseState, PromiseType,
     Variables as FlowVariables,
 };
+
+pub use client::PendingOutput;
+pub use transport::{IdSpace, Port, Transport};
 
 #[cfg(test)]
 extern crate std;
