@@ -11,12 +11,11 @@ mod common;
 
 use logos_abi::{
     COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
-    DeviceOperation, DeviceRequest, DeviceResponse, DeviceStatus, FetchBodyChunk, FetchControl,
-    FetchPhase, FetchRequest, FetchResponse, FetchStatus, FlowControl, GuiSessionContext, IpcBytes,
-    IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest,
-    NetworkResponse, NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation,
-    StorageApiRequest, StorageApiResponse, StorageApiStatus, UserOperation, UserRequest,
-    UserResponse, UserStatus,
+    DeviceRequest, DeviceResponse, FetchBodyChunk, FetchControl, FetchPhase, FetchRequest,
+    FetchResponse, FetchStatus, FlowControl, GuiSessionContext, IpcBytes, IpcStatus,
+    MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest, NetworkResponse,
+    NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation, StorageApiRequest,
+    StorageApiResponse, StorageApiStatus, UserOperation, UserRequest, UserResponse, UserStatus,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -1299,100 +1298,6 @@ impl PackageClient {
     }
 
     fn succeed(&mut self) {
-        self.active = false;
-        self.done = true;
-    }
-
-    fn take_result(&mut self, pending: &mut logos_flow::PendingOutput) {
-        if self.done {
-            pending.stage(&self.result[..self.result_len]);
-            self.done = false;
-        }
-    }
-}
-
-struct DeviceClient {
-    active: bool,
-    done: bool,
-    sent: bool,
-    request_id: u32,
-    result: [u8; logos_flow::MAX_OUTPUT_BYTES],
-    result_len: usize,
-}
-
-impl DeviceClient {
-    const fn new() -> Self {
-        Self {
-            active: false,
-            done: false,
-            sent: false,
-            request_id: 1,
-            result: [0; logos_flow::MAX_OUTPUT_BYTES],
-            result_len: 0,
-        }
-    }
-
-    fn start(&mut self, command: logos_flow::DeviceCommand) -> bool {
-        if self.active || self.done || command != logos_flow::DeviceCommand::List {
-            return false;
-        }
-        self.active = true;
-        self.sent = false;
-        self.result_len = 0;
-        self.request_id = next_device_request_id();
-        true
-    }
-
-    fn active(&self) -> bool {
-        self.active
-    }
-
-    fn drive(&mut self) -> bool {
-        if !self.active {
-            return false;
-        }
-        let request = DeviceRequest::new(DeviceOperation::List, self.request_id);
-        if !self.sent {
-            match common::ipc_send_handle(ipc_capabilities().device_send, &request) {
-                IpcStatus::Ok => {
-                    self.sent = true;
-                }
-                IpcStatus::Full => return false,
-                _ => self.fail(b"device manager unavailable\r\n"),
-            }
-            return true;
-        }
-        let mut response = DeviceResponse::new(request, DeviceStatus::Invalid, 1, 1);
-        match common::ipc_receive_handle(ipc_capabilities().device_receive, &mut response) {
-            IpcStatus::Ok => {}
-            IpcStatus::Empty => return false,
-            _ => {
-                self.fail(b"device manager unavailable\r\n");
-                return true;
-            }
-        }
-        if !response.is_valid_for(request) {
-            self.fail(b"device inventory malformed\r\n");
-            return true;
-        }
-        if response.status != DeviceStatus::Ok {
-            self.fail(b"device inventory unavailable\r\n");
-            return true;
-        }
-        let mut manager = logos_device::DeviceManager::new();
-        if manager.publish(response).is_err() {
-            self.fail(b"device inventory malformed\r\n");
-            return true;
-        }
-        self.result_len = manager.format_list(&mut self.result);
-        self.active = false;
-        self.done = true;
-        true
-    }
-
-    fn fail(&mut self, message: &[u8]) {
-        self.result_len = message.len().min(self.result.len());
-        self.result[..self.result_len].copy_from_slice(&message[..self.result_len]);
         self.active = false;
         self.done = true;
     }
@@ -2714,7 +2619,7 @@ static mut ACTIVE_SESSION: u8 = 0;
 static mut PENDING: logos_flow::PendingOutput = logos_flow::PendingOutput::new();
 static mut STORAGE: StorageClient = StorageClient::new();
 static mut PACKAGE: PackageClient = PackageClient::new();
-static mut DEVICE: DeviceClient = DeviceClient::new();
+static mut DEVICE: logos_flow::DeviceClient = logos_flow::DeviceClient::new();
 static mut USER: UserClient = UserClient::new();
 static mut NETWORK: NetworkClient = NetworkClient::new();
 static mut FETCH: FetchClient = FetchClient::new();
@@ -2889,8 +2794,8 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if device.active() {
-            progressed |= device.drive();
-            if device.done {
+            progressed |= device.drive(&mut transport);
+            if device.done() {
                 device.take_result(pending);
                 progressed = true;
             }
@@ -3048,7 +2953,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         Ok(Some(logos_flow::FlowOperation::Device(command))) => {
-                            if !device.start(command) {
+                            if !device.start(&mut transport, command) {
                                 pending.stage(b"device request busy or too large\r\n");
                             }
                         }
