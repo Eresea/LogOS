@@ -15,9 +15,10 @@ use logos_abi::{
     COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
     DeviceRequest, DeviceResponse, FetchBodyChunk, FetchControl, FetchPhase, FetchRequest,
     FetchResponse, FetchStatus, FlowControl, GuiSessionContext, IpcBytes, IpcStatus,
-    MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest, NetworkResponse,
-    NetworkResult, NetworkState,
+    MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkResult,
 };
+#[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
+use logos_abi::{NetworkRequest, NetworkState};
 
 // logos-flow sizes its Storage client buffer without depending on the storage service.
 const _: () = assert!(logos_flow::MAX_STORAGE_DATA_BYTES == logos_storage_service::MAX_FILE_BYTES);
@@ -266,22 +267,6 @@ fn next_user_request_id() -> u32 {
         {
             return current;
         }
-    }
-}
-
-struct NetworkClient {
-    cancelled: bool,
-}
-
-impl NetworkClient {
-    const fn new() -> Self {
-        Self { cancelled: false }
-    }
-
-    fn take_cancelled(&mut self) -> bool {
-        let cancelled = self.cancelled;
-        self.cancelled = false;
-        cancelled
     }
 }
 
@@ -607,126 +592,6 @@ fn fetch_control(message: &IpcBytes, fetch: &mut FetchClient) -> bool {
         true
     } else {
         false
-    }
-}
-
-impl NetworkClient {
-    fn request(
-        &mut self,
-        operation: NetworkOperation,
-        address: [u8; 4],
-        port: u16,
-    ) -> Result<NetworkResponse, IpcStatus> {
-        let mut request = NetworkRequest::new(operation, next_network_request_id());
-        request.address = address;
-        request.port = port;
-        if operation == NetworkOperation::IcmpPing {
-            request.timeout_ticks = logos_abi::NETWORK_PING_TIMEOUT_TICKS;
-        } else if operation == NetworkOperation::TcpConnect {
-            request.timeout_ticks = logos_abi::NETWORK_TCP_CONNECT_TIMEOUT_TICKS;
-        }
-        self.request_message(request)
-    }
-
-    fn request_message(&mut self, request: NetworkRequest) -> Result<NetworkResponse, IpcStatus> {
-        self.cancelled = false;
-        let request_bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&request as *const NetworkRequest).cast::<u8>(),
-                mem::size_of::<NetworkRequest>(),
-            )
-        };
-        let message = IpcBytes::from_bytes(MessageKind::NetworkRequest, request_bytes)
-            .ok_or(IpcStatus::Malformed)?;
-        match common::ipc_send_handle(ipc_capabilities().network_send, &message) {
-            IpcStatus::Ok => {}
-            status => return Err(status),
-        }
-        let mut cancel_requested = false;
-        let mut cancel_sent = false;
-        for _ in 0..256 {
-            if !cancel_requested {
-                let mut control = IpcBytes::empty(MessageKind::FlowControl);
-                if common::ipc_receive_handle(ipc_capabilities().input, &mut control)
-                    == IpcStatus::Ok
-                    && control.len as usize == mem::size_of::<FlowControl>()
-                {
-                    if !FlowControl::wire_enums_valid(
-                        &control.bytes[..mem::size_of::<FlowControl>()],
-                    ) {
-                        continue;
-                    }
-                    let value: FlowControl =
-                        unsafe { ptr::read_unaligned(control.bytes.as_ptr().cast()) };
-                    cancel_requested = value.is_valid()
-                        && (value.request_id == 0 || value.request_id == request.request_id);
-                }
-            }
-            if cancel_requested && !cancel_sent {
-                let cancel = NetworkRequest::new(NetworkOperation::Cancel, request.request_id);
-                let cancel_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        (&cancel as *const NetworkRequest).cast::<u8>(),
-                        mem::size_of::<NetworkRequest>(),
-                    )
-                };
-                let cancel_message =
-                    IpcBytes::from_bytes(MessageKind::NetworkRequest, cancel_bytes)
-                        .ok_or(IpcStatus::Malformed)?;
-                match common::ipc_send_handle(ipc_capabilities().network_send, &cancel_message) {
-                    IpcStatus::Ok => cancel_sent = true,
-                    IpcStatus::Full => {
-                        wait_for_ipc();
-                        continue;
-                    }
-                    status => return Err(status),
-                }
-            }
-            let mut response = IpcBytes::empty(MessageKind::NetworkResponse);
-            match common::ipc_receive_handle(ipc_capabilities().network_receive, &mut response) {
-                IpcStatus::Ok => {
-                    if response.kind != MessageKind::NetworkResponse
-                        || response.len as usize != mem::size_of::<NetworkResponse>()
-                    {
-                        return Err(IpcStatus::Malformed);
-                    }
-                    if !NetworkResponse::wire_enums_valid(
-                        &response.bytes[..mem::size_of::<NetworkResponse>()],
-                    ) {
-                        return Err(IpcStatus::Malformed);
-                    }
-                    let value: NetworkResponse =
-                        unsafe { ptr::read_unaligned(response.bytes.as_ptr().cast()) };
-                    if cancel_sent {
-                        if value.operation == NetworkOperation::Cancel
-                            && value.request_id == request.request_id
-                        {
-                            self.cancelled = true;
-                            return Err(IpcStatus::Empty);
-                        }
-                        continue;
-                    }
-                    return value.is_valid_for(request).then_some(value).ok_or(IpcStatus::Stale);
-                }
-                IpcStatus::Empty => wait_for_ipc(),
-                status => return Err(status),
-            }
-        }
-        if cancel_sent {
-            self.cancelled = true;
-        }
-        Err(IpcStatus::Empty)
-    }
-
-    fn close_tcp_response(&mut self, response: NetworkResponse) {
-        if response.generation == 0 || response.service_epoch == 0 {
-            return;
-        }
-        let mut close = NetworkRequest::new(NetworkOperation::Close, next_network_request_id());
-        close.handle = response.handle;
-        close.generation = response.generation;
-        close.service_epoch = response.service_epoch;
-        let _ = self.request_message(close);
     }
 }
 
@@ -1367,37 +1232,10 @@ fn service_command(
     pending.stage(&output[..output_len]);
 }
 
-fn network_result_text(result: NetworkResult) -> &'static [u8] {
-    match result {
-        NetworkResult::Full => b"network queue full\r\n",
-        NetworkResult::WouldBlock => b"network configuring\r\n",
-        NetworkResult::Disabled => b"network disabled\r\n",
-        NetworkResult::Unavailable => b"network unavailable\r\n",
-        NetworkResult::Timeout => b"network timeout\r\n",
-        NetworkResult::Stale => b"network restarting\r\n",
-        NetworkResult::Refused => b"network refused\r\n",
-        NetworkResult::Checksum => b"network checksum failure\r\n",
-        NetworkResult::NotFound => b"network socket not found\r\n",
-        NetworkResult::Invalid | NetworkResult::Unsupported => b"network request invalid\r\n",
-        NetworkResult::Cancelled => b"network cancelled\r\n",
-        NetworkResult::Ok => b"ok\r\n",
-    }
-}
-
-fn network_state_text(state: NetworkState) -> &'static [u8] {
-    match state {
-        NetworkState::Disabled => b"network disabled\r\n",
-        NetworkState::Unavailable => b"network unavailable\r\n",
-        NetworkState::Configuring => b"network configuring\r\n",
-        NetworkState::Ready => b"network ready\r\n",
-        NetworkState::Restarting => b"network restarting\r\n",
-        NetworkState::Faulted => b"network unavailable\r\n",
-    }
-}
-
 fn network_command(
     command: logos_flow::NetworkCommand<'_>,
-    client: &mut NetworkClient,
+    client: &mut logos_flow::NetworkClient,
+    transport: &mut IpcTransport,
     fetch: &mut FetchClient,
     pending: &mut logos_flow::PendingOutput,
 ) {
@@ -1431,20 +1269,20 @@ fn network_command(
         }
         logos_flow::NetworkCommand::Fetch { .. } => unreachable!(),
     };
-    match client.request(operation, address, port) {
+    match client.request(transport, operation, address, port) {
         Ok(response) if operation == NetworkOperation::Status => {
-            pending.stage(network_state_text(response.state))
+            pending.stage(logos_flow::network_state_text(response.state))
         }
         Ok(response) if operation == NetworkOperation::TcpConnect => {
-            client.close_tcp_response(response);
+            client.close_tcp_response(transport, response);
             if response.result == NetworkResult::Ok {
                 pending.stage(success);
             } else {
-                pending.stage(network_result_text(response.result));
+                pending.stage(logos_flow::network_result_text(response.result));
             }
         }
         Ok(response) if response.result == NetworkResult::Ok => pending.stage(success),
-        Ok(response) => pending.stage(network_result_text(response.result)),
+        Ok(response) => pending.stage(logos_flow::network_result_text(response.result)),
         Err(IpcStatus::Stale | IpcStatus::Disconnected) => pending.stage(b"network restarting\r\n"),
         Err(IpcStatus::Empty) if client.take_cancelled() => pending.stage(b"network cancelled\r\n"),
         Err(IpcStatus::Unauthorized | IpcStatus::Empty) => {
@@ -1475,16 +1313,21 @@ fn manager_restart_probe() -> bool {
 }
 
 #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
-fn network_proof_probe(network: &mut NetworkClient) -> bool {
+fn network_proof_probe(
+    network: &mut logos_flow::NetworkClient,
+    transport: &mut IpcTransport,
+) -> bool {
     for _ in 0..256 {
-        let Ok(status) = network.request(NetworkOperation::Status, [0; 4], 0) else {
+        let Ok(status) = network.request(transport, NetworkOperation::Status, [0; 4], 0) else {
             return false;
         };
         if status.state == NetworkState::Disabled {
             return true;
         }
         if status.state == NetworkState::Ready {
-            let Ok(tcp) = network.request(NetworkOperation::TcpConnect, [10, 0, 2, 2], 8080) else {
+            let Ok(tcp) =
+                network.request(transport, NetworkOperation::TcpConnect, [10, 0, 2, 2], 8080)
+            else {
                 return false;
             };
             if tcp.result != NetworkResult::Ok {
@@ -1494,20 +1337,22 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
                 return false;
             }
             for _ in 0..256 {
-                let Ok(status) = network.request(NetworkOperation::Status, [0; 4], 0) else {
+                let Ok(status) = network.request(transport, NetworkOperation::Status, [0; 4], 0)
+                else {
                     return false;
                 };
                 if status.state == NetworkState::Ready {
                     let mut listen =
                         NetworkRequest::new(NetworkOperation::TcpListen, next_network_request_id());
                     listen.port = 8081;
-                    let Ok(listener) = network.request_message(listen) else {
+                    let Ok(listener) = network.request_message(transport, listen) else {
                         return false;
                     };
                     if listener.result != NetworkResult::Ok {
                         return false;
                     }
-                    let Ok(_) = network.request(NetworkOperation::IcmpPing, [10, 0, 2, 2], 0)
+                    let Ok(_) =
+                        network.request(transport, NetworkOperation::IcmpPing, [10, 0, 2, 2], 0)
                     else {
                         return false;
                     };
@@ -1520,7 +1365,7 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
                             accept.handle = listener.handle;
                             accept.generation = listener.generation;
                             accept.service_epoch = listener.service_epoch;
-                            let Ok(response) = network.request_message(accept) else {
+                            let Ok(response) = network.request_message(transport, accept) else {
                                 return false;
                             };
                             if response.result == NetworkResult::Ok {
@@ -1542,7 +1387,7 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
                     let mut write_completed = false;
                     for _ in 0..256 {
                         write.request_id = next_network_request_id();
-                        let Ok(write_response) = network.request_message(write) else {
+                        let Ok(write_response) = network.request_message(transport, write) else {
                             return false;
                         };
                         if write_response.result == NetworkResult::Ok {
@@ -1566,7 +1411,7 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
                         read.generation = accepted.generation;
                         read.service_epoch = accepted.service_epoch;
                         read.payload_len = logos_abi::NETWORK_INLINE_PAYLOAD_BYTES as u16;
-                        let Ok(read_response) = network.request_message(read) else {
+                        let Ok(read_response) = network.request_message(transport, read) else {
                             return false;
                         };
                         if read_response.result == NetworkResult::Ok
@@ -1588,7 +1433,7 @@ fn network_proof_probe(network: &mut NetworkClient) -> bool {
                     close.generation = tcp.generation;
                     close.service_epoch = tcp.service_epoch;
                     return network
-                        .request_message(close)
+                        .request_message(transport, close)
                         .is_ok_and(|response| response.result == NetworkResult::Stale);
                 }
                 common::sleep();
@@ -1621,7 +1466,8 @@ fn manager_restart_network() -> bool {
 #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
 fn manager_command_probe(
     pending: &mut logos_flow::PendingOutput,
-    network: &mut NetworkClient,
+    network: &mut logos_flow::NetworkClient,
+    transport: &mut IpcTransport,
 ) -> bool {
     let Some(initial_storage) = manager_record(b"storage").ok().flatten() else {
         return false;
@@ -1631,7 +1477,7 @@ fn manager_command_probe(
         return true;
     }
     if initial_storage.service.generation() != 1 || initial_storage.restarts != 0 {
-        return network_proof_probe(network);
+        return network_proof_probe(network, transport);
     }
     service_command(logos_flow::ServiceCommand::List, pending);
     let list = pending.staged();
@@ -1651,7 +1497,7 @@ fn manager_command_probe(
     if !dependency_valid {
         return false;
     }
-    network_proof_probe(network) && manager_restart_probe()
+    network_proof_probe(network, transport) && manager_restart_probe()
 }
 
 /// One interpreter (variables) per Terminal session (T3c, #98). The seven
@@ -1671,7 +1517,7 @@ static mut STORAGE: logos_flow::StorageClient = logos_flow::StorageClient::new()
 static mut PACKAGE: logos_flow::PackageClient = logos_flow::PackageClient::new();
 static mut DEVICE: logos_flow::DeviceClient = logos_flow::DeviceClient::new();
 static mut USER: logos_flow::UserClient = logos_flow::UserClient::new();
-static mut NETWORK: NetworkClient = NetworkClient::new();
+static mut NETWORK: logos_flow::NetworkClient = logos_flow::NetworkClient::new();
 static mut FETCH: FetchClient = FetchClient::new();
 static mut COMPLETION: CompletionService = CompletionService::new();
 static mut PENDING_COMPLETION: Option<IpcBytes> = None;
@@ -1713,13 +1559,14 @@ pub extern "C" fn _start() -> ! {
     let fetch = unsafe { &mut *core::ptr::addr_of_mut!(FETCH) };
     let completion = unsafe { &mut *core::ptr::addr_of_mut!(COMPLETION) };
     let pending_completion = unsafe { &mut *core::ptr::addr_of_mut!(PENDING_COMPLETION) };
+    let mut transport = IpcTransport;
     let mut shell_context = GuiSessionContext::EMPTY;
     #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
     while !manager_boot_probe() {
         common::sleep();
     }
     #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
-    if !manager_command_probe(pending, network) {
+    if !manager_command_probe(pending, network, &mut transport) {
         // The storage proof exercises the normal Flow->Storage command path;
         // a failed optional manager/network preflight must not strand Flow
         // before that workload can run.
@@ -1728,7 +1575,6 @@ pub extern "C" fn _start() -> ! {
     }
     #[cfg(feature = "storage-proof")]
     let mut proof = StorageProof::new();
-    let mut transport = IpcTransport;
     let mut heartbeat_ticks = 0u16;
     loop {
         if pending.is_pending()
@@ -1949,7 +1795,7 @@ pub extern "C" fn _start() -> ! {
                             service_command(command, pending)
                         }
                         Ok(Some(logos_flow::FlowOperation::Network(command))) => {
-                            network_command(command, network, fetch, pending)
+                            network_command(command, network, &mut transport, fetch, pending)
                         }
                         Ok(Some(logos_flow::FlowOperation::Storage(command))) => match command {
                             logos_flow::StorageCommand::WriteVariables {
