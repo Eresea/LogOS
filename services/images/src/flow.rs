@@ -9,14 +9,18 @@ use core::{
 
 mod common;
 
+// logos-flow sizes its Storage client buffer without depending on the storage service.
+const _: () = assert!(logos_flow::MAX_STORAGE_DATA_BYTES == logos_storage_service::MAX_FILE_BYTES);
+
 use logos_abi::{
     COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
     DeviceRequest, DeviceResponse, FetchBodyChunk, FetchControl, FetchPhase, FetchRequest,
     FetchResponse, FetchStatus, FlowControl, GuiSessionContext, IpcBytes, IpcStatus,
     MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest, NetworkResponse,
-    NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation, StorageApiRequest,
-    StorageApiResponse, StorageApiStatus,
+    NetworkResult, NetworkState, StorageApiOperation, StorageApiRequest, StorageApiResponse,
+    StorageApiStatus,
 };
+use logos_flow::{status_text, storage_ipc_error};
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
     logos_abi::IPC_CONTRACT_BYTES,
@@ -1067,56 +1071,6 @@ fn flow_is_foreground(bytes: &[u8]) -> bool {
 }
 
 #[derive(Clone, Copy)]
-enum StorageWork {
-    List,
-    Touch,
-    Cat,
-    Write,
-    TouchWrite,
-    Remove,
-    Move,
-    #[cfg(feature = "storage-proof")]
-    AbortProof,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum StoragePhase {
-    Begin,
-    Operation,
-    Commit,
-    Abort,
-    StageBegin,
-    StageChunk,
-    StageCommit,
-    StageAbort,
-    Read,
-    List,
-    Idle,
-}
-
-struct StorageClient {
-    work: StorageWork,
-    phase: StoragePhase,
-    busy: bool,
-    done: bool,
-    sent: bool,
-    request_id: u32,
-    transaction_id: u64,
-    cursor: u32,
-    path: [u8; logos_flow::MAX_FLOW_BYTES],
-    path_len: usize,
-    secondary_path: [u8; logos_flow::MAX_FLOW_BYTES],
-    secondary_len: usize,
-    data: [u8; logos_storage_service::MAX_FILE_BYTES],
-    data_len: usize,
-    result: [u8; logos_flow::MAX_OUTPUT_BYTES],
-    result_len: usize,
-    failure: StorageApiStatus,
-    last_status: StorageApiStatus,
-    cancelled: bool,
-}
-
-#[derive(Clone, Copy)]
 enum PackageWork {
     List,
     Info,
@@ -1310,472 +1264,6 @@ impl PackageClient {
     }
 }
 
-impl StorageClient {
-    const fn new() -> Self {
-        Self {
-            work: StorageWork::List,
-            phase: StoragePhase::Idle,
-            busy: false,
-            done: false,
-            sent: false,
-            request_id: 1,
-            transaction_id: 0,
-            cursor: 0,
-            path: [0; logos_flow::MAX_FLOW_BYTES],
-            path_len: 0,
-            secondary_path: [0; logos_flow::MAX_FLOW_BYTES],
-            secondary_len: 0,
-            data: [0; logos_storage_service::MAX_FILE_BYTES],
-            data_len: 0,
-            result: [0; logos_flow::MAX_OUTPUT_BYTES],
-            result_len: 0,
-            failure: StorageApiStatus::Invalid,
-            last_status: StorageApiStatus::Invalid,
-            cancelled: false,
-        }
-    }
-
-    fn start(&mut self, command: logos_flow::StorageCommand<'_>) -> bool {
-        let (work, phase, path, secondary, data) = match command {
-            logos_flow::StorageCommand::List { path } => {
-                (StorageWork::List, StoragePhase::List, path, &[][..], &[][..])
-            }
-            logos_flow::StorageCommand::Touch { path } => {
-                (StorageWork::Touch, StoragePhase::Begin, path, &[][..], &[][..])
-            }
-            logos_flow::StorageCommand::Cat { path } => {
-                (StorageWork::Cat, StoragePhase::Read, path, &[][..], &[][..])
-            }
-            logos_flow::StorageCommand::Write { path, data } => {
-                (StorageWork::Write, StoragePhase::Begin, path, &[][..], data)
-            }
-            logos_flow::StorageCommand::TouchWrite { path, data } => {
-                (StorageWork::TouchWrite, StoragePhase::StageBegin, path, &[][..], data)
-            }
-            logos_flow::StorageCommand::WriteVariables { .. } => return false,
-            logos_flow::StorageCommand::Remove { path } => {
-                (StorageWork::Remove, StoragePhase::Begin, path, &[][..], &[][..])
-            }
-            logos_flow::StorageCommand::Move { from, to } => {
-                (StorageWork::Move, StoragePhase::Begin, from, to, &[][..])
-            }
-        };
-        self.start_work(work, phase, path, secondary, data)
-    }
-
-    fn start_touch_write(&mut self, path: &[u8], data: &[u8]) -> bool {
-        self.start_work(StorageWork::TouchWrite, StoragePhase::StageBegin, path, &[], data)
-    }
-
-    #[cfg(feature = "storage-proof")]
-    fn start_proof_abort(&mut self, path: &[u8]) -> bool {
-        self.failure = StorageApiStatus::Ok;
-        self.start_work(StorageWork::AbortProof, StoragePhase::Begin, path, &[], &[])
-    }
-
-    fn start_work(
-        &mut self,
-        work: StorageWork,
-        phase: StoragePhase,
-        path: &[u8],
-        secondary: &[u8],
-        data: &[u8],
-    ) -> bool {
-        if self.busy || self.done {
-            return false;
-        }
-        self.path_len = 0;
-        self.secondary_len = 0;
-        self.data_len = 0;
-        self.result_len = 0;
-        self.cursor = 0;
-        self.transaction_id = 0;
-        self.last_status = StorageApiStatus::Invalid;
-        self.cancelled = false;
-        let Some(path_len) =
-            logos_flow::root_relative_path(path, &mut self.path).map(|path| path.len())
-        else {
-            return false;
-        };
-        let Some(secondary_len) =
-            logos_flow::root_relative_path(secondary, &mut self.secondary_path)
-                .map(|path| path.len())
-        else {
-            return false;
-        };
-        if data.len() > self.data.len() {
-            return false;
-        }
-        self.path_len = path_len;
-        self.secondary_len = secondary_len;
-        self.data[..data.len()].copy_from_slice(data);
-        self.data_len = data.len();
-        self.work = work;
-        self.phase = phase;
-        self.busy = true;
-        self.done = false;
-        self.sent = false;
-        true
-    }
-
-    fn active(&self) -> bool {
-        self.busy
-    }
-
-    fn cancel(&mut self) {
-        if !self.busy {
-            return;
-        }
-        self.cancelled = true;
-        self.failure = StorageApiStatus::Unsupported;
-        if !self.sent {
-            if self.transaction_id == 0 {
-                self.fail(StorageApiStatus::Unsupported);
-            } else {
-                self.phase = if matches!(
-                    self.phase,
-                    StoragePhase::StageBegin | StoragePhase::StageChunk | StoragePhase::StageCommit
-                ) {
-                    StoragePhase::StageAbort
-                } else {
-                    StoragePhase::Abort
-                };
-                self.next_request();
-            }
-        }
-    }
-
-    fn next_request(&mut self) {
-        self.request_id = self.request_id.wrapping_add(1).max(1);
-        self.sent = false;
-    }
-
-    fn request(&self) -> Option<IpcBytes> {
-        let (operation, transaction_id, flags, offset, path, secondary, data) = match self.phase {
-            StoragePhase::Begin => (StorageApiOperation::Begin, 0, 0, 0, &[][..], &[][..], &[][..]),
-            StoragePhase::Operation => {
-                let operation = match self.work {
-                    StorageWork::Touch => StorageApiOperation::CreateFile,
-                    StorageWork::Write | StorageWork::TouchWrite => StorageApiOperation::Write,
-                    StorageWork::Remove => StorageApiOperation::Remove,
-                    StorageWork::Move => StorageApiOperation::Rename,
-                    #[cfg(feature = "storage-proof")]
-                    StorageWork::AbortProof => StorageApiOperation::CreateFile,
-                    StorageWork::List | StorageWork::Cat => StorageApiOperation::Read,
-                };
-                (
-                    operation,
-                    self.transaction_id,
-                    if matches!(self.work, StorageWork::Write) {
-                        STORAGE_API_FLAG_REPLACE
-                    } else {
-                        0
-                    },
-                    0,
-                    &self.path[..self.path_len],
-                    &self.secondary_path[..self.secondary_len],
-                    &self.data[..self.data_len],
-                )
-            }
-            StoragePhase::Commit => {
-                (StorageApiOperation::Commit, self.transaction_id, 0, 0, &[][..], &[][..], &[][..])
-            }
-            StoragePhase::Abort => {
-                (StorageApiOperation::Abort, self.transaction_id, 0, 0, &[][..], &[][..], &[][..])
-            }
-            StoragePhase::StageBegin => (
-                StorageApiOperation::StageWriteBegin,
-                0,
-                0,
-                0,
-                &self.path[..self.path_len],
-                &[][..],
-                &[][..],
-            ),
-            StoragePhase::StageChunk => {
-                let start = self.cursor as usize;
-                let end = (start + 192).min(self.data_len);
-                (
-                    StorageApiOperation::StageWriteChunk,
-                    self.transaction_id,
-                    0,
-                    self.cursor,
-                    &[][..],
-                    &[][..],
-                    &self.data[start..end],
-                )
-            }
-            StoragePhase::StageCommit => (
-                StorageApiOperation::StageWriteCommit,
-                self.transaction_id,
-                0,
-                0,
-                &[][..],
-                &[][..],
-                &[][..],
-            ),
-            StoragePhase::StageAbort => (
-                StorageApiOperation::StageWriteAbort,
-                self.transaction_id,
-                0,
-                0,
-                &[][..],
-                &[][..],
-                &[][..],
-            ),
-            StoragePhase::Read => (
-                StorageApiOperation::Read,
-                0,
-                0,
-                self.cursor,
-                &self.path[..self.path_len],
-                &[][..],
-                &[][..],
-            ),
-            StoragePhase::List => (
-                StorageApiOperation::List,
-                0,
-                0,
-                self.cursor,
-                &self.path[..self.path_len],
-                &[][..],
-                &[][..],
-            ),
-            StoragePhase::Idle => return None,
-        };
-        StorageApiRequest::encode(
-            operation,
-            flags,
-            self.request_id,
-            transaction_id,
-            offset,
-            path,
-            secondary,
-            data,
-        )
-    }
-
-    fn drive(&mut self) -> bool {
-        if !self.busy {
-            return false;
-        }
-        if !self.sent {
-            let Some(request) = self.request() else {
-                self.fail(StorageApiStatus::Invalid);
-                return true;
-            };
-            match common::ipc_send_handle(ipc_capabilities().storage_send, &request) {
-                IpcStatus::Ok => {}
-                IpcStatus::Full => return false,
-                status => {
-                    self.fail(storage_ipc_error(status));
-                    return true;
-                }
-            }
-            self.sent = true;
-            return true;
-        }
-        let mut message = IpcBytes::empty(MessageKind::StorageResponse);
-        match common::ipc_receive_handle(ipc_capabilities().storage_receive, &mut message) {
-            IpcStatus::Ok => {}
-            IpcStatus::Empty => return false,
-            status => {
-                self.fail(storage_ipc_error(status));
-                return true;
-            }
-        }
-        self.sent = false;
-        let Ok(response) = StorageApiResponse::decode(&message) else {
-            self.fail(StorageApiStatus::Invalid);
-            return true;
-        };
-        if response.request_id != self.request_id {
-            self.fail(StorageApiStatus::Stale);
-            return true;
-        }
-        if self.cancelled {
-            if self.transaction_id == 0 {
-                self.transaction_id = response.transaction_id;
-            }
-            if self.transaction_id == 0 {
-                self.fail(StorageApiStatus::Unsupported);
-            } else {
-                self.phase = StoragePhase::Abort;
-                self.next_request();
-            }
-            return true;
-        }
-        self.handle_response(response);
-        true
-    }
-
-    fn handle_response(&mut self, response: StorageApiResponse<'_>) {
-        if response.status != StorageApiStatus::Ok {
-            if matches!(
-                self.phase,
-                StoragePhase::Operation | StoragePhase::StageChunk | StoragePhase::StageCommit
-            ) && self.transaction_id != 0
-            {
-                self.failure = response.status;
-                self.phase =
-                    if matches!(self.phase, StoragePhase::StageChunk | StoragePhase::StageCommit) {
-                        StoragePhase::StageAbort
-                    } else {
-                        StoragePhase::Abort
-                    };
-                self.next_request();
-            } else {
-                self.fail(response.status);
-            }
-            return;
-        }
-        match self.phase {
-            StoragePhase::Begin => {
-                if response.transaction_id == 0 {
-                    self.fail(StorageApiStatus::Invalid);
-                } else {
-                    self.transaction_id = response.transaction_id;
-                    self.phase = StoragePhase::Operation;
-                    self.next_request();
-                }
-            }
-            StoragePhase::StageBegin => {
-                if response.transaction_id == 0 {
-                    self.fail(StorageApiStatus::Invalid);
-                } else {
-                    self.transaction_id = response.transaction_id;
-                    self.phase = if self.data_len == 0 {
-                        StoragePhase::StageCommit
-                    } else {
-                        StoragePhase::StageChunk
-                    };
-                    self.next_request();
-                }
-            }
-            StoragePhase::StageChunk => {
-                self.cursor = self.cursor.saturating_add(
-                    (self.data_len.saturating_sub(self.cursor as usize).min(192)) as u32,
-                );
-                self.phase = if self.cursor as usize >= self.data_len {
-                    StoragePhase::StageCommit
-                } else {
-                    StoragePhase::StageChunk
-                };
-                self.next_request();
-            }
-            StoragePhase::StageCommit => self.succeed(),
-            StoragePhase::StageAbort => self.fail(self.failure),
-            StoragePhase::Operation => {
-                self.phase = if self.operation_aborts() {
-                    StoragePhase::Abort
-                } else {
-                    StoragePhase::Commit
-                };
-                self.next_request();
-            }
-            StoragePhase::Commit => self.succeed(),
-            StoragePhase::Abort => self.fail(self.failure),
-            StoragePhase::Read => {
-                if response.data.is_empty() && response.more {
-                    self.fail(StorageApiStatus::Invalid);
-                } else {
-                    self.append(response.data);
-                    self.cursor = self.cursor.saturating_add(response.data.len() as u32);
-                    if response.more && self.result_len < self.result.len() {
-                        self.next_request();
-                    } else {
-                        self.succeed();
-                    }
-                }
-            }
-            StoragePhase::List => {
-                if response.data.len() + 2 <= self.result.len() - self.result_len {
-                    self.append(response.data);
-                    self.append(b"\r\n");
-                }
-                self.cursor = self.cursor.saturating_add(1);
-                if response.more && self.result_len < self.result.len() {
-                    self.next_request();
-                } else {
-                    self.succeed();
-                }
-            }
-            StoragePhase::Idle => self.fail(StorageApiStatus::Invalid),
-        }
-    }
-
-    fn append(&mut self, bytes: &[u8]) {
-        let count = bytes.len().min(self.result.len() - self.result_len);
-        self.result[self.result_len..self.result_len + count].copy_from_slice(&bytes[..count]);
-        self.result_len += count;
-    }
-
-    #[cfg(feature = "storage-proof")]
-    fn operation_aborts(&self) -> bool {
-        matches!(self.work, StorageWork::AbortProof)
-    }
-
-    #[cfg(not(feature = "storage-proof"))]
-    const fn operation_aborts(&self) -> bool {
-        false
-    }
-
-    fn fail(&mut self, status: StorageApiStatus) {
-        self.last_status = status;
-        self.result_len = 0;
-        if self.cancelled {
-            self.append(b"command cancelled\r\n");
-            self.cancelled = false;
-        } else {
-            self.append(status_text(status));
-        }
-        self.phase = StoragePhase::Idle;
-        self.busy = false;
-        self.done = true;
-    }
-
-    fn succeed(&mut self) {
-        self.last_status = StorageApiStatus::Ok;
-        if matches!(
-            self.work,
-            StorageWork::Touch
-                | StorageWork::Write
-                | StorageWork::TouchWrite
-                | StorageWork::Remove
-                | StorageWork::Move
-        ) {
-            self.append(b"ok\r\n");
-        } else if matches!(self.work, StorageWork::Cat) {
-            self.append(b"\r\n");
-        }
-        self.phase = StoragePhase::Idle;
-        self.busy = false;
-        self.done = true;
-    }
-
-    fn take_result(&mut self, pending: &mut logos_flow::PendingOutput) {
-        if self.done {
-            #[cfg(feature = "fetch-proof")]
-            if self.result[..self.result_len] == *b"LogOS-Fetch\r\n" {
-                common::proof_line(b"LogOS vNext: fetch contents verified");
-            }
-            pending.stage(&self.result[..self.result_len]);
-            self.done = false;
-        }
-    }
-
-    #[cfg(feature = "storage-proof")]
-    fn discard_result(&mut self) -> StorageApiStatus {
-        self.done = false;
-        self.last_status
-    }
-
-    #[cfg(feature = "storage-proof")]
-    fn result_equals(&self, expected: &[u8]) -> bool {
-        self.result[..self.result_len] == *expected
-    }
-}
-
 #[cfg(feature = "storage-proof")]
 struct StorageProof {
     step: u8,
@@ -1794,8 +1282,8 @@ impl StorageProof {
         self.active
     }
 
-    fn consume_result(&mut self, storage: &mut StorageClient) -> bool {
-        if !storage.done || !self.active {
+    fn consume_result(&mut self, storage: &mut logos_flow::StorageClient) -> bool {
+        if !storage.done() || !self.active {
             return false;
         }
         let expected_content = match (self.recovery, self.step) {
@@ -1840,13 +1328,13 @@ impl StorageProof {
 
     fn start_next(
         &mut self,
-        storage: &mut StorageClient,
+        storage: &mut logos_flow::StorageClient,
         pending: &logos_flow::PendingOutput,
     ) -> bool {
         if self.active
             || self.step == u8::MAX
             || storage.active()
-            || storage.done
+            || storage.done()
             || pending.is_pending()
         {
             return false;
@@ -1893,42 +1381,6 @@ impl StorageProof {
         }
         self.shutdown_attempted = true;
         common::power(logos_flow::FlowAction::Shutdown as usize) != 0
-    }
-}
-
-fn storage_ipc_error(status: IpcStatus) -> StorageApiStatus {
-    match status {
-        IpcStatus::Stale => StorageApiStatus::Stale,
-        IpcStatus::Malformed => StorageApiStatus::Invalid,
-        IpcStatus::Disconnected => StorageApiStatus::Unavailable,
-        IpcStatus::Unauthorized => StorageApiStatus::PermissionDenied,
-        IpcStatus::Full => StorageApiStatus::Busy,
-        IpcStatus::Ok | IpcStatus::Empty => StorageApiStatus::Io,
-    }
-}
-
-fn status_text(status: StorageApiStatus) -> &'static [u8] {
-    match status {
-        StorageApiStatus::Invalid => b"invalid storage request\r\n",
-        StorageApiStatus::NotFound => b"not found\r\n",
-        StorageApiStatus::AlreadyExists => b"already exists\r\n",
-        StorageApiStatus::Busy => b"storage busy\r\n",
-        StorageApiStatus::Capacity => b"storage capacity exhausted\r\n",
-        StorageApiStatus::Io => b"storage I/O error\r\n",
-        StorageApiStatus::Unsupported => b"storage unsupported\r\n",
-        StorageApiStatus::Unavailable => b"storage service unavailable\r\n",
-        StorageApiStatus::PermissionDenied => b"storage access denied\r\n",
-        StorageApiStatus::ReadOnly => b"storage is read-only\r\n",
-        StorageApiStatus::Recovery => b"storage recovery required\r\n",
-        StorageApiStatus::Corrupt => b"storage format is invalid\r\n",
-        StorageApiStatus::NotDirectory => b"not a directory\r\n",
-        StorageApiStatus::IsDirectory => b"is a directory\r\n",
-        StorageApiStatus::Root => b"cannot modify root\r\n",
-        StorageApiStatus::NotEmpty => b"directory not empty\r\n",
-        StorageApiStatus::Stale => b"stale transaction\r\n",
-        StorageApiStatus::TooLarge => b"data too large\r\n",
-        StorageApiStatus::NoTransaction => b"no transaction\r\n",
-        _ => b"storage error\r\n",
     }
 }
 
@@ -2409,7 +1861,7 @@ static mut FLOWS: [logos_flow::FlowService; logos_abi::MAX_SHELL_SESSIONS] =
 /// `SessionInput`/`CompletionRequest` picks a new one.
 static mut ACTIVE_SESSION: u8 = 0;
 static mut PENDING: logos_flow::PendingOutput = logos_flow::PendingOutput::new();
-static mut STORAGE: StorageClient = StorageClient::new();
+static mut STORAGE: logos_flow::StorageClient = logos_flow::StorageClient::new();
 static mut PACKAGE: PackageClient = PackageClient::new();
 static mut DEVICE: logos_flow::DeviceClient = logos_flow::DeviceClient::new();
 static mut USER: logos_flow::UserClient = logos_flow::UserClient::new();
@@ -2555,14 +2007,14 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if storage.active() {
-            progressed |= storage.drive();
-            if storage.done {
+            progressed |= storage.drive(&mut transport);
+            if storage.done() {
                 #[cfg(feature = "storage-proof")]
                 if !proof.active() {
-                    storage.take_result(pending);
+                    storage.take_result(&mut transport, pending);
                 }
                 #[cfg(not(feature = "storage-proof"))]
-                storage.take_result(pending);
+                storage.take_result(&mut transport, pending);
                 progressed = true;
             }
             if storage.active() {
@@ -3116,14 +2568,5 @@ mod tests {
         assert_eq!(&output[..length], b"session-a");
         let length = flows[1].copy_string_variable(b"text", &mut output).unwrap();
         assert_eq!(&output[..length], b"session-b");
-    }
-
-    #[test]
-    fn storage_failures_preserve_actionable_causes() {
-        assert_eq!(storage_ipc_error(IpcStatus::Disconnected), StorageApiStatus::Unavailable);
-        assert_eq!(storage_ipc_error(IpcStatus::Unauthorized), StorageApiStatus::PermissionDenied);
-        assert_eq!(storage_ipc_error(IpcStatus::Full), StorageApiStatus::Busy);
-        assert_eq!(status_text(StorageApiStatus::Recovery), b"storage recovery required\r\n");
-        assert_eq!(status_text(StorageApiStatus::ReadOnly), b"storage is read-only\r\n");
     }
 }

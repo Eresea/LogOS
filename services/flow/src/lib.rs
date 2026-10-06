@@ -10,7 +10,10 @@ pub use interpreter::{
     Variables as FlowVariables,
 };
 
-pub use client::{DeviceClient, PendingOutput, UserClient, user_status_text};
+pub use client::{
+    DeviceClient, PendingOutput, StorageClient, UserClient, status_text, storage_ipc_error,
+    user_status_text,
+};
 pub use transport::{IdSpace, Port, Transport};
 
 #[cfg(test)]
@@ -18,6 +21,9 @@ extern crate std;
 
 pub const MAX_FLOW_BYTES: usize = 256;
 pub const MAX_OUTPUT_BYTES: usize = 512;
+/// Largest file body one Storage request carries; the image asserts it equals
+/// `logos_storage_service::MAX_FILE_BYTES`.
+pub const MAX_STORAGE_DATA_BYTES: usize = 8192;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionTarget {
