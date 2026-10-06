@@ -14,6 +14,10 @@ The complete host gate is:
 .\scripts\check.ps1 -Stage host
 ```
 
+`check.ps1`, `verify.ps1` and `program-proof.ps1` wrap native commands in `Invoke-Native`
+(`scripts/native.ps1`) and exit non-zero on the first failing command; `verify.ps1 -Proof` runs all
+CPU counts and then fails if any failed.
+
 UEFI checks use `scripts/check.ps1`; the target is `x86_64-unknown-uefi` and the package has no
 allocator. The bounded regression proof runner accepts `-Cpus 1`, `-Cpus 2`, or `-Cpus 8`:
 
