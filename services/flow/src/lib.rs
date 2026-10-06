@@ -11,8 +11,9 @@ pub use interpreter::{
 };
 
 pub use client::{
-    DeviceClient, FetchClient, NetworkClient, PackageClient, PendingOutput, StorageClient,
-    UserClient, network_command, network_result_text, network_state_text, status_text,
+    CompletionService, DeviceClient, FetchClient, NetworkClient, PackageClient, PendingOutput,
+    StorageClient, UserClient, completion_message, completion_request, copy_candidate,
+    flow_is_foreground, network_command, network_result_text, network_state_text, status_text,
     storage_ipc_error, user_status_text,
 };
 pub use transport::{IdSpace, Port, Transport};

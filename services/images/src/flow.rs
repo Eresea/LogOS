@@ -12,9 +12,8 @@ mod common;
 #[cfg(feature = "storage-proof")]
 use logos_abi::StorageApiStatus;
 use logos_abi::{
-    COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
-    DeviceRequest, DeviceResponse, FlowControl, GuiSessionContext, IpcBytes, IpcStatus,
-    MAX_COMPLETION_ITEM_BYTES, MessageKind,
+    COMPLETION_FLAG_TRUNCATED, CompletionResponse, DeviceRequest, DeviceResponse, FlowControl,
+    GuiSessionContext, IpcBytes, IpcStatus, MAX_COMPLETION_ITEM_BYTES, MessageKind,
 };
 #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
 use logos_abi::{NetworkOperation, NetworkRequest, NetworkResult, NetworkState};
@@ -287,326 +286,48 @@ fn manager_boot_probe() -> bool {
     response.record.service.is_valid()
 }
 
-struct CompletionService {
-    enabled: bool,
-}
-
-impl CompletionService {
-    const fn new() -> Self {
-        Self { enabled: true }
-    }
-
-    fn complete(&mut self, request: CompletionRequest) -> CompletionResponse {
-        if !self.enabled || !request.is_valid() {
-            let mut response =
-                CompletionResponse::empty(request.request_id, CompletionStatus::Unavailable);
-            response.line_revision = request.line_revision;
-            return response;
+/// Completion's only live data: the service manager's names starting with `prefix`.
+#[allow(clippy::result_unit_err)]
+fn append_service_names(prefix: &[u8], response: &mut CompletionResponse) -> Result<(), ()> {
+    let mut cursor = 0u64;
+    loop {
+        let request_id = next_manager_request_id();
+        let mut request =
+            logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
+        request.cursor = cursor;
+        let mut manager_response = logos_abi::ManagerResponse::new(
+            logos_abi::ManagerOperation::List,
+            logos_abi::ManagerStatus::Malformed,
+            request_id,
+        );
+        if common::manager_call(&request, &mut manager_response) != IpcStatus::Ok
+            || manager_response.status != logos_abi::ManagerStatus::Ok
+        {
+            return Err(());
         }
-        let Some(line) = request.line() else {
-            let mut response =
-                CompletionResponse::empty(request.request_id, CompletionStatus::Malformed);
-            response.line_revision = request.line_revision;
-            return response;
-        };
-        let Ok(Some(context)) = logos_flow::completion_context(line, usize::from(request.cursor))
-        else {
-            let mut response =
-                CompletionResponse::empty(request.request_id, CompletionStatus::NoMatch);
-            response.line_revision = request.line_revision;
-            return response;
-        };
-        let mut response = CompletionResponse::empty(request.request_id, CompletionStatus::Ok);
-        response.line_revision = request.line_revision;
-        response.replace_start = context.replace_start as u8;
-        response.replace_end = context.replace_end as u8;
-        match context.target {
-            logos_flow::CompletionTarget::Root => {
-                if b"help".starts_with(context.prefix)
-                    && !response.push_candidate_with_cursor(
-                        b"help()",
-                        logos_flow::completion_cursor_offset(b"help()"),
-                    )
-                {
-                    response.flags |= COMPLETION_FLAG_TRUNCATED;
-                }
-                if b"clear".starts_with(context.prefix)
-                    && !response.push_candidate_with_cursor(
-                        b"clear()",
-                        logos_flow::completion_cursor_offset(b"clear()"),
-                    )
-                {
-                    response.flags |= COMPLETION_FLAG_TRUNCATED;
-                }
-                if b"echo".starts_with(context.prefix)
-                    && !response.push_candidate_with_cursor(
-                        b"echo(\"\")",
-                        logos_flow::completion_cursor_offset(b"echo(\"\")"),
-                    )
-                {
-                    response.flags |= COMPLETION_FLAG_TRUNCATED;
-                }
-                for spec in logos_flow::FLOW_SPECS {
-                    if !spec.name.starts_with(context.prefix) {
-                        continue;
-                    }
-                    let punctuation = match spec.kind {
-                        logos_flow::FlowKind::Filesystem => b".".as_slice(),
-                        logos_flow::FlowKind::Service => b"[\"".as_slice(),
-                        logos_flow::FlowKind::Network => b".".as_slice(),
-                        logos_flow::FlowKind::System => b".".as_slice(),
-                        logos_flow::FlowKind::Package => b".".as_slice(),
-                        logos_flow::FlowKind::Program => b".".as_slice(),
-                        logos_flow::FlowKind::Device => b".".as_slice(),
-                    };
-                    let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
-                    let Some(length) = copy_candidate(&mut candidate, spec.name, punctuation)
-                    else {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        continue;
-                    };
-                    if !response.push_candidate_with_cursor(
-                        &candidate[..length],
-                        logos_flow::completion_cursor_offset(&candidate[..length]),
-                    ) {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::ServiceName => {
-                if self.append_service_names(context.prefix, &mut response).is_err() {
-                    response.status = CompletionStatus::Unavailable;
-                }
-            }
-            logos_flow::CompletionTarget::ServiceMember => {
-                for candidate in logos_flow::SERVICE_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix)
-                        && !response.push_candidate_with_cursor(
-                            candidate,
-                            logos_flow::completion_cursor_offset(candidate),
-                        )
-                    {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::NetworkMember => {
-                for candidate in logos_flow::NETWORK_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix)
-                        && !response.push_candidate_with_cursor(
-                            candidate,
-                            logos_flow::completion_cursor_offset(candidate),
-                        )
-                    {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::SystemMember => {
-                for candidate in logos_flow::SYSTEM_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix)
-                        && !response.push_candidate_with_cursor(
-                            candidate,
-                            logos_flow::completion_cursor_offset(candidate),
-                        )
-                    {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::FilesystemMember => {
-                for candidate in logos_flow::FILESYSTEM_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix)
-                        && !response.push_candidate_with_cursor(
-                            candidate,
-                            logos_flow::completion_cursor_offset(candidate),
-                        )
-                    {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::PackageMember => {
-                for candidate in logos_flow::PACKAGE_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix)
-                        && !response.push_candidate_with_cursor(
-                            candidate,
-                            logos_flow::completion_cursor_offset(candidate),
-                        )
-                    {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::ProgramMember => {
-                for candidate in logos_flow::PROGRAM_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix)
-                        && !response.push_candidate_with_cursor(
-                            candidate,
-                            logos_flow::completion_cursor_offset(candidate),
-                        )
-                    {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::DeviceMember => {
-                for candidate in logos_flow::DEVICE_COMPLETION_MEMBERS {
-                    if candidate.starts_with(context.prefix)
-                        && !response.push_candidate_with_cursor(
-                            candidate,
-                            logos_flow::completion_cursor_offset(candidate),
-                        )
-                    {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::FileHandleOpen
-            | logos_flow::CompletionTarget::FileHandleOpenMember
-            | logos_flow::CompletionTarget::FileHandleTouch
-            | logos_flow::CompletionTarget::FileHandleTouchMember => {
-                let candidates = match context.target {
-                    logos_flow::CompletionTarget::FileHandleOpen => {
-                        &logos_flow::FILE_OPEN_COMPLETION_MEMBERS
-                    }
-                    logos_flow::CompletionTarget::FileHandleOpenMember => {
-                        &logos_flow::FILE_OPEN_MEMBER_COMPLETION
-                    }
-                    logos_flow::CompletionTarget::FileHandleTouch => {
-                        &logos_flow::FILE_TOUCH_COMPLETION_MEMBERS
-                    }
-                    logos_flow::CompletionTarget::FileHandleTouchMember => {
-                        &logos_flow::FILE_TOUCH_MEMBER_COMPLETION
-                    }
-                    _ => unreachable!(),
-                };
-                for candidate in candidates {
-                    if candidate.starts_with(context.prefix)
-                        && !response.push_candidate_with_cursor(
-                            candidate,
-                            logos_flow::completion_cursor_offset(candidate),
-                        )
-                    {
-                        response.flags |= COMPLETION_FLAG_TRUNCATED;
-                        break;
-                    }
-                }
-            }
-            logos_flow::CompletionTarget::InterfaceName => {
-                if b"eth0".starts_with(context.prefix)
-                    && !response.push_candidate_with_cursor(
-                        b"eth0\"]",
-                        logos_flow::completion_cursor_offset(b"eth0\"]"),
-                    )
-                {
-                    response.flags |= COMPLETION_FLAG_TRUNCATED;
-                }
+        let name_len =
+            usize::from(manager_response.record.name_len).min(manager_response.record.name.len());
+        let name = &manager_response.record.name[..name_len];
+        if name.starts_with(prefix) {
+            let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
+            let Some(length) = logos_flow::copy_candidate(&mut candidate, name, b"\"]") else {
+                response.flags |= COMPLETION_FLAG_TRUNCATED;
+                return Ok(());
+            };
+            if !response.push_candidate(&candidate[..length]) {
+                response.flags |= COMPLETION_FLAG_TRUNCATED;
+                return Ok(());
             }
         }
-        if response.candidate_count == 0 && response.status == CompletionStatus::Ok {
-            response.status = CompletionStatus::NoMatch;
+        if manager_response.cursor == u64::MAX {
+            break;
         }
-        response
-    }
-
-    fn append_service_names(
-        &mut self,
-        prefix: &[u8],
-        response: &mut CompletionResponse,
-    ) -> Result<(), ()> {
-        let mut cursor = 0u64;
-        loop {
-            let request_id = next_manager_request_id();
-            let mut request =
-                logos_abi::ManagerRequest::new(logos_abi::ManagerOperation::List, request_id);
-            request.cursor = cursor;
-            let mut manager_response = logos_abi::ManagerResponse::new(
-                logos_abi::ManagerOperation::List,
-                logos_abi::ManagerStatus::Malformed,
-                request_id,
-            );
-            if common::manager_call(&request, &mut manager_response) != IpcStatus::Ok
-                || manager_response.status != logos_abi::ManagerStatus::Ok
-            {
-                return Err(());
-            }
-            let name_len = usize::from(manager_response.record.name_len)
-                .min(manager_response.record.name.len());
-            let name = &manager_response.record.name[..name_len];
-            if name.starts_with(prefix) {
-                let mut candidate = [0; MAX_COMPLETION_ITEM_BYTES];
-                let Some(length) = copy_candidate(&mut candidate, name, b"\"]") else {
-                    response.flags |= COMPLETION_FLAG_TRUNCATED;
-                    return Ok(());
-                };
-                if !response.push_candidate(&candidate[..length]) {
-                    response.flags |= COMPLETION_FLAG_TRUNCATED;
-                    return Ok(());
-                }
-            }
-            if manager_response.cursor == u64::MAX {
-                break;
-            }
-            if manager_response.cursor <= cursor {
-                return Err(());
-            }
-            cursor = manager_response.cursor;
+        if manager_response.cursor <= cursor {
+            return Err(());
         }
-        Ok(())
+        cursor = manager_response.cursor;
     }
-}
-
-fn copy_candidate(
-    output: &mut [u8; MAX_COMPLETION_ITEM_BYTES],
-    first: &[u8],
-    second: &[u8],
-) -> Option<usize> {
-    let length = first.len().checked_add(second.len())?;
-    if length > output.len() {
-        return None;
-    }
-    output[..first.len()].copy_from_slice(first);
-    output[first.len()..length].copy_from_slice(second);
-    Some(length)
-}
-
-fn completion_request(message: &IpcBytes) -> Option<CompletionRequest> {
-    (message.kind == MessageKind::CompletionRequest
-        && message.len as usize == core::mem::size_of::<CompletionRequest>())
-    .then(|| unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) })
-    .filter(|request: &CompletionRequest| request.is_valid())
-}
-
-fn completion_message(response: CompletionResponse) -> IpcBytes {
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&response as *const CompletionResponse).cast::<u8>(),
-            mem::size_of::<CompletionResponse>(),
-        )
-    };
-    IpcBytes::from_bytes(MessageKind::CompletionResponse, bytes)
-        .unwrap_or_else(|| IpcBytes::empty(MessageKind::CompletionResponse))
-}
-
-fn trim_flow_input(bytes: &[u8]) -> &[u8] {
-    let mut start = 0;
-    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
-        start += 1;
-    }
-    &bytes[start..]
-}
-
-fn flow_is_foreground(bytes: &[u8]) -> bool {
-    trim_flow_input(bytes).starts_with(b"await ")
+    Ok(())
 }
 
 #[cfg(feature = "storage-proof")]
@@ -1132,7 +853,7 @@ static mut DEVICE: logos_flow::DeviceClient = logos_flow::DeviceClient::new();
 static mut USER: logos_flow::UserClient = logos_flow::UserClient::new();
 static mut NETWORK: logos_flow::NetworkClient = logos_flow::NetworkClient::new();
 static mut FETCH: logos_flow::FetchClient = logos_flow::FetchClient::new();
-static mut COMPLETION: CompletionService = CompletionService::new();
+static mut COMPLETION: logos_flow::CompletionService = logos_flow::CompletionService::new();
 static mut PENDING_COMPLETION: Option<IpcBytes> = None;
 
 fn required_capability(spec: common::CapabilitySpec) -> logos_abi::CapabilityHandle {
@@ -1371,10 +1092,12 @@ pub extern "C" fn _start() -> ! {
             // one's reply comes back, so it can't change mid-command.
             unsafe { *core::ptr::addr_of_mut!(ACTIVE_SESSION) = message.session() };
             if message.kind == MessageKind::CompletionRequest {
-                if let Some(request) = completion_request(&message) {
+                if let Some(request) = logos_flow::completion_request(&message) {
                     *pending_completion = Some(
-                        completion_message(completion.complete(request))
-                            .with_session(message.session()),
+                        logos_flow::completion_message(
+                            completion.complete(request, append_service_names),
+                        )
+                        .with_session(message.session()),
                     );
                     progressed = true;
                 }
@@ -1498,7 +1221,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         },
                         Ok(Some(logos_flow::FlowOperation::CancelPromise { name })) => {
-                            let foreground = flow_is_foreground(bytes);
+                            let foreground = logos_flow::flow_is_foreground(bytes);
                             let active = fetch.active_promise_is(name);
                             let cancelled = flow.cancel_promise(name);
                             if active {
@@ -1513,7 +1236,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         Ok(Some(logos_flow::FlowOperation::FetchResponse { url })) => {
-                            let foreground = flow_is_foreground(bytes);
+                            let foreground = logos_flow::flow_is_foreground(bytes);
                             if !(if foreground {
                                 fetch.start_response(&mut transport, url)
                             } else {
@@ -1530,7 +1253,7 @@ pub extern "C" fn _start() -> ! {
                             url_is_variable,
                         })) => {
                             let mut resolved = [0; logos_flow::MAX_FLOW_BYTES];
-                            let foreground = flow_is_foreground(bytes);
+                            let foreground = logos_flow::flow_is_foreground(bytes);
                             let (resolved_url, resolved_len) = if url_is_variable {
                                 let Some(length) = flow.copy_string_variable(url, &mut resolved)
                                 else {
@@ -1574,7 +1297,7 @@ pub extern "C" fn _start() -> ! {
                             url,
                             destination,
                         })) => {
-                            let foreground = flow_is_foreground(bytes);
+                            let foreground = logos_flow::flow_is_foreground(bytes);
                             if !fetch.start_to_file_mode(
                                 &mut transport,
                                 url,
@@ -1592,7 +1315,7 @@ pub extern "C" fn _start() -> ! {
                         })) => {
                             let mut resolved_url = [0; logos_flow::MAX_FLOW_BYTES];
                             let mut resolved_destination = [0; logos_flow::MAX_FLOW_BYTES];
-                            let foreground = flow_is_foreground(bytes);
+                            let foreground = logos_flow::flow_is_foreground(bytes);
                             let Some(url_len) = flow.copy_string_variable(url, &mut resolved_url)
                             else {
                                 pending.stage(b"flow: string variable is unavailable\r\n");
@@ -1620,7 +1343,7 @@ pub extern "C" fn _start() -> ! {
                                 &mut transport,
                                 url,
                                 destination,
-                                flow_is_foreground(bytes),
+                                logos_flow::flow_is_foreground(bytes),
                             ) {
                                 pending.stage(b"fetch request busy or too large\r\n");
                             }
@@ -1699,7 +1422,7 @@ pub extern "C" fn _start() -> ! {
                                 &mut transport,
                                 url,
                                 destination,
-                                flow_is_foreground(bytes),
+                                logos_flow::flow_is_foreground(bytes),
                             ) {
                                 pending.stage(b"fetch request busy or too large\r\n");
                             }
@@ -1748,76 +1471,6 @@ fn main() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn completion_provider_returns_targeted_static_candidates() {
-        let mut provider = CompletionService::new();
-        let root = provider.complete(CompletionRequest::new(1, b"f", 1).unwrap());
-        assert_eq!(root.status, CompletionStatus::Ok);
-        assert_eq!(root.candidate(0), Some(&b"fs."[..]));
-
-        let help = provider.complete(CompletionRequest::new(4, b"hel", 3).unwrap());
-        assert_eq!(help.candidate(0), Some(&b"help()"[..]));
-
-        let repeated_help = provider.complete(CompletionRequest::new(10, b"help()", 4).unwrap());
-        assert_eq!(repeated_help.status, CompletionStatus::NoMatch);
-
-        let clear = provider.complete(CompletionRequest::new(8, b"cle", 3).unwrap());
-        assert_eq!(clear.candidate(0), Some(&b"clear()"[..]));
-
-        let echo = provider.complete(CompletionRequest::new(9, b"ech", 3).unwrap());
-        assert_eq!(echo.candidate(0), Some(&b"echo(\"\")"[..]));
-        assert_eq!(echo.cursor_offsets[0], 6);
-
-        let fs = provider.complete(CompletionRequest::new(5, b"fs.l", 4).unwrap());
-        assert_eq!(fs.candidate(0), Some(&b"list()"[..]));
-        assert_eq!(fs.cursor_offsets[0], 6);
-
-        let fs_touch = provider.complete(CompletionRequest::new(7, b"fs.t", 4).unwrap());
-        assert_eq!(fs_touch.candidate(0), Some(&b"touch(\"\").create()"[..]));
-        assert_eq!(fs_touch.cursor_offsets[0], 7);
-
-        let fs_move = provider.complete(CompletionRequest::new(13, b"fs.mo", 5).unwrap());
-        assert_eq!(fs_move.candidate(0), Some(&b"move(\"\", \"\")"[..]));
-        assert_eq!(fs_move.cursor_offsets[0], 6);
-
-        let network = provider.complete(CompletionRequest::new(14, b"net.", 4).unwrap());
-        assert_eq!(network.candidate(1), Some(&b"ping(\"\")"[..]));
-        assert_eq!(network.cursor_offsets[1], 6);
-        assert_eq!(network.candidate(2), Some(&b"tcp-probe(\"\", 0)"[..]));
-        assert_eq!(network.cursor_offsets[2], 11);
-        assert_eq!(network.candidate(3), Some(&b"fetch(\"\")"[..]));
-        assert_eq!(network.cursor_offsets[3], 7);
-
-        let sys = provider.complete(CompletionRequest::new(6, b"sys.v", 5).unwrap());
-        assert_eq!(sys.candidate(0), Some(&b"version()"[..]));
-
-        let member =
-            provider.complete(CompletionRequest::new(2, b"service[\"storage\"].re", 21).unwrap());
-        assert_eq!(member.candidate(0), Some(&b"restart()"[..]));
-
-        let file_handle =
-            provider.complete(CompletionRequest::new(11, b"fs.open(\"test\").", 16).unwrap());
-        assert_eq!(file_handle.candidate_count, 2);
-        assert_eq!(file_handle.candidate(0), Some(&b"read()"[..]));
-        assert_eq!(file_handle.candidate(1), Some(&b"write(\"\")"[..]));
-        assert_eq!(file_handle.cursor_offsets[0], 6);
-        assert_eq!(file_handle.cursor_offsets[1], 7);
-
-        let packages = provider.complete(CompletionRequest::new(15, b"pkg.", 4).unwrap());
-        assert_eq!(packages.cursor_offsets[0], 6);
-        assert_eq!(packages.cursor_offsets[1], 6);
-        assert_eq!(packages.cursor_offsets[2], 9);
-
-        let filtered_file_handle =
-            provider.complete(CompletionRequest::new(12, b"fs.open(\"test\").re", 18).unwrap());
-        assert_eq!(filtered_file_handle.candidate_count, 1);
-        assert_eq!(filtered_file_handle.candidate(0), Some(&b"read()"[..]));
-
-        let interface =
-            provider.complete(CompletionRequest::new(3, b"net.interface[\"e", 16).unwrap());
-        assert_eq!(interface.candidate(0), Some(&b"eth0\"]"[..]));
-    }
 
     #[test]
     fn each_sessions_flow_service_keeps_its_own_variables() {

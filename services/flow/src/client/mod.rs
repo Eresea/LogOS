@@ -2,6 +2,7 @@
 //! single-flight request driver that talks to its peer only through a
 //! [`crate::Transport`]; the image owns capability discovery and the event loop.
 
+pub mod completion;
 pub mod device;
 pub mod fetch;
 pub mod network;
@@ -10,6 +11,10 @@ pub mod package;
 pub mod storage;
 pub mod user;
 
+pub use completion::{
+    CompletionService, completion_message, completion_request, copy_candidate, flow_is_foreground,
+    trim_flow_input,
+};
 pub use device::DeviceClient;
 pub use fetch::FetchClient;
 pub use network::{NetworkClient, network_command, network_result_text, network_state_text};
