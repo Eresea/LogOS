@@ -5,7 +5,8 @@ use logos_abi::{
     NetworkResponse, NetworkResult, NetworkState,
 };
 
-use crate::{IdSpace, Port, Transport};
+use super::fetch::FetchClient;
+use crate::{IdSpace, NetworkCommand, PendingOutput, Port, Transport};
 
 /// Synchronous request/response client for the Network service. Requests are
 /// matched by id; a Flow cancel control sends a `Cancel` request mid-wait.
@@ -189,6 +190,67 @@ pub fn network_state_text(state: NetworkState) -> &'static [u8] {
     }
 }
 
+/// Run one `net.*` command to completion (or start the Fetch client) and stage
+/// its user-visible result.
+pub fn network_command<T: Transport>(
+    command: NetworkCommand<'_>,
+    client: &mut NetworkClient,
+    transport: &mut T,
+    fetch: &mut FetchClient,
+    pending: &mut PendingOutput,
+) {
+    if let NetworkCommand::Fetch { url, destination } = command {
+        if !fetch.start(transport, url, destination) {
+            pending.stage(if fetch.active() {
+                b"fetch already active\r\n"
+            } else {
+                b"fetch request too large\r\n"
+            });
+        }
+        return;
+    }
+    if let NetworkCommand::InterfaceStatus { name } = command {
+        if name != b"eth0" {
+            pending.stage(b"network interface not found\r\n");
+            return;
+        }
+    }
+    let (operation, address, port, success): (NetworkOperation, [u8; 4], u16, &[u8]) = match command
+    {
+        NetworkCommand::Status => (NetworkOperation::Status, [0; 4], 0, b""),
+        NetworkCommand::InterfaceStatus { .. } => (NetworkOperation::Status, [0; 4], 0, b""),
+        NetworkCommand::Ping { address } => {
+            (NetworkOperation::IcmpPing, address, 0, b"ping ok\r\n")
+        }
+        NetworkCommand::TcpProbe { address, port } => {
+            (NetworkOperation::TcpConnect, address, port, b"tcp probe ok\r\n")
+        }
+        NetworkCommand::Fetch { .. } => unreachable!(),
+    };
+    match client.request(transport, operation, address, port) {
+        Ok(response) if operation == NetworkOperation::Status => {
+            pending.stage(network_state_text(response.state))
+        }
+        Ok(response) if operation == NetworkOperation::TcpConnect => {
+            client.close_tcp_response(transport, response);
+            if response.result == NetworkResult::Ok {
+                pending.stage(success);
+            } else {
+                pending.stage(network_result_text(response.result));
+            }
+        }
+        Ok(response) if response.result == NetworkResult::Ok => pending.stage(success),
+        Ok(response) => pending.stage(network_result_text(response.result)),
+        Err(IpcStatus::Stale | IpcStatus::Disconnected) => pending.stage(b"network restarting\r\n"),
+        Err(IpcStatus::Empty) if client.take_cancelled() => pending.stage(b"network cancelled\r\n"),
+        Err(IpcStatus::Unauthorized | IpcStatus::Empty) => {
+            pending.stage(b"network unavailable\r\n")
+        }
+        Err(IpcStatus::Full) => pending.stage(b"network queue full\r\n"),
+        Err(IpcStatus::Malformed | IpcStatus::Ok) => pending.stage(b"network request invalid\r\n"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +431,127 @@ mod tests {
         let close = sent(&transport, 0);
         assert_eq!(close.operation, NetworkOperation::Close);
         assert_eq!((close.handle, close.generation, close.service_epoch), (4, 2, 9));
+    }
+
+    fn run(
+        transport: &mut FakeTransport,
+        command: NetworkCommand<'_>,
+    ) -> (std::vec::Vec<u8>, FetchClient) {
+        let mut client = NetworkClient::new();
+        let mut fetch = FetchClient::new();
+        let mut pending = PendingOutput::new();
+        network_command(command, &mut client, transport, &mut fetch, &mut pending);
+        (pending.staged().to_vec(), fetch)
+    }
+
+    #[test]
+    fn network_command_maps_responses_to_user_text() {
+        let ping = || NetworkCommand::Ping { address: [10, 0, 2, 2] };
+        let mut transport = FakeTransport::new();
+        reply(
+            &mut transport,
+            NetworkOperation::IcmpPing,
+            NetworkResult::Ok,
+            NetworkState::Ready,
+            1,
+        );
+        assert_eq!(run(&mut transport, ping()).0, b"ping ok\r\n");
+
+        let mut transport = FakeTransport::new();
+        reply(
+            &mut transport,
+            NetworkOperation::IcmpPing,
+            NetworkResult::Timeout,
+            NetworkState::Ready,
+            1,
+        );
+        assert_eq!(run(&mut transport, ping()).0, b"network timeout\r\n");
+
+        let mut transport = FakeTransport::new();
+        reply(&mut transport, NetworkOperation::Status, NetworkResult::Ok, NetworkState::Ready, 1);
+        assert_eq!(run(&mut transport, NetworkCommand::Status).0, b"network ready\r\n");
+
+        let mut transport = FakeTransport::new();
+        reply(
+            &mut transport,
+            NetworkOperation::TcpConnect,
+            NetworkResult::Refused,
+            NetworkState::Ready,
+            1,
+        );
+        let probe = NetworkCommand::TcpProbe { address: [10, 0, 2, 2], port: 80 };
+        assert_eq!(run(&mut transport, probe).0, b"network refused\r\n");
+    }
+
+    #[test]
+    fn network_command_maps_transport_errors_to_user_text() {
+        for (status, text) in [
+            (IpcStatus::Stale, &b"network restarting\r\n"[..]),
+            (IpcStatus::Disconnected, b"network restarting\r\n"),
+            (IpcStatus::Unauthorized, b"network unavailable\r\n"),
+            (IpcStatus::Malformed, b"network request invalid\r\n"),
+        ] {
+            let mut transport = FakeTransport::new();
+            transport.reply_status(Port::Network, status);
+            assert_eq!(run(&mut transport, NetworkCommand::Status).0, text);
+        }
+        let mut transport = FakeTransport::new();
+        transport.fail_sends(Port::Network, IpcStatus::Full);
+        assert_eq!(run(&mut transport, NetworkCommand::Status).0, b"network queue full\r\n");
+
+        let mut transport = FakeTransport::new();
+        assert_eq!(
+            run(&mut transport, NetworkCommand::Status).0,
+            b"network unavailable\r\n",
+            "no reply within the bound"
+        );
+    }
+
+    #[test]
+    fn network_command_reports_cancel_and_unknown_interfaces() {
+        let mut transport = FakeTransport::new();
+        let control = FlowControl::cancel(0, 0);
+        transport.reply(Port::Input, &wrap(MessageKind::FlowControl, &control));
+        reply(
+            &mut transport,
+            NetworkOperation::Cancel,
+            NetworkResult::Cancelled,
+            NetworkState::Ready,
+            1,
+        );
+        let ping = NetworkCommand::Ping { address: [10, 0, 2, 2] };
+        assert_eq!(run(&mut transport, ping).0, b"network cancelled\r\n");
+
+        let mut transport = FakeTransport::new();
+        let unknown = NetworkCommand::InterfaceStatus { name: b"wlan0" };
+        assert_eq!(run(&mut transport, unknown).0, b"network interface not found\r\n");
+        assert_eq!(transport.sent_count(Port::Network), 0);
+    }
+
+    #[test]
+    fn network_fetch_command_starts_the_fetch_client() {
+        let mut transport = FakeTransport::new();
+        let fetch = NetworkCommand::Fetch { url: b"http://10.0.2.2/", destination: b"/f" };
+        let (output, fetch_client) = run(&mut transport, fetch);
+        assert!(output.is_empty());
+        assert!(fetch_client.active());
+        assert_eq!(transport.sent_count(Port::Fetch), 1);
+
+        let mut client = NetworkClient::new();
+        let mut busy = fetch_client;
+        let mut pending = PendingOutput::new();
+        network_command(
+            NetworkCommand::Fetch { url: b"http://10.0.2.2/", destination: b"/f" },
+            &mut client,
+            &mut transport,
+            &mut busy,
+            &mut pending,
+        );
+        assert_eq!(pending.staged(), b"fetch already active\r\n");
+
+        let mut transport = FakeTransport::new();
+        let empty = NetworkCommand::Fetch { url: b"", destination: b"/f" };
+        assert_eq!(run(&mut transport, empty).0, b"fetch request too large\r\n");
     }
 
     #[test]

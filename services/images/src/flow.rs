@@ -13,12 +13,11 @@ mod common;
 use logos_abi::StorageApiStatus;
 use logos_abi::{
     COMPLETION_FLAG_TRUNCATED, CompletionRequest, CompletionResponse, CompletionStatus,
-    DeviceRequest, DeviceResponse, FetchBodyChunk, FetchControl, FetchPhase, FetchRequest,
-    FetchResponse, FetchStatus, FlowControl, GuiSessionContext, IpcBytes, IpcStatus,
-    MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkResult,
+    DeviceRequest, DeviceResponse, FlowControl, GuiSessionContext, IpcBytes, IpcStatus,
+    MAX_COMPLETION_ITEM_BYTES, MessageKind,
 };
 #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
-use logos_abi::{NetworkRequest, NetworkState};
+use logos_abi::{NetworkOperation, NetworkRequest, NetworkResult, NetworkState};
 
 // logos-flow sizes its Storage client buffer without depending on the storage service.
 const _: () = assert!(logos_flow::MAX_STORAGE_DATA_BYTES == logos_storage_service::MAX_FILE_BYTES);
@@ -267,331 +266,6 @@ fn next_user_request_id() -> u32 {
         {
             return current;
         }
-    }
-}
-
-struct FetchClient {
-    active: bool,
-    request_id: u32,
-    initial_progress: Option<FetchResponse>,
-    cancel_pending: bool,
-    response_mode: bool,
-    foreground: bool,
-    response_status: u16,
-    response_ok: bool,
-    body: [u8; logos_flow::interpreter::MAX_VALUE_BYTES],
-    body_len: usize,
-    promise_name: [u8; logos_flow::interpreter::MAX_VARIABLE_NAME_BYTES],
-    promise_name_len: usize,
-    callback_destination: [u8; logos_flow::MAX_FLOW_BYTES],
-    callback_destination_len: usize,
-}
-
-impl FetchClient {
-    const fn new() -> Self {
-        Self {
-            active: false,
-            request_id: 0,
-            initial_progress: None,
-            cancel_pending: false,
-            response_mode: false,
-            foreground: true,
-            response_status: 0,
-            response_ok: false,
-            body: [0; logos_flow::interpreter::MAX_VALUE_BYTES],
-            body_len: 0,
-            promise_name: [0; logos_flow::interpreter::MAX_VARIABLE_NAME_BYTES],
-            promise_name_len: 0,
-            callback_destination: [0; logos_flow::MAX_FLOW_BYTES],
-            callback_destination_len: 0,
-        }
-    }
-
-    fn active(&self) -> bool {
-        self.active
-    }
-
-    fn start_with_mode(&mut self, url: &[u8], destination: &[u8], foreground: bool) -> bool {
-        if self.active {
-            return false;
-        }
-        let request_id = next_network_request_id();
-        let Some(request) = FetchRequest::new(request_id, url, destination) else {
-            return false;
-        };
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&request as *const FetchRequest).cast::<u8>(),
-                mem::size_of::<FetchRequest>(),
-            )
-        };
-        let Some(message) = IpcBytes::from_bytes(MessageKind::FetchRequest, bytes) else {
-            return false;
-        };
-        if common::ipc_send_handle(ipc_capabilities().fetch_send, &message) != IpcStatus::Ok {
-            return false;
-        }
-        self.active = true;
-        self.request_id = request_id;
-        self.cancel_pending = false;
-        self.response_mode = destination.is_empty();
-        self.foreground = foreground;
-        self.response_status = 0;
-        self.response_ok = false;
-        self.body_len = 0;
-        self.callback_destination_len = 0;
-        self.initial_progress = Some(FetchResponse::new(
-            request_id,
-            FetchPhase::Connect,
-            FetchStatus::InProgress,
-            0,
-            None,
-        ));
-        #[cfg(feature = "fetch-proof")]
-        common::proof_line(b"LogOS vNext: Flow fetch started");
-        true
-    }
-
-    fn start(&mut self, url: &[u8], destination: &[u8]) -> bool {
-        self.start_with_mode(url, destination, true)
-    }
-
-    fn start_response(&mut self, url: &[u8]) -> bool {
-        self.start_with_mode(url, &[], true)
-    }
-
-    fn start_response_background(&mut self, url: &[u8]) -> bool {
-        self.start_with_mode(url, &[], false)
-    }
-
-    fn start_named_response(&mut self, url: &[u8], name: &[u8], foreground: bool) -> bool {
-        if name.len() > self.promise_name.len() || !self.start_with_mode(url, &[], foreground) {
-            return false;
-        }
-        self.promise_name[..name.len()].copy_from_slice(name);
-        self.promise_name_len = name.len();
-        true
-    }
-
-    fn start_to_file_mode(&mut self, url: &[u8], destination: &[u8], foreground: bool) -> bool {
-        self.start_with_mode(url, destination, foreground)
-    }
-
-    fn start_response_to_file(&mut self, url: &[u8], destination: &[u8], foreground: bool) -> bool {
-        if destination.is_empty() || destination.len() > self.callback_destination.len() {
-            return false;
-        }
-        if !self.start_with_mode(url, &[], foreground) {
-            return false;
-        }
-        self.callback_destination[..destination.len()].copy_from_slice(destination);
-        self.callback_destination_len = destination.len();
-        true
-    }
-
-    fn foreground(&self) -> bool {
-        self.foreground
-    }
-
-    fn take_callback(&mut self) -> Option<(&[u8], &[u8])> {
-        if self.callback_destination_len == 0 || self.active || !self.response_ok {
-            return None;
-        }
-        Some((
-            &self.callback_destination[..self.callback_destination_len],
-            &self.body[..self.body_len],
-        ))
-    }
-
-    fn clear_callback(&mut self) {
-        self.callback_destination_len = 0;
-        self.body_len = 0;
-        self.response_ok = false;
-    }
-
-    fn active_promise_is(&self, name: &[u8]) -> bool {
-        self.promise_name_len == name.len() && self.promise_name[..self.promise_name_len] == *name
-    }
-
-    fn resolve_promise(&mut self, flow: &mut logos_flow::FlowService) {
-        if self.active || self.promise_name_len == 0 {
-            return;
-        }
-        let name = &self.promise_name[..self.promise_name_len];
-        if self.response_ok {
-            let _ = flow.resolve_response_promise(
-                name,
-                self.response_status,
-                &self.body[..self.body_len],
-            );
-        } else {
-            let _ = flow.cancel_promise(name);
-        }
-        self.promise_name_len = 0;
-    }
-
-    fn cancel(&mut self) {
-        if !self.active {
-            return;
-        }
-        self.cancel_pending = true;
-    }
-
-    fn send_cancel(&mut self) -> IpcStatus {
-        let control = FetchControl::cancel(self.request_id);
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&control as *const FetchControl).cast::<u8>(),
-                mem::size_of::<FetchControl>(),
-            )
-        };
-        if let Some(message) = IpcBytes::from_bytes(MessageKind::FetchControl, bytes) {
-            return common::ipc_send_handle(ipc_capabilities().fetch_send, &message);
-        }
-        IpcStatus::Malformed
-    }
-
-    fn drive(&mut self, pending: &mut logos_flow::PendingOutput) -> bool {
-        if let Some(response) = self.initial_progress {
-            match forward_fetch_progress(response) {
-                IpcStatus::Ok => self.initial_progress = None,
-                IpcStatus::Full => return false,
-                _ => self.initial_progress = None,
-            }
-        }
-        if self.cancel_pending {
-            match self.send_cancel() {
-                IpcStatus::Ok => self.cancel_pending = false,
-                IpcStatus::Full => return false,
-                _ => self.cancel_pending = false,
-            }
-        }
-        let mut message = IpcBytes::empty(MessageKind::FetchResponse);
-        match common::ipc_receive_handle(ipc_capabilities().fetch_receive, &mut message) {
-            IpcStatus::Empty => return false,
-            IpcStatus::Ok => {}
-            IpcStatus::Stale | IpcStatus::Disconnected | IpcStatus::Unauthorized => {
-                self.active = false;
-                pending.stage(b"fetch failed\r\n");
-                return true;
-            }
-            IpcStatus::Full | IpcStatus::Malformed => {
-                self.active = false;
-                pending.stage(b"fetch failed\r\n");
-                return true;
-            }
-        }
-        if message.kind == MessageKind::FetchBodyChunk {
-            if message.len as usize != mem::size_of::<FetchBodyChunk>() {
-                self.active = false;
-                pending.stage(b"fetch body malformed\r\n");
-                return true;
-            }
-            let chunk: FetchBodyChunk =
-                unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
-            let end = chunk.offset as usize + usize::from(chunk.len);
-            if !self.response_mode
-                || !chunk.is_valid()
-                || chunk.request_id != self.request_id
-                || chunk.offset as usize != self.body_len
-                || end > self.body.len()
-            {
-                self.active = false;
-                pending.stage(b"fetch body stale\r\n");
-                return true;
-            }
-            self.body[self.body_len..end].copy_from_slice(&chunk.bytes[..usize::from(chunk.len)]);
-            self.body_len = end;
-            return true;
-        }
-        if message.kind != MessageKind::FetchResponse
-            || message.len as usize != mem::size_of::<FetchResponse>()
-        {
-            self.active = false;
-            pending.stage(b"fetch failed\r\n");
-            return true;
-        }
-        if !FetchResponse::wire_enums_valid(&message.bytes[..mem::size_of::<FetchResponse>()]) {
-            self.active = false;
-            pending.stage(b"fetch failed\r\n");
-            return true;
-        }
-        let response: FetchResponse = unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
-        if !response.is_valid() || response.request_id != self.request_id {
-            self.active = false;
-            pending.stage(b"fetch failed\r\n");
-            return true;
-        }
-        if matches!(
-            response.phase,
-            FetchPhase::Complete | FetchPhase::Failed | FetchPhase::Cancelled
-        ) {
-            self.response_status = response.response_status;
-            self.response_ok = response.status == FetchStatus::Ok;
-            self.active = false;
-            self.cancel_pending = false;
-            let message = match response.status {
-                FetchStatus::Ok => {
-                    #[cfg(feature = "fetch-proof")]
-                    common::proof_line(b"LogOS vNext: Flow fetch complete");
-                    b"fetch complete\r\n" as &[u8]
-                }
-                FetchStatus::Cancelled => {
-                    #[cfg(feature = "fetch-proof")]
-                    common::proof_line(b"LogOS vNext: Flow fetch cancelled");
-                    b"fetch cancelled\r\n"
-                }
-                _ => {
-                    #[cfg(feature = "fetch-proof")]
-                    common::proof_line(b"LogOS vNext: Flow fetch failed");
-                    b"fetch failed\r\n"
-                }
-            };
-            if !(response.status == FetchStatus::Ok
-                && !self.foreground
-                && self.callback_destination_len == 0)
-            {
-                pending.stage(message);
-            }
-        } else {
-            let _ = forward_fetch_progress(response);
-        }
-        true
-    }
-}
-
-fn forward_fetch_progress(response: FetchResponse) -> IpcStatus {
-    let bytes = unsafe {
-        core::slice::from_raw_parts(
-            (&response as *const FetchResponse).cast::<u8>(),
-            mem::size_of::<FetchResponse>(),
-        )
-    };
-    let Some(message) = IpcBytes::from_bytes(MessageKind::FlowProgress, bytes) else {
-        return IpcStatus::Malformed;
-    };
-    let message = message.with_session(active_session());
-    common::ipc_send_handle(ipc_capabilities().output, &message)
-}
-
-fn fetch_control(message: &IpcBytes, fetch: &mut FetchClient) -> bool {
-    if message.kind != MessageKind::FlowControl
-        || message.len as usize != mem::size_of::<FlowControl>()
-    {
-        return false;
-    }
-    if !FlowControl::wire_enums_valid(&message.bytes[..mem::size_of::<FlowControl>()]) {
-        return false;
-    }
-    let control: FlowControl = unsafe { ptr::read_unaligned(message.bytes.as_ptr().cast()) };
-    if control.is_valid()
-        && control.session == active_session()
-        && (control.request_id == 0 || control.request_id == fetch.request_id)
-    {
-        fetch.cancel();
-        true
-    } else {
-        false
     }
 }
 
@@ -1232,67 +906,6 @@ fn service_command(
     pending.stage(&output[..output_len]);
 }
 
-fn network_command(
-    command: logos_flow::NetworkCommand<'_>,
-    client: &mut logos_flow::NetworkClient,
-    transport: &mut IpcTransport,
-    fetch: &mut FetchClient,
-    pending: &mut logos_flow::PendingOutput,
-) {
-    if let logos_flow::NetworkCommand::Fetch { url, destination } = command {
-        if !fetch.start(url, destination) {
-            pending.stage(if fetch.active() {
-                b"fetch already active\r\n"
-            } else {
-                b"fetch request too large\r\n"
-            });
-        }
-        return;
-    }
-    if let logos_flow::NetworkCommand::InterfaceStatus { name } = command {
-        if name != b"eth0" {
-            pending.stage(b"network interface not found\r\n");
-            return;
-        }
-    }
-    let (operation, address, port, success): (NetworkOperation, [u8; 4], u16, &[u8]) = match command
-    {
-        logos_flow::NetworkCommand::Status => (NetworkOperation::Status, [0; 4], 0, b""),
-        logos_flow::NetworkCommand::InterfaceStatus { .. } => {
-            (NetworkOperation::Status, [0; 4], 0, b"")
-        }
-        logos_flow::NetworkCommand::Ping { address } => {
-            (NetworkOperation::IcmpPing, address, 0, b"ping ok\r\n")
-        }
-        logos_flow::NetworkCommand::TcpProbe { address, port } => {
-            (NetworkOperation::TcpConnect, address, port, b"tcp probe ok\r\n")
-        }
-        logos_flow::NetworkCommand::Fetch { .. } => unreachable!(),
-    };
-    match client.request(transport, operation, address, port) {
-        Ok(response) if operation == NetworkOperation::Status => {
-            pending.stage(logos_flow::network_state_text(response.state))
-        }
-        Ok(response) if operation == NetworkOperation::TcpConnect => {
-            client.close_tcp_response(transport, response);
-            if response.result == NetworkResult::Ok {
-                pending.stage(success);
-            } else {
-                pending.stage(logos_flow::network_result_text(response.result));
-            }
-        }
-        Ok(response) if response.result == NetworkResult::Ok => pending.stage(success),
-        Ok(response) => pending.stage(logos_flow::network_result_text(response.result)),
-        Err(IpcStatus::Stale | IpcStatus::Disconnected) => pending.stage(b"network restarting\r\n"),
-        Err(IpcStatus::Empty) if client.take_cancelled() => pending.stage(b"network cancelled\r\n"),
-        Err(IpcStatus::Unauthorized | IpcStatus::Empty) => {
-            pending.stage(b"network unavailable\r\n")
-        }
-        Err(IpcStatus::Full) => pending.stage(b"network queue full\r\n"),
-        Err(IpcStatus::Malformed | IpcStatus::Ok) => pending.stage(b"network request invalid\r\n"),
-    }
-}
-
 #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
 fn manager_restart_probe() -> bool {
     let Some(record) = manager_record(b"storage").ok().flatten() else {
@@ -1518,7 +1131,7 @@ static mut PACKAGE: logos_flow::PackageClient = logos_flow::PackageClient::new()
 static mut DEVICE: logos_flow::DeviceClient = logos_flow::DeviceClient::new();
 static mut USER: logos_flow::UserClient = logos_flow::UserClient::new();
 static mut NETWORK: logos_flow::NetworkClient = logos_flow::NetworkClient::new();
-static mut FETCH: FetchClient = FetchClient::new();
+static mut FETCH: logos_flow::FetchClient = logos_flow::FetchClient::new();
 static mut COMPLETION: CompletionService = CompletionService::new();
 static mut PENDING_COMPLETION: Option<IpcBytes> = None;
 
@@ -1605,7 +1218,7 @@ pub extern "C" fn _start() -> ! {
             let mut control = IpcBytes::empty(MessageKind::FlowControl);
             if common::ipc_receive_handle(ipc_capabilities().input, &mut control) == IpcStatus::Ok {
                 if fetch.active() {
-                    progressed |= fetch_control(&control, fetch);
+                    progressed |= fetch.handle_control(&control, active_session());
                 } else if control.kind == MessageKind::FlowControl
                     && control.len as usize == mem::size_of::<FlowControl>()
                 {
@@ -1622,15 +1235,12 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        if fetch.active() && fetch.cancel_pending {
-            match fetch.send_cancel() {
-                IpcStatus::Ok => fetch.cancel_pending = false,
-                IpcStatus::Full => {
-                    wait_for_ipc();
-                    continue;
-                }
-                _ => fetch.cancel_pending = false,
-            }
+        if fetch.active()
+            && fetch.cancel_pending()
+            && fetch.send_cancel(&mut transport) == IpcStatus::Full
+        {
+            wait_for_ipc();
+            continue;
         }
         if pending.is_pending() {
             if !progressed {
@@ -1716,7 +1326,7 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if fetch.active() {
-            progressed |= fetch.drive(pending);
+            progressed |= fetch.drive(&mut transport, pending, active_session());
             if !fetch.active() {
                 fetch.resolve_promise(&mut flows[active_session() as usize]);
                 if let Some((destination, body)) = fetch.take_callback() {
@@ -1795,7 +1405,13 @@ pub extern "C" fn _start() -> ! {
                             service_command(command, pending)
                         }
                         Ok(Some(logos_flow::FlowOperation::Network(command))) => {
-                            network_command(command, network, &mut transport, fetch, pending)
+                            logos_flow::network_command(
+                                command,
+                                network,
+                                &mut transport,
+                                fetch,
+                                pending,
+                            )
                         }
                         Ok(Some(logos_flow::FlowOperation::Storage(command))) => match command {
                             logos_flow::StorageCommand::WriteVariables {
@@ -1899,9 +1515,9 @@ pub extern "C" fn _start() -> ! {
                         Ok(Some(logos_flow::FlowOperation::FetchResponse { url })) => {
                             let foreground = flow_is_foreground(bytes);
                             if !(if foreground {
-                                fetch.start_response(url)
+                                fetch.start_response(&mut transport, url)
                             } else {
-                                fetch.start_response_background(url)
+                                fetch.start_response_background(&mut transport, url)
                             }) {
                                 pending.stage(b"fetch request busy or too large\r\n");
                             } else if !foreground {
@@ -1927,12 +1543,19 @@ pub extern "C" fn _start() -> ! {
                             };
                             let started = if name.is_empty() {
                                 if foreground {
-                                    fetch.start_response(&resolved_url[..resolved_len])
+                                    fetch.start_response(
+                                        &mut transport,
+                                        &resolved_url[..resolved_len],
+                                    )
                                 } else {
-                                    fetch.start_response_background(&resolved_url[..resolved_len])
+                                    fetch.start_response_background(
+                                        &mut transport,
+                                        &resolved_url[..resolved_len],
+                                    )
                                 }
                             } else {
                                 fetch.start_named_response(
+                                    &mut transport,
                                     &resolved_url[..resolved_len],
                                     name,
                                     foreground,
@@ -1952,7 +1575,12 @@ pub extern "C" fn _start() -> ! {
                             destination,
                         })) => {
                             let foreground = flow_is_foreground(bytes);
-                            if !fetch.start_to_file_mode(url, destination, foreground) {
+                            if !fetch.start_to_file_mode(
+                                &mut transport,
+                                url,
+                                destination,
+                                foreground,
+                            ) {
                                 pending.stage(b"fetch request busy or too large\r\n");
                             } else if !foreground {
                                 pending.stage(&[]);
@@ -1977,6 +1605,7 @@ pub extern "C" fn _start() -> ! {
                                 continue;
                             };
                             if !fetch.start_to_file_mode(
+                                &mut transport,
                                 &resolved_url[..url_len],
                                 &resolved_destination[..destination_len],
                                 foreground,
@@ -1988,6 +1617,7 @@ pub extern "C" fn _start() -> ! {
                         }
                         Ok(Some(logos_flow::FlowOperation::WriteResponse { url, destination })) => {
                             if !fetch.start_response_to_file(
+                                &mut transport,
                                 url,
                                 destination,
                                 flow_is_foreground(bytes),
@@ -2066,6 +1696,7 @@ pub extern "C" fn _start() -> ! {
                                 destination
                             };
                             if !fetch.start_response_to_file(
+                                &mut transport,
                                 url,
                                 destination,
                                 flow_is_foreground(bytes),
@@ -2078,7 +1709,7 @@ pub extern "C" fn _start() -> ! {
                                 Some(logos_flow::PromiseState::Pending)
                                     if fetch.active_promise_is(name) =>
                                 {
-                                    fetch.foreground = true;
+                                    fetch.set_foreground();
                                 }
                                 Some(logos_flow::PromiseState::Ready) => {
                                     let _ = flow.take_promise(name);
