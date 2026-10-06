@@ -4,6 +4,8 @@
 
 pub mod device;
 pub mod output;
+pub mod user;
 
 pub use device::DeviceClient;
 pub use output::PendingOutput;
+pub use user::{UserClient, user_status_text};

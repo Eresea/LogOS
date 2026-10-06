@@ -10,7 +10,7 @@ pub use interpreter::{
     Variables as FlowVariables,
 };
 
-pub use client::{DeviceClient, PendingOutput};
+pub use client::{DeviceClient, PendingOutput, UserClient, user_status_text};
 pub use transport::{IdSpace, Port, Transport};
 
 #[cfg(test)]

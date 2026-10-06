@@ -15,7 +15,7 @@ use logos_abi::{
     FetchResponse, FetchStatus, FlowControl, GuiSessionContext, IpcBytes, IpcStatus,
     MAX_COMPLETION_ITEM_BYTES, MessageKind, NetworkOperation, NetworkRequest, NetworkResponse,
     NetworkResult, NetworkState, STORAGE_API_FLAG_REPLACE, StorageApiOperation, StorageApiRequest,
-    StorageApiResponse, StorageApiStatus, UserOperation, UserRequest, UserResponse, UserStatus,
+    StorageApiResponse, StorageApiStatus,
 };
 
 const INPUT_CAPABILITY: common::CapabilitySpec = common::capability_contract_named(
@@ -1310,214 +1310,6 @@ impl PackageClient {
     }
 }
 
-struct UserClient {
-    active: bool,
-    done: bool,
-    sent: bool,
-    request: UserRequest,
-    session: logos_abi::SessionHandle,
-    user: logos_abi::UserId,
-    capability: logos_abi::NamespaceCapabilityHandle,
-    root: logos_abi::NamespaceRoot,
-    rights: logos_abi::NamespaceRights,
-    result: [u8; logos_flow::MAX_OUTPUT_BYTES],
-    result_len: usize,
-}
-
-impl UserClient {
-    const fn new() -> Self {
-        Self {
-            active: false,
-            done: false,
-            sent: false,
-            request: UserRequest::new(UserOperation::Login, 1),
-            session: logos_abi::SessionHandle::EMPTY,
-            user: logos_abi::UserId::EMPTY,
-            capability: logos_abi::NamespaceCapabilityHandle::EMPTY,
-            root: logos_abi::NamespaceRoot::EMPTY,
-            rights: logos_abi::NamespaceRights::NONE,
-            result: [0; logos_flow::MAX_OUTPUT_BYTES],
-            result_len: 0,
-        }
-    }
-
-    fn start(&mut self, command: logos_flow::UserCommand<'_>) -> bool {
-        if self.active || self.done {
-            return false;
-        }
-        let operation = match command {
-            logos_flow::UserCommand::Claim { .. } => UserOperation::Claim,
-            logos_flow::UserCommand::Create { .. } => UserOperation::Create,
-            logos_flow::UserCommand::Login { .. } => UserOperation::Login,
-            logos_flow::UserCommand::Logout => UserOperation::Logout,
-            logos_flow::UserCommand::Rename { .. } => UserOperation::Rename,
-            logos_flow::UserCommand::SetPassword { .. } => UserOperation::SetPassword,
-            logos_flow::UserCommand::Derive { .. } => UserOperation::Derive,
-            logos_flow::UserCommand::RevokeCapability => UserOperation::RevokeCapability,
-        };
-        let mut request = UserRequest::new(operation, next_user_request_id());
-        request.session = self.session;
-        request.user = self.user;
-        request.capability = self.capability;
-        request.root = self.root;
-        request.rights = self.rights;
-        match command {
-            logos_flow::UserCommand::Claim { name, password }
-            | logos_flow::UserCommand::Create { name, password }
-            | logos_flow::UserCommand::Login { name, password } => {
-                if !request.set_name(name) || !request.set_password(password) {
-                    return false;
-                }
-            }
-            logos_flow::UserCommand::Rename { name } => {
-                if !request.set_name(name) {
-                    return false;
-                }
-            }
-            logos_flow::UserCommand::SetPassword { password } => {
-                if !request.set_password(password) {
-                    return false;
-                }
-            }
-            logos_flow::UserCommand::Logout | logos_flow::UserCommand::RevokeCapability => {}
-            logos_flow::UserCommand::Derive { rights } => {
-                request.rights = rights;
-            }
-        }
-        self.request = request;
-        self.active = true;
-        self.sent = false;
-        self.result_len = 0;
-        true
-    }
-
-    fn active(&self) -> bool {
-        self.active
-    }
-
-    fn adopt_context(&mut self, context: GuiSessionContext) {
-        if context.is_authenticated() {
-            self.session = context.session;
-            self.user = context.user;
-            self.capability = context.capability;
-            self.root = context.root;
-            self.rights = context.rights;
-        } else {
-            self.session = logos_abi::SessionHandle::EMPTY;
-            self.user = logos_abi::UserId::EMPTY;
-            self.capability = logos_abi::NamespaceCapabilityHandle::EMPTY;
-            self.root = logos_abi::NamespaceRoot::EMPTY;
-            self.rights = logos_abi::NamespaceRights::NONE;
-        }
-    }
-
-    fn drive(&mut self) -> bool {
-        if !self.active {
-            return false;
-        }
-        if !self.sent {
-            let bytes = unsafe {
-                core::slice::from_raw_parts(
-                    (&self.request as *const UserRequest).cast::<u8>(),
-                    core::mem::size_of::<UserRequest>(),
-                )
-            };
-            let Some(message) = IpcBytes::from_bytes(MessageKind::UserRequest, bytes) else {
-                self.fail(b"user request too large\r\n");
-                return true;
-            };
-            match common::ipc_send_handle(ipc_capabilities().user_send, &message) {
-                IpcStatus::Ok => self.sent = true,
-                IpcStatus::Full => return false,
-                _ => self.fail(b"user service unavailable\r\n"),
-            }
-            return true;
-        }
-        let mut message = IpcBytes::empty(MessageKind::UserResponse);
-        match common::ipc_receive_handle(ipc_capabilities().user_receive, &mut message) {
-            IpcStatus::Ok => {}
-            IpcStatus::Empty => return false,
-            _ => {
-                self.fail(b"user service unavailable\r\n");
-                return true;
-            }
-        }
-        let Some(bytes) = message.as_bytes() else {
-            self.fail(b"user response malformed\r\n");
-            return true;
-        };
-        if bytes.len() != core::mem::size_of::<UserResponse>()
-            || !UserResponse::wire_enums_valid(bytes)
-        {
-            self.fail(b"user response malformed\r\n");
-            return true;
-        }
-        let response: UserResponse = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast()) };
-        if !response.is_valid_for(self.request) {
-            self.fail(b"user response stale\r\n");
-            return true;
-        }
-        if response.status == UserStatus::Ok {
-            if matches!(self.request.operation, UserOperation::Claim | UserOperation::Login) {
-                self.session = response.session;
-                self.user = response.user;
-                self.capability = response.capability;
-                self.root = response.root;
-                self.rights = response.rights;
-            } else if self.request.operation == UserOperation::Logout {
-                self.session = logos_abi::SessionHandle::EMPTY;
-                self.user = logos_abi::UserId::EMPTY;
-                self.capability = logos_abi::NamespaceCapabilityHandle::EMPTY;
-                self.root = logos_abi::NamespaceRoot::EMPTY;
-                self.rights = logos_abi::NamespaceRights::NONE;
-            } else if self.request.operation == UserOperation::RevokeCapability {
-                self.capability = logos_abi::NamespaceCapabilityHandle::EMPTY;
-            } else if self.request.operation == UserOperation::Derive {
-                self.capability = response.capability;
-                self.root = response.root;
-                self.rights = response.rights;
-            }
-            self.finish(b"user: ok\r\n");
-        } else {
-            self.finish(user_status_text(response.status));
-        }
-        true
-    }
-
-    fn finish(&mut self, message: &[u8]) {
-        self.result_len = message.len().min(self.result.len());
-        self.result[..self.result_len].copy_from_slice(&message[..self.result_len]);
-        self.active = false;
-        self.done = true;
-    }
-
-    fn fail(&mut self, message: &[u8]) {
-        self.finish(message);
-    }
-
-    fn take_result(&mut self, pending: &mut logos_flow::PendingOutput) {
-        if self.done {
-            pending.stage(&self.result[..self.result_len]);
-            self.done = false;
-        }
-    }
-}
-
-fn user_status_text(status: UserStatus) -> &'static [u8] {
-    match status {
-        UserStatus::Unclaimed => b"user: system is unclaimed\r\n",
-        UserStatus::AlreadyClaimed => b"user: already claimed\r\n",
-        UserStatus::NotFound => b"user: user not found\r\n",
-        UserStatus::Unauthorized => b"user: unauthorized\r\n",
-        UserStatus::BadCredentials => b"user: bad credentials\r\n",
-        UserStatus::Stale => b"user: stale handle\r\n",
-        UserStatus::Revoked => b"user: revoked\r\n",
-        UserStatus::Capacity => b"user: capacity exhausted\r\n",
-        UserStatus::Corrupt | UserStatus::Invalid => b"user: invalid\r\n",
-        UserStatus::Ok => b"user: ok\r\n",
-    }
-}
-
 impl StorageClient {
     const fn new() -> Self {
         Self {
@@ -2620,7 +2412,7 @@ static mut PENDING: logos_flow::PendingOutput = logos_flow::PendingOutput::new()
 static mut STORAGE: StorageClient = StorageClient::new();
 static mut PACKAGE: PackageClient = PackageClient::new();
 static mut DEVICE: logos_flow::DeviceClient = logos_flow::DeviceClient::new();
-static mut USER: UserClient = UserClient::new();
+static mut USER: logos_flow::UserClient = logos_flow::UserClient::new();
 static mut NETWORK: NetworkClient = NetworkClient::new();
 static mut FETCH: FetchClient = FetchClient::new();
 static mut COMPLETION: CompletionService = CompletionService::new();
@@ -2807,8 +2599,8 @@ pub extern "C" fn _start() -> ! {
             }
         }
         if user.active() {
-            progressed |= user.drive();
-            if user.done {
+            progressed |= user.drive(&mut transport);
+            if user.done() {
                 user.take_result(pending);
                 progressed = true;
             }
@@ -2958,7 +2750,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
                         Ok(Some(logos_flow::FlowOperation::User(command))) => {
-                            if !user.start(command) {
+                            if !user.start(&mut transport, command) {
                                 pending.stage(b"user request busy or too large\r\n");
                             }
                         }
