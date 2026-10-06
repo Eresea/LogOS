@@ -11,8 +11,8 @@ pub use interpreter::{
 };
 
 pub use client::{
-    DeviceClient, PendingOutput, StorageClient, UserClient, status_text, storage_ipc_error,
-    user_status_text,
+    DeviceClient, PackageClient, PendingOutput, StorageClient, UserClient, status_text,
+    storage_ipc_error, user_status_text,
 };
 pub use transport::{IdSpace, Port, Transport};
 
