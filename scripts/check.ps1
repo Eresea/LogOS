@@ -5,33 +5,34 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'native.ps1')
 
 if ($Stage -in @('all', 'host')) {
     Write-Host '== format =='
-    cargo fmt --check
+    Invoke-Native { cargo fmt --check }
 
     Write-Host '== clippy =='
-    cargo clippy --workspace --all-targets -- -D warnings
+    Invoke-Native { cargo clippy --workspace --all-targets -- -D warnings }
 
     Write-Host '== host tests =='
-    cargo test --workspace
+    Invoke-Native { cargo test --workspace }
 }
 
 if ($Stage -in @('all', 'uefi')) {
     Write-Host '== UEFI build =='
-    $args = @('build', '--target', 'x86_64-unknown-uefi')
-    if ($Release) { $args += '--release' }
-    cargo @args
+    $buildArgs = @('build', '--target', 'x86_64-unknown-uefi')
+    if ($Release) { $buildArgs += '--release' }
+    Invoke-Native { cargo @buildArgs }
 
     Write-Host '== UEFI clippy =='
-    cargo clippy --target x86_64-unknown-uefi -- -D warnings
+    Invoke-Native { cargo clippy --target x86_64-unknown-uefi -- -D warnings }
 
     Write-Host '== UEFI proof build =='
-    cargo build --features qemu-proof --target x86_64-unknown-uefi
+    Invoke-Native { cargo build --features qemu-proof --target x86_64-unknown-uefi }
 }
 
 if ($Stage -in @('all', 'services')) {
     Write-Host '== service ELF images =='
     .\scripts\build-services.ps1 -Release
-    cargo clippy --target x86_64-unknown-none -p logos-service-images --bins -- -D warnings
+    Invoke-Native { cargo clippy --target x86_64-unknown-none -p logos-service-images --bins -- -D warnings }
 }
