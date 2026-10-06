@@ -71,7 +71,7 @@ Terminal → Session → Flow → typed system API registry
 | UI scene publication | `logos-ui-graphics::UiScenePublisher` | emits fixed-capacity scenes in place, coalesces newer snapshots, resumes bounded deltas after IPC backpressure, and falls back to a full frame when the delta exceeds 48 mutations (`MAX_GUI_NODES`, ADR-0087); cursor surfaces keep their separate publication path |
 | Display service | `services/images/src/display` + `logos-display` | sole framebuffer writer; receives validated terminal compatibility messages plus atomic retained scene operations, composes bounded dirty tiles into a RAM backbuffer, skips occluded lower nodes, retains static glyph runs, publishes bounded LockScreen/Atrium cursor position, visibility, and left-button state through the present page, rasterizes versioned bounded transforms with conservative damage/clipping, uses the software cursor only when Core's optional VirtIO-GPU cursor plane is inactive, and rasterizes up to `MAX_GUI_TEXT_GRIDS` (4) retained `TextGrid` nodes, one bounded 160x50 8x16-glyph cell buffer per surface, dirty-row delivered, each inside its own surface's clip (ADR-0087) |
 | Session service | `services/images/src/session` + `logos-session::SessionService` | ring-3 owns one bounded line editor, history, prompt state, and completion queue per Terminal session (`MAX_SHELL_SESSIONS` = 4, ADR-0090); a single `OWNER` names the one session currently exchanging with Flow, so typing in an idle session is never gated on another's in-flight command; Flow evaluation state is not retained here and no state survives restart or reboot |
-| Flow service | `services/images/src/flow` + `logos-flow::FlowService` | receives bounded Session source tagged with its session (ADR-0090), lexes/parses/type-checks/evaluates fixed Flow programs against that session's own `FlowService` (eight variables and four promise slots each, one instance per `MAX_SHELL_SESSIONS`), routes typed registry operations to Storage/Network/Device/Supervisor/Fetch through singleton single-flight clients shared across sessions under Session's arbitration, provides stale-safe completion, and returns backpressured output tagged to its owning session over its reverse IPC ring |
+| Flow service | `services/images/src/flow.rs` (capability discovery, event loop, IPC adapter) + `logos-flow` (`FlowService`, client state machines) | receives bounded Session source tagged with its session (ADR-0090), lexes/parses/type-checks/evaluates fixed Flow programs against that session's own `FlowService` (eight variables and four promise slots each, one instance per `MAX_SHELL_SESSIONS`), routes typed registry operations to Storage/Network/Device/Supervisor/Fetch through singleton single-flight clients shared across sessions under Session's arbitration, provides stale-safe completion, and returns backpressured output tagged to its owning session over its reverse IPC ring |
 | Per-session IPC tagging | `logos-abi::IpcBytes`/`FlowControl` | bits 1-2 of `IpcBytes.flags` and a `FlowControl.session` field carry a 0..3 Terminal session tag (`IPC_SESSION_MASK`, ADR-0090); Terminal tags outgoing input with the active tab, Session/Flow tag every reply with the session that produced it, and Terminal routes purely on that tag rather than inferring ownership from output content |
 | Device service | `services/images/src/device` + `logos-device` | owns a bounded physical inventory view, currently exposing the Core-owned block disk through `device.list()`; format and filesystem recreation remain a later capability |
 | Fetch service | `services/images/src/fetch` + `logos-fetch` | owns one bounded HTTP operation, split-frame response parsing, progress/cancellation, and staged Storage publication; only numeric IPv4 `http://` 2xx downloads are accepted |
@@ -116,6 +116,20 @@ Core enters on a 512 KiB per-CPU scheduler stack with a 256-byte canary; task st
 separately bounded so interrupt and syscall depth cannot silently overwrite adjacent CPU metadata.
 
 `v1_docs/` is historical and is not an active architecture contract.
+
+## Flow client ownership
+
+`logos-flow` owns Flow's request/response state machines: the Storage, Package, User, Device,
+Network and Fetch clients, `network_command`, `CompletionService` and `PendingOutput`
+(`services/flow/src/client/`). They are `no_std`, allocation-free and host-tested. Each reaches its
+peer only through the single `logos_flow::Transport` seam (`send`, `receive`, `wait`,
+`next_request_id`, `proof_line`, addressed by a `Port`). Two adapters implement it: `IpcTransport` in
+`services/images/src/flow.rs`, built from the existing `common::ipc_*` helpers and the capability
+handles discovered at startup, and the in-memory `FakeTransport` used by `logos-flow` host tests.
+The image keeps only capability discovery, the event loop (arbitration across clients and sessions),
+the service-manager/program commands (which call the supervisor directly rather than a Flow port)
+and the proof probes. New Flow peers add a `Port` and a client behind the same seam; they must not
+add a second transport trait.
 
 ## Persistence boundary
 
