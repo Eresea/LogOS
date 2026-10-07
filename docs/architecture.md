@@ -85,7 +85,7 @@ Terminal → Session → Flow → typed system API registry
 | Service image handoff | `arch::boot` + `service_loader::load_from_esp` | all twelve staged ELF images are loaded and validated before `ExitBootServices`; only bounded metadata survives the firmware boundary |
 | Service supervisor | `service_runtime::RestartCoordinator` + `supervisor::LiveSupervisor` | one graph-restart seam combines bounded health policy with quiesce, generation-bumped IPC rebuild, bounded process/page-table/frame reclamation, relaunch, and restart outcomes; the supervisor retains heap-backed service-handle records, live heartbeat polling, batched service-heap growth up to 64 pages per request, and restart limits |
 | Service manager | `runtime_services` + `service_manager` + `service_runtime` | dynamic records, generation-safe handles, allocated dependencies, opaque list cursors, dynamic status/failure discovery, and service lifecycle admission are live; the fixed manager remains only for bounded program lifecycle and bootstrap image metadata; System receives only `ManagerRights::INSPECT` |
-| Program lifecycle | `service_manager` + `service_runtime` + `process` + `scheduler` | eight fixed name-keyed program slots reuse the service manager ABI and Core resource owner; program ELF images receive private code/data/stack mappings plus a read-only surface bootstrap and five bounded Atrium channels, while stop waits for scheduler completion before reclaiming all program resources |
+| Program lifecycle | `service_manager` + `program_runtime` + `service_runtime` + `process` + `scheduler` | eight fixed name-keyed program slots reuse the service manager ABI and Core resource owner; program ELF images receive private code/data/stack mappings plus a read-only surface bootstrap and five bounded Atrium channels, while stop waits for scheduler completion before reclaiming all program resources |
 | Program client | `logos-program` + `programs/demo` | no-std client consumes the read-only bootstrap, requests one Atrium surface, polls its response/input channels, and submits only surface-scoped cell or GUI draw messages |
 | Ring-3 proof domain | `user_mode` + `arch` | one fixed ELF admitted through `ProcessTable`, bound root/code/stack mappings, explicit scheduler CR3 selection, DPL-3 vector 49, and contained #UD/#GP/#PF |
 | Fatal path | `arch::fatal` | one debug marker, interrupts disabled, every CPU halts |
@@ -130,6 +130,20 @@ The image keeps only capability discovery, the event loop (arbitration across cl
 the service-manager/program commands (which call the supervisor directly rather than a Flow port)
 and the proof probes. New Flow peers add a `Port` and a client behind the same seam; they must not
 add a second transport trait.
+
+## Program lifecycle ownership
+
+`program_runtime::ProgramRuntime` owns the eight program slots and everything a running program
+holds: process, page-table builder, loaded image, the five Atrium surface endpoints and the private
+staging/bootstrap frames. Its interface is `start`, `request_stop`, `reap` (reclaim on task
+completion), `finish_stop` and `discard_all` (shutdown/restart), and process lookup
+(`client_for_process`, `staging_for_process`). Surface IPC provisioning, capability lookup and
+start-failure cleanup are internal; every failed `start` leaves no frame, endpoint, process or task.
+Frame pool, process table, IPC and event registries, the scheduler and the page memory adapter are
+borrowed per call through `ProgramDeps`; the module creates none of them, so host tests run it with
+the real types. `ServiceRuntime` keeps package admission and image population (they need the
+package reader) and the manager state transitions, and delegates the rest. The module is not
+UEFI-gated, which is why its tests run on the host. No ABI or ADR-0060/0070 contract changed.
 
 ## Persistence boundary
 
