@@ -177,7 +177,18 @@ function Invoke-StorageBoot {
                     return $false
                 }
             }
-            if ($process.HasExited) { return $false }
+            if ($process.HasExited) {
+                # The last markers and the shutdown can land inside one poll interval.
+                $final = if (Test-Path $log) { Get-Content $log -Raw } else { '' }
+                if ([string]::IsNullOrEmpty($final) -or
+                    $final -match '(?i)(?:FATAL|QEMU proof FAIL|storage command API FAIL|panic)') {
+                    return $false
+                }
+                foreach ($marker in $ExpectedMarkers) {
+                    if (-not ($final -match [regex]::Escape($marker))) { return $false }
+                }
+                return $true
+            }
             Start-Sleep -Milliseconds 250
         }
         return $false
