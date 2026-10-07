@@ -440,6 +440,46 @@ fn align_up(address: usize) -> Option<usize> {
     address.checked_add(PAGE_SIZE - 1).map(|value| value & !(PAGE_SIZE - 1))
 }
 
+/// Map every loaded image page into `process`, coalescing contiguous runs.
+pub(crate) fn map_loaded_pages(
+    processes: &mut crate::process::ProcessTable,
+    process: crate::process::ProcessHandle,
+    image: &LoadedImage,
+) -> Result<(), crate::process::ProcessError> {
+    let mut index = 0;
+    while index < image.page_count() {
+        let Some(first) = image.page(index) else {
+            return Err(crate::process::ProcessError::AddressSpace);
+        };
+        let mut pages = 1;
+        while index + pages < image.page_count() {
+            let Some(previous) = image.page(index + pages - 1) else {
+                return Err(crate::process::ProcessError::AddressSpace);
+            };
+            let Some(next) = image.page(index + pages) else {
+                return Err(crate::process::ProcessError::AddressSpace);
+            };
+            if previous.flags() != next.flags()
+                || previous.virtual_address() + PAGE_SIZE != next.virtual_address()
+                || previous.frame().raw() + PAGE_SIZE as u64 != next.frame().raw()
+            {
+                break;
+            }
+            pages += 1;
+        }
+        let mapping = crate::process::VirtualMapping::new(
+            first.virtual_address(),
+            first.frame().raw() as usize,
+            pages,
+            first.flags(),
+        )
+        .ok_or(crate::process::ProcessError::AddressSpace)?;
+        processes.map(process, mapping)?;
+        index += pages;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

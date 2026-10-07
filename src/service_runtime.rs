@@ -8,12 +8,13 @@ use logos_abi::{ServiceHandle, ServiceId};
 use crate::memory::{ExclusionKind, MemoryExclusion, OwnerId};
 use crate::{
     frame_pool::{FrameAddress, FramePool},
-    loader::{LoadError, LoadedImage},
+    loader::{LoadError, LoadedImage, map_loaded_pages},
     page_table::{IdentityPageTableMemory, PageTableBuilder, PageTableError, PageTableMemory},
     process::{
         AddressSpaceRoot, MappingFlags, ProcessError, ProcessHandle, UserLaunch, VirtualMapping,
     },
-    runtime_ipc::{PROGRAM_SURFACE_DRAW_MESSAGE_BYTES, RuntimeIpcRegistry},
+    program_runtime::{ProgramDeps, ProgramError, ProgramExit, ProgramLaunch, ProgramRuntime},
+    runtime_ipc::RuntimeIpcRegistry,
     runtime_services::ServiceImageSource,
     service_images::SERVICE_IMAGES,
     service_ipc::IpcError,
@@ -23,16 +24,9 @@ use crate::{
 };
 
 const SERVICE_COUNT: usize = SERVICE_IMAGES.len();
-const MAX_PROGRAMS: usize = crate::service_manager::MAX_PROGRAM_SLOTS;
 const MAX_ACTIVE_PAGE_TABLE_FRAMES: usize = 4096;
 const MAX_HEAP_GROWTH_PAGES: usize = 64;
 const CORE_SERVICE_HANDLE_INDEX: u32 = u32::MAX;
-const PROGRAM_CLIENT_HANDLE_BASE: u32 = 0x8000_0000;
-const PROGRAM_SURFACE_REQUEST_QUEUE: usize = 1;
-const PROGRAM_SURFACE_RESPONSE_QUEUE: usize = 1;
-const PROGRAM_SURFACE_INPUT_QUEUE: usize = 32;
-const PROGRAM_SURFACE_RENDER_QUEUE: usize = 1;
-const PROGRAM_SURFACE_DRAW_QUEUE: usize = 1;
 // Package activation remains an internal hook until package-manager policy exists.
 #[allow(dead_code)]
 const PACKAGE_EXCHANGE_POLLS: usize = 1024;
@@ -124,16 +118,6 @@ fn dynamic_core_handle(generation: u32) -> Result<logos_abi::ServiceHandle, Serv
         .ok_or(ServiceRuntimeError::StaleGeneration)
 }
 
-fn program_client_handle(
-    slot: usize,
-    generation: u32,
-) -> Result<ServiceHandle, ServiceRuntimeError> {
-    let slot = u32::try_from(slot).map_err(|_| ServiceRuntimeError::Resources)?;
-    let index =
-        PROGRAM_CLIENT_HANDLE_BASE.checked_add(slot).ok_or(ServiceRuntimeError::Resources)?;
-    ServiceHandle::new(index, generation).ok_or(ServiceRuntimeError::Resources)
-}
-
 fn bootstrap_capability(
     service_index: usize,
     kind: u32,
@@ -199,6 +183,39 @@ pub enum ServiceRuntimeError {
     StaleGeneration,
 }
 
+impl From<ProgramError> for ServiceRuntimeError {
+    fn from(error: ProgramError) -> Self {
+        match error {
+            ProgramError::Resources => Self::Resources,
+            ProgramError::PageTableRoot(error) => Self::PageTableRoot(error),
+            ProgramError::PageTableMap(error) => Self::PageTableMap(error),
+            ProgramError::Process(error) => Self::Process(error),
+            ProgramError::Ipc(error) => Self::Ipc(error),
+            ProgramError::IpcPrivateMapping(error) => Self::IpcPrivateMapping(error),
+            ProgramError::IpcPrivateProcess(error) => Self::IpcPrivateProcess(error),
+            ProgramError::TaskCapacity => Self::TaskCapacity,
+            ProgramError::TaskAddressSpace => Self::TaskAddressSpace,
+            ProgramError::TaskLaunch => Self::TaskLaunch,
+            ProgramError::TaskStop => Self::TaskStop,
+        }
+    }
+}
+
+/// Borrow the runtime fields program lifecycle calls need, leaving
+/// `self.programs` and the manager free for the same expression.
+macro_rules! program_deps {
+    ($runtime:expr, $memory:expr) => {
+        ProgramDeps {
+            frame_pool: &mut $runtime.frame_pool,
+            processes: &mut $runtime.processes,
+            ipc: &mut $runtime.dynamic_ipc,
+            events: &mut $runtime.dynamic_events,
+            scheduler: &crate::SCHEDULER,
+            memory: $memory,
+        }
+    };
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ServiceFaultOutcome {
     /// The missing stack page was committed and the interrupted instruction
@@ -250,7 +267,7 @@ pub struct ServiceRuntime {
     package_next_request: u32,
     prepared_packages: Vec<Option<PreparedServiceImage>>,
     active_packages: Vec<Option<ActivePackageImage>>,
-    programs: [ProgramRuntime; MAX_PROGRAMS],
+    programs: ProgramRuntime,
     pending_program_start: Option<(usize, logos_abi::ServiceManagerRecord)>,
     network_packet_response: Option<logos_abi::NetworkPacketDescriptor>,
     network_packet_sequence: u32,
@@ -305,59 +322,6 @@ impl ServiceExecution {
             suppressed_heartbeat: AtomicBool::new(false),
         }
     }
-}
-
-struct ProgramRuntime {
-    manager_slot: u8,
-    generation: u32,
-    name: [u8; logos_abi::MAX_PACKAGE_NAME_BYTES],
-    name_len: u8,
-    client: ServiceHandle,
-    surface_request: logos_abi::CapabilityHandle,
-    surface_response: logos_abi::CapabilityHandle,
-    surface_input: logos_abi::CapabilityHandle,
-    surface_render: logos_abi::CapabilityHandle,
-    surface_draw: logos_abi::CapabilityHandle,
-    ipc_staging: Option<FrameAddress>,
-    bootstrap: Option<FrameAddress>,
-    process: Option<ProcessHandle>,
-    task: Option<crate::TaskHandle>,
-    image: Option<Box<LoadedImage>>,
-    table: Option<Box<PageTableBuilder>>,
-    table_ready: bool,
-}
-
-impl ProgramRuntime {
-    const fn empty() -> Self {
-        Self {
-            manager_slot: u8::MAX,
-            generation: 0,
-            name: [0; logos_abi::MAX_PACKAGE_NAME_BYTES],
-            name_len: 0,
-            client: ServiceHandle::EMPTY,
-            surface_request: logos_abi::CapabilityHandle::EMPTY,
-            surface_response: logos_abi::CapabilityHandle::EMPTY,
-            surface_input: logos_abi::CapabilityHandle::EMPTY,
-            surface_render: logos_abi::CapabilityHandle::EMPTY,
-            surface_draw: logos_abi::CapabilityHandle::EMPTY,
-            ipc_staging: None,
-            bootstrap: None,
-            process: None,
-            task: None,
-            image: None,
-            table: None,
-            table_ready: false,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ProgramSurfaceCapabilities {
-    request: logos_abi::CapabilityHandle,
-    response: logos_abi::CapabilityHandle,
-    input: logos_abi::CapabilityHandle,
-    render: logos_abi::CapabilityHandle,
-    draw: logos_abi::CapabilityHandle,
 }
 
 #[allow(dead_code)]
@@ -599,7 +563,7 @@ impl ServiceRuntime {
             package_next_request: 1,
             prepared_packages: Vec::new(),
             active_packages: Vec::new(),
-            programs: [const { ProgramRuntime::empty() }; MAX_PROGRAMS],
+            programs: ProgramRuntime::new(),
             pending_program_start: None,
             network_packet_response: None,
             network_packet_sequence: 1,
@@ -4774,7 +4738,7 @@ impl ServiceRuntime {
                 }
             }
             ManagerAction::ProgramStop(slot) => {
-                if self.request_stop_program(slot).is_err() {
+                if self.programs.request_stop(&crate::SCHEDULER, slot).is_err() {
                     decision.response.status = logos_abi::ManagerStatus::Busy;
                 }
             }
@@ -5424,16 +5388,9 @@ impl ServiceRuntime {
         self.service_slot_for_process(process).and_then(ServiceId::from_index)
     }
 
-    fn program_slot_for_process(&self, process: ProcessHandle) -> Option<usize> {
-        self.programs.iter().enumerate().find_map(|(slot, program)| {
-            (program.process == Some(process) && program.client.is_valid()).then_some(slot)
-        })
-    }
-
     fn client_for_process(&self, process: ProcessHandle) -> Option<ServiceHandle> {
-        self.service_handle_for_process(process).or_else(|| {
-            self.program_slot_for_process(process).map(|slot| self.programs[slot].client)
-        })
+        self.service_handle_for_process(process)
+            .or_else(|| self.programs.client_for_process(process))
     }
 
     fn service_handle_for_process(&self, process: ProcessHandle) -> Option<ServiceHandle> {
@@ -5446,10 +5403,7 @@ impl ServiceRuntime {
             .and_then(|index| {
                 self.executions.get(index).and_then(|execution| execution.ipc_staging_frame)
             })
-            .or_else(|| {
-                self.program_slot_for_process(process)
-                    .and_then(|slot| self.programs[slot].ipc_staging)
-            })
+            .or_else(|| self.programs.staging_for_process(process))
     }
 
     #[cfg(feature = "qemu-proof")]
@@ -5863,60 +5817,27 @@ impl ServiceRuntime {
             }
             return Ok(true);
         }
-        for slot in 0..MAX_PROGRAMS {
-            let Some(task) = self.programs[slot].task else { continue };
-            if crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed) {
-                continue;
-            }
-            if !crate::SCHEDULER.reclaim_completed(task) {
-                return Err(ServiceRuntimeError::TaskStop);
-            }
-            let generation = self.programs[slot].generation;
-            let Some(process) = self.programs[slot].process.take() else {
-                let _ = self.manager.mark_program_stopped(slot, generation);
+        for slot in 0..crate::program_runtime::MAX_PROGRAMS {
+            let mut memory = IdentityPageTableMemory;
+            let mut deps = program_deps!(self, &mut memory);
+            let Some((generation, exit)) =
+                self.programs.reap(&mut deps, slot).map_err(ServiceRuntimeError::from)?
+            else {
                 continue;
             };
-            let state = self
-                .processes
-                .state(process)
-                .unwrap_or(crate::process::ProcessState::Faulted(0xff));
-            let forced_stop = matches!(state, crate::process::ProcessState::Running);
-            if forced_stop {
-                let _ = self.processes.exit(process, 0xff);
-            }
-            let terminal = self
-                .processes
-                .state(process)
-                .unwrap_or(crate::process::ProcessState::Faulted(0xff));
-            let _ = self.processes.reclaim(process);
-            self.reclaim_program_surface_resources(slot);
-            if matches!(terminal, crate::process::ProcessState::Exited(_)) && !forced_stop {
-                let _ = self.manager.mark_program_terminal(
+            let _ = match exit {
+                ProgramExit::Exited => self.manager.mark_program_terminal(
                     slot,
                     generation,
                     logos_abi::ManagerState::Exited,
-                );
-            } else if matches!(terminal, crate::process::ProcessState::Faulted(_)) {
-                let _ = self.manager.mark_program_terminal(
+                ),
+                ProgramExit::Faulted => self.manager.mark_program_terminal(
                     slot,
                     generation,
                     logos_abi::ManagerState::Faulted,
-                );
-            } else {
-                let _ = self.manager.mark_program_stopped(slot, generation);
-            }
-            if self.programs[slot].table_ready {
-                let mut memory = IdentityPageTableMemory;
-                if let Some(mut table) = self.programs[slot].table.take() {
-                    table.reclaim(&mut self.frame_pool, &mut memory);
-                }
-                self.programs[slot].table_ready = false;
-            }
-            if let Some(mut image) = self.programs[slot].image.take() {
-                image.reclaim(&mut self.frame_pool);
-            }
-            self.programs[slot].task = None;
-            self.programs[slot].manager_slot = u8::MAX;
+                ),
+                ProgramExit::Stopped => self.manager.mark_program_stopped(slot, generation),
+            };
         }
         let service_slots = self.service_handles.len();
         for index in 0..service_slots {
@@ -6092,276 +6013,13 @@ impl ServiceRuntime {
         Ok(())
     }
 
-    fn request_stop_program(&mut self, slot: usize) -> Result<(), ServiceRuntimeError> {
-        let program = self.programs.get(slot).ok_or(ServiceRuntimeError::TaskStop)?;
-        let task = program.task.ok_or(ServiceRuntimeError::TaskStop)?;
-        if crate::SCHEDULER.request_stop(task) {
-            Ok(())
-        } else {
-            Err(ServiceRuntimeError::TaskStop)
-        }
-    }
-
-    fn provision_program_surface_ipc(
-        &mut self,
-        client: ServiceHandle,
-    ) -> Result<ProgramSurfaceCapabilities, ServiceRuntimeError> {
-        let atrium = self.runtime_service_handle(ServiceId::Atrium)?;
-        let specs = [
-            (
-                client,
-                atrium,
-                logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
-                core::mem::size_of::<logos_abi::AtriumSurfaceRequest>(),
-                PROGRAM_SURFACE_REQUEST_QUEUE,
-            ),
-            (
-                atrium,
-                client,
-                logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE,
-                core::mem::size_of::<logos_abi::AtriumSurfaceResponse>(),
-                PROGRAM_SURFACE_RESPONSE_QUEUE,
-            ),
-            (
-                atrium,
-                client,
-                logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_INPUT,
-                core::mem::size_of::<logos_abi::AtriumSurfaceInput>(),
-                PROGRAM_SURFACE_INPUT_QUEUE,
-            ),
-            (
-                client,
-                atrium,
-                logos_abi::IPC_CONTRACT_RENDER,
-                core::mem::size_of::<logos_abi::RenderMessage>(),
-                PROGRAM_SURFACE_RENDER_QUEUE,
-            ),
-            (
-                client,
-                atrium,
-                logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
-                PROGRAM_SURFACE_DRAW_MESSAGE_BYTES,
-                PROGRAM_SURFACE_DRAW_QUEUE,
-            ),
-        ];
-        for (producer, consumer, contract, bytes, queue_capacity) in specs {
-            let mut queue_frames = Vec::new();
-            if queue_frames.try_reserve(queue_capacity).is_err() {
-                self.destroy_program_surface_ipc(client);
-                return Err(ServiceRuntimeError::Resources);
-            }
-            for _ in 0..queue_capacity {
-                let frame = match self.frame_pool.allocate_for(OwnerId::KERNEL) {
-                    Ok(frame) => frame,
-                    Err(_) => {
-                        for frame in queue_frames {
-                            let _ = self.frame_pool.release(frame);
-                        }
-                        self.destroy_program_surface_ipc(client);
-                        return Err(ServiceRuntimeError::Resources);
-                    }
-                };
-                queue_frames.push(frame);
-            }
-            let endpoint = match (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut()) {
-                (Some(ipc), Some(events)) => ipc.create_endpoint_with_frames(
-                    producer,
-                    consumer,
-                    contract,
-                    bytes,
-                    queue_capacity,
-                    self.service_epoch,
-                    &queue_frames,
-                    events,
-                ),
-                _ => Err(logos_abi::IpcStatus::Disconnected),
-            };
-            let endpoint = match endpoint {
-                Ok(endpoint) => endpoint,
-                Err(_) => {
-                    for frame in queue_frames {
-                        let _ = self.frame_pool.release(frame);
-                    }
-                    self.destroy_program_surface_ipc(client);
-                    return Err(ServiceRuntimeError::Ipc(IpcError::Capacity));
-                }
-            };
-            let capability = match self.dynamic_ipc.as_mut() {
-                Some(ipc) => ipc.grant(producer, endpoint, logos_abi::IpcRights::Send),
-                None => Err(logos_abi::IpcStatus::Disconnected),
-            };
-            let _capability = match capability {
-                Ok(capability) => capability,
-                Err(_) => {
-                    if let (Some(ipc), Some(events)) =
-                        (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut())
-                    {
-                        let _ =
-                            ipc.destroy_endpoint_with_pool(endpoint, events, &mut self.frame_pool);
-                    }
-                    self.destroy_program_surface_ipc(client);
-                    return Err(ServiceRuntimeError::Ipc(IpcError::Capacity));
-                }
-            };
-            let receive_capability = match self.dynamic_ipc.as_mut() {
-                Some(ipc) => ipc.grant(consumer, endpoint, logos_abi::IpcRights::Receive),
-                None => Err(logos_abi::IpcStatus::Disconnected),
-            };
-            if receive_capability.is_err() {
-                if let (Some(ipc), Some(events)) =
-                    (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut())
-                {
-                    let _ = ipc.destroy_endpoint_with_pool(endpoint, events, &mut self.frame_pool);
-                }
-                self.destroy_program_surface_ipc(client);
-                return Err(ServiceRuntimeError::Ipc(IpcError::Capacity));
-            }
-        }
-        let request = match self.program_capability(
-            client,
-            atrium,
-            logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST,
-            logos_abi::IpcRights::Send,
-        ) {
-            Ok(capability) => capability,
-            Err(error) => {
-                self.destroy_program_surface_ipc(client);
-                return Err(error);
-            }
-        };
-        let response = match self.program_capability(
-            client,
-            atrium,
-            logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_RESPONSE,
-            logos_abi::IpcRights::Receive,
-        ) {
-            Ok(capability) => capability,
-            Err(error) => {
-                self.destroy_program_surface_ipc(client);
-                return Err(error);
-            }
-        };
-        let input = match self.program_capability(
-            client,
-            atrium,
-            logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_INPUT,
-            logos_abi::IpcRights::Receive,
-        ) {
-            Ok(capability) => capability,
-            Err(error) => {
-                self.destroy_program_surface_ipc(client);
-                return Err(error);
-            }
-        };
-        let render = match self.program_capability(
-            client,
-            atrium,
-            logos_abi::IPC_CONTRACT_RENDER,
-            logos_abi::IpcRights::Send,
-        ) {
-            Ok(capability) => capability,
-            Err(error) => {
-                self.destroy_program_surface_ipc(client);
-                return Err(error);
-            }
-        };
-        let draw = match self.program_capability(
-            client,
-            atrium,
-            logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_DRAW,
-            logos_abi::IpcRights::Send,
-        ) {
-            Ok(capability) => capability,
-            Err(error) => {
-                self.destroy_program_surface_ipc(client);
-                return Err(error);
-            }
-        };
-        Ok(ProgramSurfaceCapabilities { request, response, input, render, draw })
-    }
-
-    fn program_capability(
-        &self,
-        client: ServiceHandle,
-        peer: ServiceHandle,
-        contract: u16,
-        rights: logos_abi::IpcRights,
-    ) -> Result<logos_abi::CapabilityHandle, ServiceRuntimeError> {
-        let endpoint = self
-            .dynamic_ipc
-            .as_ref()
-            .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
-            .find_endpoint(
-                if rights == logos_abi::IpcRights::Send { client } else { peer },
-                if rights == logos_abi::IpcRights::Send { peer } else { client },
-                contract,
-            )
-            .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))?;
-        self.dynamic_ipc
-            .as_ref()
-            .ok_or(ServiceRuntimeError::Ipc(IpcError::Capacity))?
-            .capability_for(client, endpoint, rights)
-            .map_err(|_| ServiceRuntimeError::Ipc(IpcError::Capacity))
-    }
-
-    fn destroy_program_surface_ipc(&mut self, client: ServiceHandle) {
-        if let (Some(ipc), Some(events)) = (self.dynamic_ipc.as_mut(), self.dynamic_events.as_mut())
-        {
-            ipc.destroy_service_with_pool(client, events, &mut self.frame_pool);
-        }
-    }
-
-    fn reclaim_program_start_failure(
-        &mut self,
-        process: ProcessHandle,
-        tables: PageTableBuilder,
-        image: LoadedImage,
-        client: ServiceHandle,
-        staging: Option<FrameAddress>,
-        bootstrap: Option<FrameAddress>,
-    ) {
-        self.destroy_program_surface_ipc(client);
-        let _ = self.processes.exit(process, 1);
-        let _ = self.processes.reclaim(process);
-        let mut memory = IdentityPageTableMemory;
-        let mut tables = tables;
-        tables.reclaim(&mut self.frame_pool, &mut memory);
-        if let Some(frame) = staging {
-            let _ = self.frame_pool.release(frame);
-        }
-        if let Some(frame) = bootstrap {
-            let _ = self.frame_pool.release(frame);
-        }
-        let mut image = image;
-        image.reclaim(&mut self.frame_pool);
-    }
-
-    fn reclaim_program_surface_resources(&mut self, slot: usize) {
-        let client = self.programs[slot].client;
-        if client.is_valid() {
-            self.destroy_program_surface_ipc(client);
-        }
-        for frame in [self.programs[slot].ipc_staging.take(), self.programs[slot].bootstrap.take()]
-            .into_iter()
-            .flatten()
-        {
-            let _ = self.frame_pool.release(frame);
-        }
-        self.programs[slot].client = ServiceHandle::EMPTY;
-        self.programs[slot].surface_request = logos_abi::CapabilityHandle::EMPTY;
-        self.programs[slot].surface_response = logos_abi::CapabilityHandle::EMPTY;
-        self.programs[slot].surface_input = logos_abi::CapabilityHandle::EMPTY;
-        self.programs[slot].surface_render = logos_abi::CapabilityHandle::EMPTY;
-        self.programs[slot].surface_draw = logos_abi::CapabilityHandle::EMPTY;
-    }
-
     fn start_program(
         &mut self,
         slot: usize,
         record: logos_abi::ServiceManagerRecord,
         runtime_guard: &mut crate::arch::ServiceRuntimeGuard,
     ) -> Result<(), ServiceRuntimeError> {
-        if slot >= MAX_PROGRAMS || self.programs[slot].task.is_some() {
+        if !self.programs.slot_available(slot) {
             return Err(ServiceRuntimeError::TaskCapacity);
         }
         let target = logos_abi::PackageTarget::program(&record.name[..record.name_len as usize])
@@ -6409,7 +6067,7 @@ impl ServiceRuntime {
             crate::process::ElfLoadPlan::parse_reader(&mut reader)
                 .map_err(|_| ServiceRuntimeError::Image)?
         };
-        let owner = OwnerId::new(100 + slot as u16).ok_or(ServiceRuntimeError::Resources)?;
+        let owner = ProgramRuntime::owner_for_slot(slot).ok_or(ServiceRuntimeError::Resources)?;
         let mut image = LoadedImage::load_with_stack_pages_for_owner(
             plan,
             &mut self.frame_pool,
@@ -6431,204 +6089,30 @@ impl ServiceRuntime {
             image.reclaim(&mut self.frame_pool);
             return Err(ServiceRuntimeError::Populate(error));
         }
-        let mut tables = PageTableBuilder::new_for_owner(&mut self.frame_pool, &mut memory, owner)
-            .map_err(ServiceRuntimeError::PageTableRoot)?;
-        if let Err(error) = tables.map_image(&image, &mut self.frame_pool, &mut memory) {
-            tables.reclaim(&mut self.frame_pool, &mut memory);
-            image.reclaim(&mut self.frame_pool);
-            return Err(ServiceRuntimeError::PageTableMap(error));
-        }
-        let process = match self.processes.start_plan(plan) {
-            Ok(process) => process,
+        let atrium = match self.runtime_service_handle(ServiceId::Atrium) {
+            Ok(atrium) => atrium,
             Err(error) => {
-                tables.reclaim(&mut self.frame_pool, &mut memory);
-                image.reclaim(&mut self.frame_pool);
-                return Err(ServiceRuntimeError::Process(error));
-            }
-        };
-        let Some(root) = AddressSpaceRoot::new(tables.root().raw() as usize) else {
-            let _ = self.processes.exit(process, 1);
-            let _ = self.processes.reclaim(process);
-            tables.reclaim(&mut self.frame_pool, &mut memory);
-            image.reclaim(&mut self.frame_pool);
-            return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
-        };
-        self.processes.bind_address_space_root(process, root).map_err(|error| {
-            let _ = self.processes.exit(process, 1);
-            let _ = self.processes.reclaim(process);
-            tables.reclaim(&mut self.frame_pool, &mut memory);
-            image.reclaim(&mut self.frame_pool);
-            ServiceRuntimeError::Process(error)
-        })?;
-        if let Err(error) = map_loaded_pages(&mut self.processes, process, &image) {
-            let _ = self.processes.exit(process, 1);
-            let _ = self.processes.reclaim(process);
-            tables.reclaim(&mut self.frame_pool, &mut memory);
-            image.reclaim(&mut self.frame_pool);
-            return Err(ServiceRuntimeError::Process(error));
-        }
-        let client = match program_client_handle(slot, record.program_generation) {
-            Ok(client) => client,
-            Err(error) => {
-                let _ = self.processes.exit(process, 1);
-                let _ = self.processes.reclaim(process);
-                tables.reclaim(&mut self.frame_pool, &mut memory);
                 image.reclaim(&mut self.frame_pool);
                 return Err(error);
             }
         };
-        let capabilities = match self.provision_program_surface_ipc(client) {
-            Ok(capabilities) => capabilities,
-            Err(error) => {
-                let _ = self.processes.exit(process, 1);
-                let _ = self.processes.reclaim(process);
-                tables.reclaim(&mut self.frame_pool, &mut memory);
-                image.reclaim(&mut self.frame_pool);
-                return Err(error);
-            }
-        };
-        let staging = match self.frame_pool.allocate_for(owner) {
-            Ok(frame) => frame,
-            Err(_) => {
-                self.reclaim_program_start_failure(process, tables, image, client, None, None);
-                return Err(ServiceRuntimeError::Resources);
-            }
-        };
-        let bootstrap = match self.frame_pool.allocate_for(owner) {
-            Ok(frame) => frame,
-            Err(_) => {
-                self.reclaim_program_start_failure(
-                    process,
-                    tables,
+        let mut deps = program_deps!(self, &mut memory);
+        self.programs
+            .start(
+                &mut deps,
+                ProgramLaunch {
+                    slot,
+                    record,
                     image,
-                    client,
-                    Some(staging),
-                    None,
-                );
-                return Err(ServiceRuntimeError::Resources);
-            }
-        };
-        if memory.clear(staging).is_err() || memory.clear(bootstrap).is_err() {
-            self.reclaim_program_start_failure(
-                process,
-                tables,
-                image,
-                client,
-                Some(staging),
-                Some(bootstrap),
-            );
-            return Err(ServiceRuntimeError::IpcPrivateMapping(
-                PageTableError::InvalidVirtualAddress,
-            ));
-        }
-        let page = logos_abi::ProgramBootstrapPage {
-            abi_version: logos_abi::RUNTIME_ABI_VERSION,
-            flags: 0,
-            ipc_generation: self.ipc_generation,
-            reserved: 0,
-            program_generation: record.program_generation,
-            client,
-            surface_request: capabilities.request,
-            surface_response: capabilities.response,
-            surface_input: capabilities.input,
-            surface_render: capabilities.render,
-            surface_draw: capabilities.draw,
-        };
-        unsafe { core::ptr::write_unaligned(bootstrap.raw() as usize as *mut _, page) };
-        for (frame, address, flags) in [
-            (staging, logos_abi::IPC_STAGING_BASE, MappingFlags::DATA),
-            (bootstrap, logos_abi::PROGRAM_BOOTSTRAP_BASE, MappingFlags::READ_ONLY_DATA),
-        ] {
-            if tables
-                .map_raw_page(address, frame, flags, &mut self.frame_pool, &mut memory)
-                .is_err()
-            {
-                self.reclaim_program_start_failure(
-                    process,
-                    tables,
-                    image,
-                    client,
-                    Some(staging),
-                    Some(bootstrap),
-                );
-                return Err(ServiceRuntimeError::IpcPrivateMapping(
-                    PageTableError::InvalidVirtualAddress,
-                ));
-            }
-            let Some(mapping) = VirtualMapping::new(address, frame.raw() as usize, 1, flags) else {
-                self.reclaim_program_start_failure(
-                    process,
-                    tables,
-                    image,
-                    client,
-                    Some(staging),
-                    Some(bootstrap),
-                );
-                return Err(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace));
-            };
-            if self.processes.map(process, mapping).is_err() {
-                self.reclaim_program_start_failure(
-                    process,
-                    tables,
-                    image,
-                    client,
-                    Some(staging),
-                    Some(bootstrap),
-                );
-                return Err(ServiceRuntimeError::IpcPrivateProcess(ProcessError::AddressSpace));
-            }
-        }
-        let launch = match self.processes.user_launch(process, image.entry(), image.stack_top()) {
-            Ok(launch) => launch,
-            Err(error) => {
-                self.reclaim_program_start_failure(
-                    process,
-                    tables,
-                    image,
-                    client,
-                    Some(staging),
-                    Some(bootstrap),
-                );
-                return Err(ServiceRuntimeError::Process(error));
-            }
-        };
-        let task = match crate::SCHEDULER.spawn_user(service_task_entry, process, launch) {
-            Ok(task) => task,
-            Err(error) => {
-                self.reclaim_program_start_failure(
-                    process,
-                    tables,
-                    image,
-                    client,
-                    Some(staging),
-                    Some(bootstrap),
-                );
-                return Err(match error {
-                    crate::SpawnError::Capacity => ServiceRuntimeError::TaskCapacity,
-                    crate::SpawnError::AddressSpace => ServiceRuntimeError::TaskAddressSpace,
-                    crate::SpawnError::UserLaunch => ServiceRuntimeError::TaskLaunch,
-                });
-            }
-        };
-        let program = &mut self.programs[slot];
-        program.manager_slot = record.program_slot;
-        program.generation = record.program_generation;
-        program.name = record.name;
-        program.name_len = record.name_len;
-        program.client = client;
-        program.surface_request = capabilities.request;
-        program.surface_response = capabilities.response;
-        program.surface_input = capabilities.input;
-        program.surface_render = capabilities.render;
-        program.surface_draw = capabilities.draw;
-        program.ipc_staging = Some(staging);
-        program.bootstrap = Some(bootstrap);
-        program.process = Some(process);
-        program.task = Some(task);
-        program.image = Some(Box::new(image));
-        program.table = Some(Box::new(tables));
-        program.table_ready = true;
-        if !self.manager.mark_program_running(slot, program.generation) {
+                    plan,
+                    atrium,
+                    ipc_generation: self.ipc_generation,
+                    service_epoch: self.service_epoch,
+                    entry: service_task_entry,
+                },
+            )
+            .map_err(ServiceRuntimeError::from)?;
+        if !self.manager.mark_program_running(slot, record.program_generation) {
             return Err(ServiceRuntimeError::StaleGeneration);
         }
         Ok(())
@@ -6661,11 +6145,11 @@ impl ServiceRuntime {
         for execution in &mut self.executions {
             execution.task = None;
         }
-        for slot in 0..MAX_PROGRAMS {
-            let Some(task) = self.programs[slot].task else { continue };
-            if !crate::SCHEDULER.request_stop(task) {
-                return Err(ServiceRuntimeError::TaskStop);
-            }
+        for slot in 0..crate::program_runtime::MAX_PROGRAMS {
+            let Some(task) = self.programs.task(slot) else { continue };
+            self.programs
+                .request_stop(&crate::SCHEDULER, slot)
+                .map_err(ServiceRuntimeError::from)?;
             let mut waited = 0;
             while crate::SCHEDULER.state(task) != Some(crate::TaskState::Completed) {
                 if waited == 1024 {
@@ -6676,28 +6160,10 @@ impl ServiceRuntime {
                 runtime_guard.resume();
                 waited += 1;
             }
-            if !crate::SCHEDULER.reclaim_completed(task) {
-                return Err(ServiceRuntimeError::TaskStop);
-            }
-            if let Some(process) = self.programs[slot].process.take() {
-                if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
-                    self.processes.exit(process, 0xff).map_err(ServiceRuntimeError::Process)?;
-                }
-                self.processes.reclaim(process).map_err(ServiceRuntimeError::Process)?;
-            }
-            self.reclaim_program_surface_resources(slot);
-            if self.programs[slot].table_ready {
-                let mut memory = IdentityPageTableMemory;
-                if let Some(mut table) = self.programs[slot].table.take() {
-                    table.reclaim(&mut self.frame_pool, &mut memory);
-                }
-                self.programs[slot].table_ready = false;
-            }
-            if let Some(mut image) = self.programs[slot].image.take() {
-                image.reclaim(&mut self.frame_pool);
-            }
-            self.programs[slot].task = None;
-            let generation = self.programs[slot].generation;
+            let mut memory = IdentityPageTableMemory;
+            let mut deps = program_deps!(self, &mut memory);
+            let generation =
+                self.programs.finish_stop(&mut deps, slot).map_err(ServiceRuntimeError::from)?;
             let _ = self.manager.mark_program_stopped(slot, generation);
         }
         Ok(())
@@ -6715,12 +6181,11 @@ impl ServiceRuntime {
         );
         self.storage_map_windows = [[None; crate::storage_ipc::STORAGE_MAP_WINDOWS_PER_CLIENT];
             crate::storage_ipc::STORAGE_MAP_CLIENTS];
-        for slot in 0..MAX_PROGRAMS {
-            let client = self.programs[slot].client;
-            if client.is_valid() {
-                self.destroy_program_surface_ipc(client);
-            }
-        }
+        self.programs.destroy_all_surface_ipc(
+            &mut self.dynamic_ipc,
+            &mut self.dynamic_events,
+            &mut self.frame_pool,
+        );
         if let Some(mut registry) = self.dynamic_ipc.take() {
             if let Some(events) = self.dynamic_events.as_mut() {
                 let generation = self.service_epoch.wrapping_sub(1).max(1) as u32;
@@ -6831,27 +6296,9 @@ impl ServiceRuntime {
             execution.image.reclaim(&mut self.frame_pool);
         }
         self.executions.clear();
-        for slot in 0..MAX_PROGRAMS {
-            if let Some(process) = self.programs[slot].process.take() {
-                if self.processes.state(process) == Some(crate::process::ProcessState::Running) {
-                    let _ = self.processes.exit(process, 0xff);
-                }
-                let _ = self.processes.reclaim(process);
-            }
-            self.reclaim_program_surface_resources(slot);
-            if self.programs[slot].table_ready {
-                let mut memory = IdentityPageTableMemory;
-                if let Some(mut table) = self.programs[slot].table.take() {
-                    table.reclaim(&mut self.frame_pool, &mut memory);
-                }
-                self.programs[slot].table_ready = false;
-            }
-            if let Some(mut image) = self.programs[slot].image.take() {
-                image.reclaim(&mut self.frame_pool);
-            }
-            self.programs[slot].task = None;
-            self.programs[slot].manager_slot = u8::MAX;
-        }
+        let mut memory = IdentityPageTableMemory;
+        let mut deps = program_deps!(self, &mut memory);
+        self.programs.discard_all(&mut deps);
         self.pending_program_start = None;
         self.launch_ready = false;
         Ok(())
@@ -6924,22 +6371,6 @@ fn reserve_active_page_tables(pool: &mut FramePool, root: usize) -> bool {
     true
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{PROGRAM_CLIENT_HANDLE_BASE, program_client_handle};
-
-    #[test]
-    fn program_clients_use_a_reserved_generation_safe_range() {
-        let first = program_client_handle(0, 7).unwrap();
-        let second = program_client_handle(1, 8).unwrap();
-        assert_eq!(first.index(), PROGRAM_CLIENT_HANDLE_BASE);
-        assert_eq!(first.generation(), 7);
-        assert_eq!(second.index(), PROGRAM_CLIENT_HANDLE_BASE + 1);
-        assert_eq!(second.generation(), 8);
-        assert_ne!(first, second);
-    }
-}
-
 fn initialize_framebuffer_config(
     frame: FrameAddress,
     framebuffer: crate::boot_resources::FramebufferInfo,
@@ -6965,45 +6396,6 @@ fn initialize_framebuffer_present(frame: FrameAddress) {
         (frame.raw() as usize as *mut logos_abi::FramebufferPresentState)
             .write(logos_abi::FramebufferPresentState::new());
     }
-}
-
-fn map_loaded_pages(
-    processes: &mut crate::process::ProcessTable,
-    process: ProcessHandle,
-    image: &LoadedImage,
-) -> Result<(), ProcessError> {
-    let mut index = 0;
-    while index < image.page_count() {
-        let Some(first) = image.page(index) else {
-            return Err(ProcessError::AddressSpace);
-        };
-        let mut pages = 1;
-        while index + pages < image.page_count() {
-            let Some(previous) = image.page(index + pages - 1) else {
-                return Err(ProcessError::AddressSpace);
-            };
-            let Some(next) = image.page(index + pages) else {
-                return Err(ProcessError::AddressSpace);
-            };
-            if previous.flags() != next.flags()
-                || previous.virtual_address() + crate::loader::PAGE_SIZE != next.virtual_address()
-                || previous.frame().raw() + crate::loader::PAGE_SIZE as u64 != next.frame().raw()
-            {
-                break;
-            }
-            pages += 1;
-        }
-        let mapping = VirtualMapping::new(
-            first.virtual_address(),
-            first.frame().raw() as usize,
-            pages,
-            first.flags(),
-        )
-        .ok_or(ProcessError::AddressSpace)?;
-        processes.map(process, mapping)?;
-        index += pages;
-    }
-    Ok(())
 }
 
 fn service_task_entry() {

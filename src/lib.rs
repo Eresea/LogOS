@@ -14,6 +14,8 @@ pub mod memory;
 pub mod network_config;
 pub mod page_table;
 pub mod process;
+#[cfg(any(test, target_os = "uefi"))]
+mod program_runtime;
 mod scheduler;
 pub mod supervisor;
 pub use scheduler::{
