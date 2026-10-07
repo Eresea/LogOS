@@ -10,7 +10,7 @@ use core::{
 #[cfg(feature = "storage-proof")]
 use core::sync::atomic::AtomicU8;
 
-use crate::virtio_queue::{QUEUE_SIZE, QueueMemory};
+use crate::virtio_queue::{Descriptor, QUEUE_SIZE, QueueMemory};
 use logos_storage::{
     BlockRequestId, PciError, VIRTIO_BLK_TYPE_FLUSH, VirtioBlkChain, VirtioBlkHeader,
     VirtioPciDevice, negotiate_features,
