@@ -6102,7 +6102,7 @@ impl ServiceRuntime {
                 &mut deps,
                 ProgramLaunch {
                     slot,
-                    record,
+                    generation: record.program_generation,
                     image,
                     plan,
                     atrium,

@@ -74,7 +74,7 @@ pub(crate) struct ProgramDeps<'a, M> {
 /// Everything `start` needs besides its dependencies.
 pub(crate) struct ProgramLaunch {
     pub slot: usize,
-    pub record: logos_abi::ServiceManagerRecord,
+    pub generation: u32,
     /// Populated image owned by [`ProgramRuntime::owner_for_slot`].
     pub image: LoadedImage,
     pub plan: crate::process::ElfLoadPlan,
@@ -183,7 +183,7 @@ impl ProgramRuntime {
     ) -> Result<(), ProgramError> {
         let ProgramLaunch {
             slot,
-            record,
+            generation,
             mut image,
             plan,
             atrium,
@@ -237,7 +237,7 @@ impl ProgramRuntime {
         if let Err(error) = map_loaded_pages(deps.processes, process, &image) {
             fail_early!(ProgramError::Process(error));
         }
-        let client = match program_client_handle(slot, record.program_generation) {
+        let client = match program_client_handle(slot, generation) {
             Ok(client) => client,
             Err(error) => fail_early!(error),
         };
@@ -271,7 +271,7 @@ impl ProgramRuntime {
             flags: 0,
             ipc_generation,
             reserved: 0,
-            program_generation: record.program_generation,
+            program_generation: generation,
             client,
             surface_request: capabilities.request,
             surface_response: capabilities.response,
@@ -340,7 +340,7 @@ impl ProgramRuntime {
             ),
         };
         self.slots[slot] = ProgramSlot {
-            generation: record.program_generation,
+            generation: generation,
             client,
             ipc_staging: Some(staging),
             bootstrap: Some(bootstrap),
@@ -641,4 +641,341 @@ fn program_capability(
         .find_endpoint(if send { client } else { peer }, if send { peer } else { client }, contract)
         .map_err(|_| ProgramError::Ipc(IpcError::Capacity))?;
     ipc.capability_for(client, endpoint, rights).map_err(|_| ProgramError::Ipc(IpcError::Capacity))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        boot_resources::{MemoryDescriptor, MemoryMap},
+        loader::LoadError,
+        process::ElfLoadPlan,
+    };
+    use std::{boxed::Box, collections::BTreeMap};
+
+    const ENTRY_COUNT: usize = 512;
+    const PAGE: usize = 4096;
+    const SLOT: usize = 0;
+
+    /// Host page memory keyed by frame address; the second adapter beside the
+    /// identity-mapped UEFI one.
+    #[derive(Default)]
+    struct TestMemory {
+        pages: BTreeMap<u64, Box<[u8; PAGE]>>,
+    }
+
+    impl PageTableMemory for TestMemory {
+        fn clear(&mut self, frame: FrameAddress) -> Result<(), PageTableError> {
+            self.pages.insert(frame.raw(), Box::new([0; PAGE]));
+            Ok(())
+        }
+
+        fn read(&self, frame: FrameAddress, index: usize) -> Result<u64, PageTableError> {
+            let page = self.pages.get(&frame.raw()).filter(|_| index < ENTRY_COUNT);
+            let page = page.ok_or(PageTableError::Memory)?;
+            Ok(u64::from_le_bytes(page[index * 8..index * 8 + 8].try_into().unwrap()))
+        }
+
+        fn write(
+            &mut self,
+            frame: FrameAddress,
+            index: usize,
+            value: u64,
+        ) -> Result<(), PageTableError> {
+            let page = self.pages.get_mut(&frame.raw()).filter(|_| index < ENTRY_COUNT);
+            let page = page.ok_or(PageTableError::Memory)?;
+            page[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+            Ok(())
+        }
+    }
+
+    impl PageSink for TestMemory {
+        fn clear(&mut self, frame: FrameAddress) -> Result<(), LoadError> {
+            PageTableMemory::clear(self, frame).map_err(|_| LoadError::Write)
+        }
+
+        fn write(
+            &mut self,
+            frame: FrameAddress,
+            offset: usize,
+            bytes: &[u8],
+        ) -> Result<(), LoadError> {
+            let page = self.pages.entry(frame.raw()).or_insert_with(|| Box::new([0; PAGE]));
+            let end = offset.checked_add(bytes.len()).filter(|end| *end <= PAGE);
+            page[offset..end.ok_or(LoadError::Write)?].copy_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    fn elf() -> [u8; 128] {
+        let mut image = [0; 128];
+        image[..4].copy_from_slice(b"\x7fELF");
+        image[4] = 2;
+        image[5] = 1;
+        image[16..18].copy_from_slice(&2u16.to_le_bytes());
+        image[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+        image[24..32].copy_from_slice(&0x1000u64.to_le_bytes());
+        image[32..40].copy_from_slice(&64u64.to_le_bytes());
+        image[54..56].copy_from_slice(&56u16.to_le_bytes());
+        image[56..58].copy_from_slice(&1u16.to_le_bytes());
+        image[64..68].copy_from_slice(&1u32.to_le_bytes());
+        image[68..72].copy_from_slice(&5u32.to_le_bytes());
+        image[80..88].copy_from_slice(&0x1000u64.to_le_bytes());
+        image[96..104].copy_from_slice(&1u64.to_le_bytes());
+        image[104..112].copy_from_slice(&0x1000u64.to_le_bytes());
+        image[112..120].copy_from_slice(&0x1000u64.to_le_bytes());
+        image[120] = 0xc3;
+        image
+    }
+
+    fn atrium() -> ServiceHandle {
+        ServiceHandle::new(1, 1).unwrap()
+    }
+
+    fn entry() {}
+
+    /// The real registries, pool, process table and scheduler, built on the host.
+    struct World {
+        pool: FramePool,
+        processes: ProcessTable,
+        ipc: Option<RuntimeIpcRegistry>,
+        events: Option<RuntimeEventRegistry>,
+        scheduler: Box<Scheduler>,
+        memory: TestMemory,
+        programs: ProgramRuntime,
+        plan: ElfLoadPlan,
+    }
+
+    impl World {
+        fn new(frames: usize) -> Self {
+            let mut map = MemoryMap::new();
+            map.push(MemoryDescriptor::new(0x10_0000, frames as u64, true).unwrap()).unwrap();
+            let mut pool = FramePool::empty();
+            pool.initialize(&map).unwrap();
+            Self {
+                pool,
+                processes: ProcessTable::new(),
+                ipc: Some(RuntimeIpcRegistry::new()),
+                events: Some(RuntimeEventRegistry::new()),
+                scheduler: Box::new(Scheduler::new()),
+                memory: TestMemory::default(),
+                programs: ProgramRuntime::new(),
+                plan: ElfLoadPlan::parse(&elf()).unwrap(),
+            }
+        }
+
+        /// Load the image as `ServiceRuntime` does, then start through the interface.
+        fn try_start(&mut self, slot: usize, generation: u32) -> Option<Result<(), ProgramError>> {
+            let owner = ProgramRuntime::owner_for_slot(slot).unwrap();
+            let image = LoadedImage::load_with_stack_pages_for_owner(
+                self.plan,
+                &mut self.pool,
+                crate::process::USER_STACK_PAGES,
+                owner,
+            )
+            .ok()?;
+            let launch = ProgramLaunch {
+                slot,
+                generation,
+                image,
+                plan: self.plan,
+                atrium: atrium(),
+                ipc_generation: 1,
+                service_epoch: 1,
+                entry,
+            };
+            let mut deps = ProgramDeps {
+                frame_pool: &mut self.pool,
+                processes: &mut self.processes,
+                ipc: &mut self.ipc,
+                events: &mut self.events,
+                scheduler: &self.scheduler,
+                memory: &mut self.memory,
+            };
+            Some(self.programs.start(&mut deps, launch))
+        }
+
+        fn start(&mut self, slot: usize, generation: u32) -> Result<(), ProgramError> {
+            self.try_start(slot, generation).expect("image loads")
+        }
+
+        fn stop_and_reap(&mut self, slot: usize) -> (u32, ProgramExit) {
+            self.programs.request_stop(&self.scheduler, slot).unwrap();
+            let mut deps = ProgramDeps {
+                frame_pool: &mut self.pool,
+                processes: &mut self.processes,
+                ipc: &mut self.ipc,
+                events: &mut self.events,
+                scheduler: &self.scheduler,
+                memory: &mut self.memory,
+            };
+            self.programs.reap(&mut deps, slot).unwrap().expect("stopped task is reaped")
+        }
+
+        fn client_footprint(&self, generation: u32) -> (usize, usize) {
+            self.ipc
+                .as_ref()
+                .unwrap()
+                .ownership_counts(program_client_handle(SLOT, generation).unwrap())
+        }
+    }
+
+    /// Frames still owned by the kernel or the program slot. Counted by owner
+    /// because `FramePool::available` ignores frames parked in the per-CPU
+    /// cache after a failed allocation.
+    fn live_frames(pool: &FramePool) -> u32 {
+        let owner = ProgramRuntime::owner_for_slot(SLOT).unwrap();
+        pool.manager().owner_live(OwnerId::KERNEL) + pool.manager().owner_live(owner)
+    }
+
+    #[test]
+    fn program_clients_use_a_reserved_generation_safe_range() {
+        let first = program_client_handle(0, 7).unwrap();
+        let second = program_client_handle(1, 8).unwrap();
+        assert_eq!(first.index(), PROGRAM_CLIENT_HANDLE_BASE);
+        assert_eq!(first.generation(), 7);
+        assert_eq!(second.index(), PROGRAM_CLIENT_HANDLE_BASE + 1);
+        assert_eq!(second.generation(), 8);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn start_then_reap_returns_every_frame_and_ipc_handle() {
+        let mut world = World::new(256);
+        let before = live_frames(&world.pool);
+        assert_eq!(world.client_footprint(1), (0, 0));
+        world.start(SLOT, 1).unwrap();
+        assert!(live_frames(&world.pool) > before);
+        assert_ne!(world.client_footprint(1), (0, 0));
+        assert!(!world.programs.slot_available(SLOT));
+        assert_eq!(world.stop_and_reap(SLOT), (1, ProgramExit::Stopped));
+        assert_eq!(live_frames(&world.pool), before);
+        assert_eq!(world.client_footprint(1), (0, 0));
+        assert!(world.programs.slot_available(SLOT));
+    }
+
+    #[test]
+    fn every_frame_exhaustion_stage_leaves_nothing_behind() {
+        let total = {
+            let mut world = World::new(256);
+            let before = live_frames(&world.pool);
+            world.start(SLOT, 1).unwrap();
+            live_frames(&world.pool) - before
+        };
+        let mut started_stages = 0;
+        for capacity in 1..total as usize {
+            let mut world = World::new(capacity);
+            match world.try_start(SLOT, 1) {
+                // The image itself did not fit: nothing reached the interface.
+                None => {}
+                Some(result) => {
+                    assert!(result.is_err(), "capacity {capacity} cannot hold a whole program");
+                    started_stages += 1;
+                }
+            }
+            assert_eq!(live_frames(&world.pool), 0, "capacity {capacity} leaked frames");
+            assert_eq!(world.client_footprint(1), (0, 0), "capacity {capacity} leaked handles");
+            assert!(world.programs.slot_available(SLOT));
+        }
+        assert!(started_stages > 10, "sweep covered tables, IPC and bootstrap stages");
+    }
+
+    #[test]
+    fn surface_ipc_provisioning_failure_leaves_nothing_behind() {
+        let mut world = World::new(256);
+        let before = live_frames(&world.pool);
+        world.events = None;
+        assert_eq!(world.start(SLOT, 1), Err(ProgramError::Ipc(IpcError::Capacity)));
+        assert_eq!(live_frames(&world.pool), before);
+        assert_eq!(world.client_footprint(1), (0, 0));
+        world.events = Some(RuntimeEventRegistry::new());
+        world.ipc = None;
+        assert_eq!(world.start(SLOT, 1), Err(ProgramError::Ipc(IpcError::Capacity)));
+        assert_eq!(live_frames(&world.pool), before);
+    }
+
+    #[test]
+    fn process_admission_failure_leaves_nothing_behind() {
+        let mut world = World::new(256);
+        while world.processes.start_plan(world.plan).is_ok() {}
+        let before = live_frames(&world.pool);
+        assert_eq!(world.start(SLOT, 1), Err(ProgramError::Process(ProcessError::Capacity)));
+        assert_eq!(live_frames(&world.pool), before);
+        assert_eq!(world.client_footprint(1), (0, 0));
+    }
+
+    #[test]
+    fn scheduler_exhaustion_unwinds_process_ipc_and_frames() {
+        let mut world = World::new(256);
+        while world.scheduler.spawn(entry).is_ok() {}
+        let before = live_frames(&world.pool);
+        assert_eq!(world.start(SLOT, 1), Err(ProgramError::TaskCapacity));
+        assert_eq!(live_frames(&world.pool), before);
+        assert_eq!(world.client_footprint(1), (0, 0));
+        assert!(world.programs.slot_available(SLOT));
+    }
+
+    #[test]
+    fn occupied_slot_rejects_start_and_returns_the_image() {
+        let mut world = World::new(256);
+        world.start(SLOT, 1).unwrap();
+        let before = live_frames(&world.pool);
+        assert_eq!(world.start(SLOT, 2), Err(ProgramError::TaskCapacity));
+        assert_eq!(live_frames(&world.pool), before);
+        assert_eq!(world.client_footprint(2), (0, 0));
+    }
+
+    #[test]
+    fn stale_program_handle_is_rejected_after_slot_reuse() {
+        let mut world = World::new(256);
+        world.start(SLOT, 1).unwrap();
+        let old_process = world.programs.slots[SLOT].process.unwrap();
+        let old_client = world.programs.client_for_process(old_process).unwrap();
+        world.stop_and_reap(SLOT);
+        world.start(SLOT, 2).unwrap();
+        let new_process = world.programs.slots[SLOT].process.unwrap();
+        let new_client = world.programs.client_for_process(new_process).unwrap();
+        assert_eq!(old_client.index(), new_client.index());
+        assert_ne!(old_client.generation(), new_client.generation());
+        assert_eq!(world.programs.client_for_process(old_process), None);
+        assert_eq!(world.programs.staging_for_process(old_process), None);
+        assert_eq!(world.client_footprint(1), (0, 0));
+        let ipc = world.ipc.as_ref().unwrap();
+        let request = logos_abi::IPC_CONTRACT_ATRIUM_SURFACE_REQUEST;
+        assert!(ipc.find_endpoint(old_client, atrium(), request).is_err());
+        assert!(ipc.find_endpoint(new_client, atrium(), request).is_ok());
+    }
+
+    #[test]
+    fn shutdown_paths_reclaim_running_programs() {
+        let mut world = World::new(256);
+        let before = live_frames(&world.pool);
+        world.start(SLOT, 1).unwrap();
+        world.programs.request_stop(&world.scheduler, SLOT).unwrap();
+        let mut deps = ProgramDeps {
+            frame_pool: &mut world.pool,
+            processes: &mut world.processes,
+            ipc: &mut world.ipc,
+            events: &mut world.events,
+            scheduler: &world.scheduler,
+            memory: &mut world.memory,
+        };
+        assert_eq!(world.programs.finish_stop(&mut deps, SLOT), Ok(1));
+        assert_eq!(live_frames(&world.pool), before);
+
+        world.start(SLOT, 3).unwrap();
+        world.programs.destroy_all_surface_ipc(&mut world.ipc, &mut world.events, &mut world.pool);
+        assert_eq!(world.client_footprint(3), (0, 0));
+        let mut deps = ProgramDeps {
+            frame_pool: &mut world.pool,
+            processes: &mut world.processes,
+            ipc: &mut world.ipc,
+            events: &mut world.events,
+            scheduler: &world.scheduler,
+            memory: &mut world.memory,
+        };
+        world.programs.discard_all(&mut deps);
+        assert_eq!(live_frames(&world.pool), before);
+        assert!(world.programs.slot_available(SLOT));
+    }
 }
