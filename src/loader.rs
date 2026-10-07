@@ -441,6 +441,7 @@ fn align_up(address: usize) -> Option<usize> {
 }
 
 /// Map every loaded image page into `process`, coalescing contiguous runs.
+#[cfg(any(test, target_os = "uefi"))]
 pub(crate) fn map_loaded_pages(
     processes: &mut crate::process::ProcessTable,
     process: crate::process::ProcessHandle,

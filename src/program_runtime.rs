@@ -340,7 +340,7 @@ impl ProgramRuntime {
             ),
         };
         self.slots[slot] = ProgramSlot {
-            generation: generation,
+            generation,
             client,
             ipc_staging: Some(staging),
             bootstrap: Some(bootstrap),
