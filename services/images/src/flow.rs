@@ -335,13 +335,12 @@ struct StorageProof {
     step: u8,
     active: bool,
     recovery: bool,
-    shutdown_attempted: bool,
 }
 
 #[cfg(feature = "storage-proof")]
 impl StorageProof {
     const fn new() -> Self {
-        Self { step: 0, active: false, recovery: false, shutdown_attempted: false }
+        Self { step: 0, active: false, recovery: false }
     }
 
     fn active(&self) -> bool {
@@ -442,10 +441,10 @@ impl StorageProof {
     }
 
     fn request_shutdown(&mut self) -> bool {
-        if self.step != u8::MAX || self.shutdown_attempted {
+        if self.step != u8::MAX {
             return false;
         }
-        self.shutdown_attempted = true;
+        // The kernel refuses until its own proof passed, so keep asking.
         common::power(logos_flow::FlowAction::Shutdown as usize) != 0
     }
 }

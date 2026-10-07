@@ -2,8 +2,11 @@ param(
     [switch]$Release,
     [ValidateRange(16, 4096)]
     [int]$DiskMiB = 64,
-    [ValidateRange(1, 120)]
-    [int]$TimeoutSeconds = 60
+    # Activation reads the ~246 KiB Input package through ~240 one-page Storage
+    # exchanges at ~0.4 s each (QEMU TCG); a boot takes 50-150 s depending on host load, so 60 s timed out
+    # while still progressing.
+    [ValidateRange(1, 300)]
+    [int]$TimeoutSeconds = 240
 )
 
 $ErrorActionPreference = 'Stop'

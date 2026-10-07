@@ -32,6 +32,16 @@ pub(crate) fn run() {
     }
     #[cfg(feature = "qemu-proof")]
     proof::handoff_started();
+    // The Terminal restart below replaces the whole service graph, which would
+    // cut a Flow storage command proof off mid-flight; let it finish first.
+    #[cfg(all(feature = "qemu-proof", feature = "storage-proof"))]
+    {
+        let deadline =
+            current_ticks().saturating_add(crate::supervisor::STARTUP_GRACE_TICKS * 3 / 2);
+        while !crate::storage_proof::api_complete() && current_ticks() < deadline {
+            sleep_current_for(1);
+        }
+    }
     #[cfg(feature = "qemu-proof")]
     crate::suppress_service_heartbeat(logos_abi::ServiceId::Terminal);
     #[cfg(feature = "qemu-proof")]

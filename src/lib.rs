@@ -38,6 +38,7 @@ mod storage_ipc;
 mod storage_proof;
 pub mod virtio;
 pub mod virtio_net;
+mod virtio_queue;
 
 #[cfg(target_os = "uefi")]
 mod runtime_entry;

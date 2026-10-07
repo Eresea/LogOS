@@ -849,6 +849,7 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
         }
         Err(error) => {
             storage_startup_marker(b"LogOS vNext: storage startup open FAIL");
+            storage_startup_error_line("LogOS vNext: storage startup open error=", error);
             serve_storage_error(storage_error_status(error))
         }
     };

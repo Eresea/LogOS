@@ -1,4 +1,11 @@
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+
+static API_COMPLETE: AtomicBool = AtomicBool::new(false);
+
+/// True once the command API proof reported its cleanup (kept across service restarts).
+pub(crate) fn api_complete() -> bool {
+    API_COMPLETE.load(Ordering::Acquire)
+}
 
 pub(crate) struct StorageProofObserver {
     mode: AtomicU8,
@@ -117,6 +124,7 @@ impl StorageProofObserver {
             let previous = self.missing_paths.fetch_or(path, Ordering::AcqRel);
             let required = PATH_ABORTED | PATH_REMOVED;
             if previous & required != required && (previous | path) & required == required {
+                API_COMPLETE.store(true, Ordering::Release);
                 crate::arch_proof_line(b"LogOS vNext: storage command API cleanup PASS");
             }
         }
