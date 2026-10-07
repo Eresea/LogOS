@@ -10,6 +10,7 @@ use core::{
 #[cfg(feature = "storage-proof")]
 use core::sync::atomic::AtomicU8;
 
+use crate::virtio_queue::{QUEUE_SIZE, QueueMemory};
 use logos_storage::{
     BlockRequestId, PciError, VIRTIO_BLK_TYPE_FLUSH, VirtioBlkChain, VirtioBlkHeader,
     VirtioPciDevice, negotiate_features,
@@ -17,7 +18,6 @@ use logos_storage::{
 
 const PCI_CONFIG_ADDRESS: u16 = 0xcf8;
 const PCI_CONFIG_DATA: u16 = 0xcfc;
-const QUEUE_SIZE: usize = 8;
 const VIRTQ_DESC_F_NEXT: u16 = 1;
 const VIRTQ_DESC_F_WRITE: u16 = 2;
 const STATUS_ACKNOWLEDGE: u8 = 1;
@@ -44,50 +44,6 @@ const MSIX_TABLE_ENTRY_BYTES: u32 = 16;
 const COMPLETION_TIMEOUT_TICKS: u64 = logos_abi::SERVICE_HEARTBEAT_INTERVAL_TICKS;
 const COMPLETION_SPIN_LIMIT: usize = 1_000_000;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Descriptor {
-    address: u64,
-    length: u32,
-    flags: u16,
-    next: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct UsedElement {
-    id: u32,
-    length: u32,
-}
-
-#[repr(C, align(4096))]
-struct DmaBlock {
-    bytes: [u8; logos_storage::BLOCK_BYTES],
-}
-
-impl DmaBlock {
-    const fn new() -> Self {
-        Self { bytes: [0; logos_storage::BLOCK_BYTES] }
-    }
-}
-
-#[repr(C, align(4096))]
-struct QueueMemory {
-    descriptors: [Descriptor; QUEUE_SIZE * 3],
-    available_flags: u16,
-    available_index: u16,
-    available_ring: [u16; QUEUE_SIZE],
-    available_used_event: u16,
-    available_padding: u16,
-    used_flags: u16,
-    used_index: u16,
-    used_ring: [UsedElement; QUEUE_SIZE],
-    used_available_event: u16,
-    headers: [VirtioBlkHeader; QUEUE_SIZE],
-    statuses: [u8; QUEUE_SIZE],
-    data: DmaBlock,
-}
-
 // One fixed, page-aligned Core-owned DMA arena. The future frame allocator will
 // replace this singleton when multiple block devices are supported.
 #[unsafe(link_section = ".dma")]
@@ -106,31 +62,6 @@ static STORAGE_PROOF_STATE: AtomicU8 = AtomicU8::new(0);
 
 #[cfg(feature = "storage-proof")]
 const SUPERBLOCK_MAGIC: &[u8; 8] = b"LOGOSCOW";
-
-impl QueueMemory {
-    const EMPTY_DESCRIPTOR: Descriptor = Descriptor { address: 0, length: 0, flags: 0, next: 0 };
-    const EMPTY_USED: UsedElement = UsedElement { id: 0, length: 0 };
-    const fn new() -> Self {
-        Self {
-            descriptors: [Self::EMPTY_DESCRIPTOR; QUEUE_SIZE * 3],
-            available_flags: 0,
-            available_index: 0,
-            available_ring: [0; QUEUE_SIZE],
-            available_used_event: 0,
-            available_padding: 0,
-            used_flags: 0,
-            used_index: 0,
-            used_ring: [Self::EMPTY_USED; QUEUE_SIZE],
-            used_available_event: 0,
-            headers: [VirtioBlkHeader { request_type: 0, reserved: 0, sector: 0 }; QUEUE_SIZE],
-            statuses: [0xff; QUEUE_SIZE],
-            data: DmaBlock::new(),
-        }
-    }
-}
-
-const _: () = assert!(core::mem::align_of::<DmaBlock>() == 4096);
-const _: () = assert!(core::mem::offset_of!(QueueMemory, data) % 4096 == 0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceError {
@@ -727,7 +658,7 @@ impl VirtioBlockDevice {
 
     pub fn reset_device(&mut self) -> Result<(), DeviceError> {
         self.reset()?;
-        *self.queue = QueueMemory::new();
+        self.queue.reset_rings();
         self.requests.fill(None);
         self.used_index = 0;
         self.interrupt_completion = None;
