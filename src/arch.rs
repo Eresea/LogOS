@@ -1640,6 +1640,12 @@ pub(crate) fn power_control(process: ProcessHandle, action: usize) -> bool {
         if !authorized {
             return false;
         }
+        // The storage proof boot also gates on the Q-CORE proof, so hold its
+        // scripted shutdown until the kernel proof has passed; Flow retries.
+        #[cfg(all(feature = "storage-proof", feature = "qemu-proof"))]
+        if action == logos_abi::POWER_SHUTDOWN && !crate::proof::passed() {
+            return false;
+        }
         if matches!(action, logos_abi::POWER_SHUTDOWN | logos_abi::POWER_REBOOT)
             && prepare_storage_power_control().is_err()
         {

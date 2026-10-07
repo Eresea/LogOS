@@ -472,6 +472,11 @@ pub fn event_wake_ipi_sent() {
     EVENT_WAKE_IPI_SENT.store(true, Ordering::Release);
 }
 
+#[cfg(feature = "storage-proof")]
+pub fn passed() -> bool {
+    PASSED.load(Ordering::Acquire)
+}
+
 pub fn observe(_cpu: usize) {
     if PASSED.load(Ordering::Acquire) {
         if !REPORTED.swap(true, Ordering::AcqRel) {

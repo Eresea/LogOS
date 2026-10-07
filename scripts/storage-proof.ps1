@@ -192,12 +192,46 @@ function Invoke-StorageBoot {
     }
 }
 
-if (-not (Invoke-StorageBoot -ExpectedMarkers @(
+# A disk that already carries a v5 volume is recovered, not formatted, so boot 1
+# emits the recovery markers (the same ones boot 2 expects) instead of the
+# fresh-format ones.
+function Test-V5Volume {
+    param([string]$Path)
+
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read)
+    try {
+        # Either superblock slot may be the torn one left by the previous run.
+        foreach ($slot in 0, 1) {
+            $bytes = New-Object byte[] 10
+            $stream.Position = [int64]$slot * 4096
+            [void]$stream.Read($bytes, 0, $bytes.Length)
+            if ([Text.Encoding]::ASCII.GetString($bytes, 0, 8) -eq 'LOGOSCOW' -and
+                [BitConverter]::ToUInt16($bytes, 8) -eq 5) {
+                return $true
+            }
+        }
+        return $false
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+$firstBootMarkers = if (Test-V5Volume $disk) {
+    @(
+        'LogOS vNext: QEMU proof PASS',
+        'LogOS vNext: storage recovery PASS',
+        'LogOS vNext: storage command API recovery PASS',
+        'LogOS vNext: storage command API cleanup PASS'
+    )
+} else {
+    @(
         'LogOS vNext: QEMU proof PASS',
         'LogOS vNext: storage proof PASS',
         'LogOS vNext: storage command API PASS',
         'LogOS vNext: storage command API cleanup PASS'
-    ))) {
+    )
+}
+if (-not (Invoke-StorageBoot -ExpectedMarkers $firstBootMarkers)) {
     throw "Storage format/write/flush proof failed. Log: $log"
 }
 if (Test-Path -LiteralPath $disk) {
