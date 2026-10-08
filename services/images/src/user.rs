@@ -89,6 +89,8 @@ impl Entropy {
 
     #[cfg(target_arch = "x86_64")]
     fn hardware_word() -> Option<u64> {
+        // `__cpuid` is safe on newer toolchains; keep the block for older ones.
+        #[allow(unused_unsafe)]
         let features = unsafe { core::arch::x86_64::__cpuid(1) };
         if features.ecx & (1 << 30) != 0 {
             for _ in 0..8 {
