@@ -1,6 +1,6 @@
 # ADR-0064: User service IPC and Storage catalog transport
 
-Status: Accepted
+- Status: Accepted
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR-0090: Per-session Flow state with one shared arbitration queue
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

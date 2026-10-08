@@ -1,6 +1,6 @@
 # ADR-0087: Retained text-grid scene node and a 48-node budget
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

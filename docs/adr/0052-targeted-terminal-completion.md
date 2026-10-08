@@ -1,6 +1,6 @@
 # ADR-0052: Targeted terminal completion
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

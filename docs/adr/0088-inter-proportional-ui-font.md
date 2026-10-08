@@ -1,6 +1,6 @@
 # ADR-0088: Offline Inter proportional UI font and text measurement
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

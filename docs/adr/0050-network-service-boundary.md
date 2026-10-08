@@ -1,6 +1,6 @@
 # ADR-0050: Optional Network service boundary
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

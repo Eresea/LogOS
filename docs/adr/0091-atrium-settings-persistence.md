@@ -1,6 +1,6 @@
 # ADR-0091: Atrium settings persistence through User's snapshot
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

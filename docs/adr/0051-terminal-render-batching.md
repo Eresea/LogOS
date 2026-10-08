@@ -1,6 +1,6 @@
 # ADR-0051: Terminal render batching
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

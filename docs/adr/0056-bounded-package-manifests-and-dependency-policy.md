@@ -1,6 +1,6 @@
 # ADR-0056: Bounded package manifests and dependency policy
 
-Status: Accepted
+- Status: Accepted
 
 ## Context
 

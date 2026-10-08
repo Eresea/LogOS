@@ -1,6 +1,6 @@
 # ADR-0089: Atrium appearance preferences over existing channels
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

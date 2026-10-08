@@ -1,6 +1,6 @@
 # ADR-0059: v4 copy-on-write storage boundary
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

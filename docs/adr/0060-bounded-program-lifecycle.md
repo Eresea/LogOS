@@ -1,6 +1,6 @@
 # ADR-0060: Bounded persistent program lifecycle
 
-Status: Accepted
+- Status: Accepted
 
 ## Context
 

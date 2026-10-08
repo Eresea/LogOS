@@ -1,6 +1,6 @@
 # ADR-0082: Bounded UI motion
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

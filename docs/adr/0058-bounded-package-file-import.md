@@ -1,6 +1,6 @@
 # ADR-0058: Bounded package-file import
 
-Status: Accepted
+- Status: Accepted
 
 ## Context
 

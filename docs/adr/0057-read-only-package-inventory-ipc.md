@@ -1,6 +1,6 @@
 # ADR-0057: Read-only package inventory IPC
 
-Status: Accepted
+- Status: Accepted
 
 ## Context
 

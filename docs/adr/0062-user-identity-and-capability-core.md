@@ -1,6 +1,6 @@
 # ADR-0062: User identity and capability policy core
 
-Status: Accepted
+- Status: Accepted
 
 ## Context
 

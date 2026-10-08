@@ -1,6 +1,6 @@
 # ADR-0084: Bounded native Material Symbols
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 

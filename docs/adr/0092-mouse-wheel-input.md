@@ -1,6 +1,6 @@
 # ADR-0092: Mouse-wheel input through the PS/2 driver and pointer ABI
 
-Status: Accepted
+- Status: Accepted
 
 ## Decision
 
