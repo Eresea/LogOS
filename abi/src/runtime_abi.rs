@@ -11,6 +11,9 @@ macro_rules! define_handle {
         #[repr(transparent)]
         pub struct $name(u64);
 
+        // SAFETY: a `repr(transparent)` `u64`; every bit pattern is a valid value.
+        unsafe impl crate::WireBytes for $name {}
+
         impl $name {
             pub const EMPTY: Self = Self(0);
 
@@ -204,6 +207,13 @@ pub struct EventResponse {
 }
 
 impl EventResponse {
+    /// Checks the `status` discriminant of a raw `EventResponse`.
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, status))
+            .is_some_and(|raw| *raw <= EventStatus::Busy as u8)
+    }
+
     pub const fn empty(status: EventStatus, request_id: u32) -> Self {
         Self {
             abi_version: RUNTIME_ABI_VERSION,
