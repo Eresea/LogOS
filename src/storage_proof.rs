@@ -46,11 +46,10 @@ impl StorageProofObserver {
         if bytes.len() != core::mem::size_of::<logos_abi::IpcBytes>() {
             return;
         }
-        if !logos_abi::IpcBytes::wire_enums_valid(bytes) {
+        let Some(message) = crate::frame_bytes::decode_from_slice::<logos_abi::IpcBytes>(bytes)
+        else {
             return;
-        }
-        let message =
-            unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>()) };
+        };
         let Ok(request) = logos_abi::StorageApiRequest::decode(&message) else {
             return;
         };
@@ -70,11 +69,10 @@ impl StorageProofObserver {
         if bytes.len() != core::mem::size_of::<logos_abi::IpcBytes>() {
             return;
         }
-        if !logos_abi::IpcBytes::wire_enums_valid(bytes) {
+        let Some(message) = crate::frame_bytes::decode_from_slice::<logos_abi::IpcBytes>(bytes)
+        else {
             return;
-        }
-        let message =
-            unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>()) };
+        };
         let Ok(response) = logos_abi::StorageApiResponse::decode(&message) else {
             return;
         };

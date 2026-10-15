@@ -210,6 +210,21 @@ pub struct ManagerResponse {
 }
 
 impl ManagerResponse {
+    /// Checks every enum field of a raw `ManagerResponse`, including the
+    /// embedded record's `state`.
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes
+            .get(core::mem::offset_of!(Self, operation))
+            .and_then(|raw| ManagerOperation::from_raw(*raw))
+            .is_some()
+            && bytes
+                .get(core::mem::offset_of!(Self, status))
+                .is_some_and(|raw| *raw <= ManagerStatus::Unsupported as u8)
+            && bytes
+                .get(core::mem::offset_of!(Self, record.state))
+                .is_some_and(|raw| *raw <= ManagerState::Faulted as u8)
+    }
+
     pub const fn new(operation: ManagerOperation, status: ManagerStatus, request_id: u32) -> Self {
         Self {
             abi_version: MANAGER_ABI_VERSION,

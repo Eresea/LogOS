@@ -147,6 +147,19 @@ the real types. `ServiceRuntime` keeps package admission and image population (t
 package reader) and the manager state transitions, and delegates the rest. The module is not
 UEFI-gated, which is why its tests run on the host. No ABI or ADR-0060/0070 contract changed.
 
+## Wire frame reads
+
+`frame_bytes::FrameBytes` is the only reader of IPC staging and data frames. Frame bytes are
+untrusted, so it accepts a type only through `logos_abi::WireBytes` (every bit pattern is valid:
+integers, arrays, handles, integer-only structs) via `read`, or `logos_abi::WireDecode` (enum-bearing
+types; `wire_valid` checks every discriminant) via `decode`, which snapshots the bytes, validates
+the snapshot and materializes from that same snapshot. Reading a type with enum fields without
+`decode` does not compile. Writes keep `T: Copy`; a struct with padding copies its padding bytes into
+the frame. `IpcBytes`, `ManagerRequest`, `EventRequest` and `DirectoryRequest` are asserted
+padding-free; the other written wire types (for example `NetworkResponse`, `StorageResponse`,
+`DeviceResponse`, `PackageResponse`, `DirectoryResponse`, `NetworkPacketDescriptor`) are padded and
+still open work: give them explicit reserved fields at the same offsets or write them field-wise.
+
 ## Persistence boundary
 
 Live supervisor restart rebuilds volatile state and abandons in-flight work. Durable state is introduced

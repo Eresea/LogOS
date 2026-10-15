@@ -8,6 +8,10 @@
 //! base pointer is a plain constructor argument so the type is host-testable
 //! over a stack buffer.
 
+use core::mem::MaybeUninit;
+
+use logos_abi::{WireBytes, WireDecode};
+
 use crate::memory::FrameAddress;
 
 /// A bounds-checked view over `capacity` bytes starting at `base`.
@@ -73,18 +77,46 @@ impl FrameBytes {
 
     /// Reads a `T` from offset zero (unaligned), or `None` if it does not fit.
     ///
-    /// Callers use this only for plain `repr(C)` wire types, and validate enum
-    /// discriminants on the raw bytes first where the type has any.
-    pub(crate) fn read<T: Copy>(&self) -> Option<T> {
+    /// `T: WireBytes` guarantees every bit pattern is a valid `T`, so no
+    /// validation is needed. Types with enum fields use [`Self::decode`].
+    pub(crate) fn read<T: WireBytes>(&self) -> Option<T> {
         if core::mem::size_of::<T>() > self.capacity {
             return None;
         }
-        // SAFETY: the size check above keeps the read inside the region, and
-        // `read_unaligned` places no alignment requirement on `base`.
+        // SAFETY: the size check above keeps the read inside the region,
+        // `read_unaligned` places no alignment requirement on `base`, and
+        // `T: WireBytes` makes any bytes a valid `T`.
         Some(unsafe { core::ptr::read_unaligned(self.base.cast::<T>()) })
     }
 
+    /// Decodes a `T` from offset zero, or `None` if it does not fit or its
+    /// bytes are not a valid `T` (for example an undeclared enum discriminant).
+    ///
+    /// The frame may be mutated concurrently by a user task, so the bytes are
+    /// first copied (volatile, byte-wise) into a local, and validation and
+    /// materialization both use that snapshot; the validated bytes are exactly
+    /// the bytes that become the value.
+    pub(crate) fn decode<T: WireDecode>(&self) -> Option<T> {
+        let size = core::mem::size_of::<T>();
+        if size > self.capacity {
+            return None;
+        }
+        let mut value = MaybeUninit::<T>::uninit();
+        let dst = value.as_mut_ptr().cast::<u8>();
+        for index in 0..size {
+            // SAFETY: `index < size <= capacity`, so the source byte is inside
+            // the region; `dst` is valid for `size` bytes of writes.
+            unsafe { dst.add(index).write(core::ptr::read_volatile(self.base.add(index))) };
+        }
+        finish_decode(value)
+    }
+
     /// Writes `value` at offset zero (unaligned); `false` if it does not fit.
+    ///
+    /// Writing a valid `T` is always sound. A struct with padding copies its
+    /// padding bytes too, which are not guaranteed initialized; wire types
+    /// written into user-visible frames should be padding-free (see
+    /// `docs/architecture.md`, wire type padding).
     pub(crate) fn write<T: Copy>(&mut self, value: T) -> bool {
         self.write_init(value)
     }
@@ -99,20 +131,6 @@ impl FrameBytes {
         // `write_unaligned` places no alignment requirement on `base`.
         unsafe { core::ptr::write_unaligned(self.base.cast::<T>(), value) };
         true
-    }
-
-    /// Volatile variant of [`Self::read`] for frames a user task can mutate
-    /// concurrently; the access is a single unaligned-tolerant copy.
-    pub(crate) fn read_volatile<T: Copy>(&self) -> Option<T> {
-        if core::mem::size_of::<T>() > self.capacity {
-            return None;
-        }
-        if self.base.align_offset(core::mem::align_of::<T>()) != 0 {
-            return None;
-        }
-        // SAFETY: the size check above keeps the read inside the region and the
-        // alignment check makes the volatile access well defined.
-        Some(unsafe { core::ptr::read_volatile(self.base.cast::<T>()) })
     }
 
     /// Volatile variant of [`Self::write`]; `false` if it does not fit or the
@@ -141,15 +159,45 @@ pub(crate) fn value_bytes<T: Copy>(value: &T) -> &[u8] {
 }
 
 /// Reads a `T` (unaligned) from the start of `bytes`, or `None` if `bytes` is
-/// shorter than `T`. Same contract as [`FrameBytes::read`], for byte arrays that
-/// are already inside a validated message.
-pub(crate) fn read_from_slice<T: Copy>(bytes: &[u8]) -> Option<T> {
+/// shorter than `T`. `T: WireBytes` makes every byte pattern valid; see
+/// [`decode_from_slice`] for types with enum fields.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn read_from_slice<T: WireBytes>(bytes: &[u8]) -> Option<T> {
     if core::mem::size_of::<T>() > bytes.len() {
         return None;
     }
     // SAFETY: the length check keeps the read inside `bytes`, and
     // `read_unaligned` places no alignment requirement on the pointer.
     Some(unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<T>()) })
+}
+
+/// Decodes a `T` (unaligned) from the start of `bytes`, or `None` if `bytes` is
+/// shorter than `T` or does not hold a valid `T`. Same contract as
+/// [`FrameBytes::decode`], for byte arrays already copied out of a frame.
+pub(crate) fn decode_from_slice<T: WireDecode>(bytes: &[u8]) -> Option<T> {
+    let size = core::mem::size_of::<T>();
+    let bytes = bytes.get(..size)?;
+    let mut value = MaybeUninit::<T>::uninit();
+    // SAFETY: `value` is valid for `size` bytes and `bytes` is exactly `size`
+    // bytes; the regions cannot overlap (`value` is a fresh local).
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), value.as_mut_ptr().cast::<u8>(), size)
+    };
+    finish_decode(value)
+}
+
+/// Validates the fully initialized bytes of `value`, then materializes it.
+fn finish_decode<T: WireDecode>(value: MaybeUninit<T>) -> Option<T> {
+    // SAFETY: both callers have written all `size_of::<T>()` bytes of `value`.
+    let snapshot = unsafe {
+        core::slice::from_raw_parts(value.as_ptr().cast::<u8>(), core::mem::size_of::<T>())
+    };
+    if !T::wire_valid(snapshot) {
+        return None;
+    }
+    // SAFETY: the bytes are initialized and `wire_valid` accepted them, which
+    // is the `WireDecode` contract for them being a valid `T`.
+    Some(unsafe { value.assume_init() })
 }
 
 #[cfg(test)]
@@ -160,7 +208,34 @@ mod tests {
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     struct Wire {
         a: u32,
+        a_hi: u32,
         b: u64,
+    }
+
+    // SAFETY: `repr(C)`, integer fields only, no padding.
+    unsafe impl WireBytes for Wire {}
+
+    #[repr(u8)]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Mode {
+        Off = 0,
+        Fast = 1,
+        Slow = 2,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct Command {
+        mode: Mode,
+        other: Mode,
+        len: u16,
+    }
+
+    impl WireDecode for Command {
+        fn wire_valid(bytes: &[u8]) -> bool {
+            let ok = |offset: usize| bytes.get(offset).is_some_and(|raw| *raw <= Mode::Slow as u8);
+            ok(core::mem::offset_of!(Command, mode)) && ok(core::mem::offset_of!(Command, other))
+        }
     }
 
     fn view(buffer: &mut [u8]) -> FrameBytes {
@@ -206,7 +281,7 @@ mod tests {
     #[test]
     fn read_write_exact_capacity_and_one_over() {
         let size = core::mem::size_of::<Wire>();
-        let value = Wire { a: 0xdead_beef, b: 0x0123_4567_89ab_cdef };
+        let value = Wire { a: 0xdead_beef, a_hi: 1, b: 0x0123_4567_89ab_cdef };
 
         let mut exact = std::vec![0u8; size];
         let mut frame = view(&mut exact);
@@ -226,7 +301,7 @@ mod tests {
         for offset in 0..8 {
             let region = &mut backing[offset..offset + core::mem::size_of::<Wire>()];
             let mut frame = view(region);
-            let value = Wire { a: offset as u32, b: !(offset as u64) };
+            let value = Wire { a: offset as u32, a_hi: 2, b: !(offset as u64) };
             assert!(frame.write(value));
             assert_eq!(frame.read::<Wire>(), Some(value));
         }
@@ -242,23 +317,59 @@ mod tests {
     }
 
     #[test]
-    fn volatile_round_trip_and_bounds() {
+    fn volatile_write_round_trip_and_bounds() {
         #[repr(align(8))]
         struct Aligned([u8; 16]);
         let mut backing = Aligned([0; 16]);
         let mut frame = unsafe { FrameBytes::from_raw(backing.0.as_mut_ptr(), 16) };
         assert!(frame.write_volatile(0x1122_3344_5566_7788u64));
-        assert_eq!(frame.read_volatile::<u64>(), Some(0x1122_3344_5566_7788));
+        assert_eq!(frame.read::<u64>(), Some(0x1122_3344_5566_7788));
         assert!(!frame.write_volatile([0u8; 17]));
-        assert!(frame.read_volatile::<[u8; 17]>().is_none());
+        assert!(frame.read::<[u8; 17]>().is_none());
         let mut frame = unsafe { FrameBytes::from_raw(backing.0.as_mut_ptr().add(1), 15) };
         assert!(!frame.write_volatile(1u64));
-        assert!(frame.read_volatile::<u64>().is_none());
+    }
+
+    #[test]
+    fn decode_rejects_every_invalid_discriminant() {
+        let mut buffer = [0u8; 4];
+        for mode in 0..=255u8 {
+            for other in [0u8, 2, mode] {
+                buffer[0] = mode;
+                buffer[1] = other;
+                buffer[2] = 9;
+                let frame = view(&mut buffer);
+                let expected = mode <= 2 && other <= 2;
+                assert_eq!(frame.decode::<Command>().is_some(), expected, "{mode} {other}");
+                assert_eq!(decode_from_slice::<Command>(&buffer).is_some(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_round_trips_and_checks_bounds() {
+        let value = Command { mode: Mode::Slow, other: Mode::Fast, len: 0x0a0b };
+        let mut buffer = [0u8; 4];
+        let mut frame = view(&mut buffer);
+        assert!(frame.write(value));
+        assert_eq!(frame.decode::<Command>(), Some(value));
+        assert_eq!(decode_from_slice::<Command>(&buffer), Some(value));
+        assert!(decode_from_slice::<Command>(&buffer[..3]).is_none());
+        let mut short = [0u8; 3];
+        assert!(view(&mut short).decode::<Command>().is_none());
+        let _ = (Mode::Off, Mode::Fast);
+    }
+
+    #[test]
+    fn decode_does_not_materialize_on_rejection() {
+        let mut buffer = [3u8, 0, 0, 0];
+        let frame = view(&mut buffer);
+        assert!(frame.decode::<Command>().is_none());
     }
 
     #[test]
     fn value_bytes_round_trips_through_read_from_slice() {
-        let wire = Wire { a: 7, b: 9 };
+        let wire = Wire { a: 7, a_hi: 0, b: 9 };
         let bytes = value_bytes(&wire);
         assert_eq!(bytes.len(), core::mem::size_of::<Wire>());
         assert_eq!(read_from_slice::<Wire>(bytes), Some(wire));

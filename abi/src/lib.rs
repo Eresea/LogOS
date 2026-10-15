@@ -22,6 +22,9 @@ mod storage_api;
 mod sysinfo;
 mod user_api;
 mod walltime;
+mod wire;
+
+pub use wire::{WireBytes, WireDecode};
 
 pub use atrium::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumControlResponse, AtriumSection,
@@ -609,6 +612,13 @@ pub struct StorageRequest {
 }
 
 impl StorageRequest {
+    /// Checks the `operation` discriminant of a raw `StorageRequest`.
+    pub fn wire_enums_valid(bytes: &[u8]) -> bool {
+        bytes.get(core::mem::offset_of!(Self, operation)).is_some_and(|raw| {
+            *raw >= StorageOperation::Read as u8 && *raw <= StorageOperation::AbortTransaction as u8
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         operation: StorageOperation,
@@ -686,6 +696,10 @@ pub struct StorageMapRequest {
     pub window_generation: u32,
     pub reserved_tail: u32,
 }
+
+// SAFETY: `repr(C)` with only integer fields; every bit pattern is a valid value
+// (the explicit reserved fields are checked by the Core, not by the type).
+unsafe impl WireBytes for StorageMapRequest {}
 
 /// Private Core-to-Storage result for a read-only cache mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
