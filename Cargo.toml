@@ -33,6 +33,8 @@ members = [
     "ui-lsp",
 ]
 resolver = "3"
+# cargo-fuzz targets need nightly + libFuzzer; see docs/development.md.
+exclude = ["fuzz"]
 
 [profile.release.package.logos-display]
 opt-level = 3

@@ -1,0 +1,55 @@
+[package]
+name = "logos-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not part of the LogOS workspace (see `exclude` in the root Cargo.toml): the
+# fuzz targets need nightly + libFuzzer and must not affect the normal gates.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+logos-abi = { path = "../abi" }
+logos-package = { path = "../package" }
+logos-storage = { path = "../storage" }
+logos-network = { path = "../network" }
+logos-vnext = { path = ".." }
+
+[[bin]]
+name = "package_decode"
+path = "fuzz_targets/package_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "abi_messages"
+path = "fuzz_targets/abi_messages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "storage_volumes"
+path = "fuzz_targets/storage_volumes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "network_frames"
+path = "fuzz_targets/network_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "elf_plan"
+path = "fuzz_targets/elf_plan.rs"
+test = false
+doc = false
+bench = false
