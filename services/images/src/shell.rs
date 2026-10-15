@@ -74,7 +74,7 @@ fn flush_pending<T: Copy>(capability: logos_abi::CapabilityHandle, pending: &mut
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let input = match common::capability_handle(INPUT_CAPABILITY) {

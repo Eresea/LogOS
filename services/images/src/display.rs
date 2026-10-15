@@ -330,7 +330,7 @@ fn publish_cursor(
 
 static mut DISPLAY: logos_display::Display = logos_display::Display::new(1);
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let display = unsafe { &mut *core::ptr::addr_of_mut!(DISPLAY) };

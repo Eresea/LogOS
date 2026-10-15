@@ -1299,7 +1299,7 @@ fn program_client_live(client: logos_abi::ServiceHandle) -> bool {
     .is_ok_and(|clients| clients.into_iter().any(|(peer, _)| peer == client))
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let input = common::capability_handle(INPUT_CAPABILITY).unwrap_or_else(|_| common::idle());

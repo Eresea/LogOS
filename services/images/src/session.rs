@@ -289,7 +289,7 @@ fn close_session(
     slot.reset();
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let sessions = unsafe { &mut *core::ptr::addr_of_mut!(SESSIONS) };

@@ -321,7 +321,7 @@ fn publish_status(
 }
 
 #[cfg(target_os = "none")]
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let request_cap = common::capability_handle(ATRIUM_REQUEST).unwrap_or_else(|_| common::idle());

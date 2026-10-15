@@ -1048,7 +1048,7 @@ fn run_filesystem(capability: StorageCapability, blocks: u64) -> ! {
 
 /// The storage image owns the durable format and namespace. It discovers the
 /// whole raw volume, reopens valid media, or formats only blank media.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _start() -> ! {
     common::heartbeat();
     common::init_service_allocator();

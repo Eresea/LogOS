@@ -57,7 +57,7 @@ static mut PENDING_SESSION_INPUT: Option<IpcBytes> = None;
 static mut PENDING_CLOSES: logos_terminal::PaneCloses =
     [None; logos_terminal::MAX_TERMINAL_SESSIONS];
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let terminal = unsafe { &mut *core::ptr::addr_of_mut!(TERMINAL) };

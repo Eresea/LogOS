@@ -863,7 +863,7 @@ fn active_session() -> u8 {
     unsafe { *core::ptr::addr_of!(ACTIVE_SESSION) }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _start() -> ! {
     common::init_service_allocator();
     let capabilities = IpcCapabilities {
