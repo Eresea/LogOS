@@ -33,6 +33,7 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
             crate::user_mode::FaultDisposition::Retry => false,
             crate::user_mode::FaultDisposition::Contained => true,
             crate::user_mode::FaultDisposition::Fatal(_branch) => {
+                report_task_fault(fx_context, vector, fault_address);
                 #[cfg(feature = "qemu-proof")]
                 log_kernel_fault(fx_context, handle, vector, fault_address, _branch);
                 fatal(b"LogOS vNext: fatal task fault")
@@ -139,6 +140,30 @@ extern "C" fn schedule_from_interrupt(fx_context: usize, cpu: usize, vector: usi
         crate::proof::observe_ring3_cpu(cpu, next_root, crate::arch::current_cr3());
     }
     SCHEDULER.saved_context(next).unwrap_or_else(|| fatal(b"LogOS vNext: no context"))
+}
+
+/// Prints vector, error code, RIP and (for #PF) CR2 for a fatal task fault.
+fn report_task_fault(fx_context: usize, vector: usize, fault_address: usize) {
+    use core::fmt::Write;
+
+    let gpr =
+        unsafe { core::ptr::read_unaligned((fx_context + FX_CONTEXT_POINTER) as *const usize) };
+    let has_error_code = matches!(vector, 13 | 14);
+    let skip = if has_error_code { 8 } else { 0 };
+    let read = |offset: usize| unsafe {
+        core::ptr::read_unaligned((gpr + VECTOR_OFFSET + offset) as *const usize)
+    };
+    let error = if has_error_code { read(8) } else { 0 };
+    let (rip, cs) = (read(8 + skip), read(16 + skip));
+    let mut line = LineBuf::new();
+    let _ = write!(
+        line,
+        "LogOS vNext: exception vector={vector:#x} error={error:#x} rip={rip:#x} cs={cs:#x}"
+    );
+    if vector == 14 {
+        let _ = write!(line, " cr2={fault_address:#x}");
+    }
+    debug_line(line.as_bytes());
 }
 
 #[cfg(feature = "qemu-proof")]
@@ -391,6 +416,41 @@ global_asm!(
     "1:",
     "hlt",
     "jmp 1b",
+);
+
+global_asm!(
+    // One stub per architectural exception vector. Vectors without a CPU error
+    // code push a zero so the frame is uniform: [vector, error, rip, cs, ...].
+    ".irp v, 0,1,2,3,4,5,6,7,9,15,16,18,19,20,22,23,24,25,26,27,28,31",
+    "exc_\\v:",
+    "push 0",
+    "push \\v",
+    "jmp exc_common",
+    ".endr",
+    ".irp v, 8,10,11,12,13,14,17,21,29,30",
+    "exc_\\v:",
+    "push \\v",
+    "jmp exc_common",
+    ".endr",
+    "exc_common:",
+    "cld",
+    // The UEFI target uses the Microsoft x64 ABI: first argument in rcx plus
+    // 32 bytes of shadow space.
+    "mov rcx, rsp",
+    "and rsp, -16",
+    "sub rsp, 32",
+    "call exception_fatal_rust",
+    "2:",
+    "hlt",
+    "jmp 2b",
+    ".section .rodata",
+    ".balign 8",
+    ".global exception_stubs",
+    "exception_stubs:",
+    ".irp v, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
+    ".quad exc_\\v",
+    ".endr",
+    ".section .text",
 );
 
 global_asm!(

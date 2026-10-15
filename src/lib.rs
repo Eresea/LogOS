@@ -144,8 +144,29 @@ pub fn block_current() {
 
 #[cfg(target_os = "uefi")]
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
-    arch::fatal(b"LogOS vNext: panic")
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    use core::{
+        fmt::Write,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    static PANICKING: AtomicBool = AtomicBool::new(false);
+    // A panic while formatting a panic must not recurse.
+    if PANICKING.swap(true, Ordering::AcqRel) {
+        arch::fatal(b"LogOS vNext: panic");
+    }
+    let mut line = arch::LineBuf::new();
+    let _ = line.write_str("LogOS vNext: panic at ");
+    match info.location() {
+        Some(location) => {
+            let _ = write!(line, "{}:{}:{}", location.file(), location.line(), location.column());
+        }
+        None => {
+            let _ = line.write_str("<unknown>");
+        }
+    }
+    let _ = write!(line, ": {}", info.message());
+    arch::fatal(line.as_bytes())
 }
 
 #[cfg(target_os = "uefi")]

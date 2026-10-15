@@ -198,6 +198,8 @@ const TSS_SELECTOR: u16 = 0x28;
 static APIC: AtomicUsize = AtomicUsize::new(0);
 static TSC_PER_US: AtomicU64 = AtomicU64::new(1);
 static HALTED: AtomicBool = AtomicBool::new(false);
+/// Bit per CPU whose IDT is loaded and can therefore take the halt NMI.
+static IDT_LOADED: AtomicU64 = AtomicU64::new(0);
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static APIC_TIMER_COUNT: AtomicU32 = AtomicU32::new(10_000_000);
@@ -1609,16 +1611,98 @@ fn enter_scheduler(_cpu: usize) -> ! {
 }
 
 pub fn fatal(message: &[u8]) -> ! {
+    unsafe { asm!("cli") };
     if !HALTED.swap(true, Ordering::AcqRel) {
         debug_line(b"LogOS vNext: FATAL");
         debug_line(message);
+        halt_other_cpus();
     }
+    halt_forever()
+}
+
+fn halt_forever() -> ! {
     unsafe {
         asm!("cli");
         loop {
             asm!("hlt");
         }
     }
+}
+
+/// Stops every other CPU that has an IDT loaded with an NMI, which is delivered
+/// even to CPUs spinning with interrupts disabled. The receiving handler sees
+/// `HALTED` and parks. Never calls `fatal`, so it cannot recurse.
+fn halt_other_cpus() {
+    if APIC.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let loaded = IDT_LOADED.load(Ordering::Acquire);
+    let own_id = unsafe { read_apic(APIC_ID) } >> 24;
+    for (cpu, apic_id) in APIC_IDS.iter().enumerate().take(CPU_COUNT.load(Ordering::Acquire)) {
+        let apic_id = apic_id.load(Ordering::Acquire);
+        if loaded & (1 << cpu) == 0 || apic_id == own_id {
+            continue;
+        }
+        unsafe {
+            let mut spins = 0u32;
+            while read_apic(APIC_ICR_LOW) & 0x1000 != 0 && spins < 1_000_000 {
+                spins += 1;
+                core::hint::spin_loop();
+            }
+            write_apic(APIC_ICR_HIGH, apic_id << 24);
+            // Fixed destination, NMI delivery mode, level assert.
+            write_apic(APIC_ICR_LOW, 0x4400);
+        }
+    }
+}
+
+/// Fixed-size `core::fmt::Write` sink for one debug-console line. Output beyond
+/// the capacity is truncated.
+pub(crate) struct LineBuf {
+    bytes: [u8; 240],
+    len: usize,
+}
+
+impl LineBuf {
+    pub(crate) const fn new() -> Self {
+        Self { bytes: [0; 240], len: 0 }
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl core::fmt::Write for LineBuf {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let room = self.bytes.len() - self.len;
+        let take = text.len().min(room);
+        self.bytes[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
+        self.len += take;
+        Ok(())
+    }
+}
+
+/// Rust half of the vector-specific exception stubs in `context.rs`.
+/// `frame` points at `[vector, error code, rip, cs, rflags, rsp, ss]`.
+#[unsafe(no_mangle)]
+extern "C" fn exception_fatal_rust(frame: *const u64) -> ! {
+    use core::fmt::Write;
+
+    let [vector, error, rip, cs, rflags, rsp] =
+        core::array::from_fn(|index| unsafe { frame.add(index).read_volatile() });
+    if vector == 2 && HALTED.load(Ordering::Acquire) {
+        halt_forever();
+    }
+    let mut line = LineBuf::new();
+    let _ = write!(
+        line,
+        "LogOS vNext: exception vector={vector:#x} error={error:#x} rip={rip:#x} cs={cs:#x} rflags={rflags:#x} rsp={rsp:#x}"
+    );
+    if vector == 14 {
+        let _ = write!(line, " cr2={:#x}", page_fault_address());
+    }
+    fatal(line.as_bytes())
 }
 
 pub(crate) fn power_control(process: ProcessHandle, action: usize) -> bool {
@@ -1775,6 +1859,10 @@ fn install_idt(cpu: usize) {
             KERNEL_CODE_SELECTOR,
             0x8e,
         );
+        // Architectural exceptions that are not task faults report and halt all CPUs.
+        for (vector, stub) in exception_stubs.iter().enumerate() {
+            idt[vector] = IdtEntry::new(*stub as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        }
         // Fault vectors sharing context_common: only #GP and #PF push error codes.
         idt[6] =
             IdtEntry::new(user_fault_no_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
@@ -1792,6 +1880,7 @@ fn load_idt(cpu: usize) {
         base: unsafe { CPU_IDTS[cpu].as_ptr() as u64 },
     };
     unsafe { asm!("lidt [{}]", in(reg) &pointer) };
+    IDT_LOADED.fetch_or(1 << cpu, Ordering::AcqRel);
 }
 
 fn configure_sse() {
@@ -2291,6 +2380,7 @@ unsafe extern "C" {
     fn user_fault_no_error();
     fn user_gp_fault_error();
     fn user_pf_fault_error();
+    static exception_stubs: [unsafe extern "C" fn(); 32];
     fn task_bootstrap();
     fn ap_trampoline_start();
     fn ap_trampoline_end();
