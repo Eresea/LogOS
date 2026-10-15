@@ -198,6 +198,8 @@ const TSS_SELECTOR: u16 = 0x28;
 static APIC: AtomicUsize = AtomicUsize::new(0);
 static TSC_PER_US: AtomicU64 = AtomicU64::new(1);
 static HALTED: AtomicBool = AtomicBool::new(false);
+/// Bit per CPU whose IDT is loaded and can therefore take the halt NMI.
+static IDT_LOADED: AtomicU64 = AtomicU64::new(0);
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 static CPU_COUNT: AtomicUsize = AtomicUsize::new(1);
 static APIC_TIMER_COUNT: AtomicU32 = AtomicU32::new(10_000_000);
@@ -358,6 +360,11 @@ impl IdtEntry {
         reserved: 0,
     };
 
+    fn with_ist(mut self, ist: u8) -> Self {
+        self.ist = ist;
+        self
+    }
+
     fn new(handler: usize, selector: u16, attributes: u8) -> Self {
         Self {
             offset_low: handler as u16,
@@ -414,6 +421,16 @@ impl TaskStateSegment {
         }
     }
 }
+
+/// Dedicated exception stacks selected through the TSS IST so #DF, NMI and #MC
+/// never run on a possibly corrupt or overflowed kernel stack.
+const IST_STACK_SIZE: usize = 16 * 1024;
+const IST_DOUBLE_FAULT: u8 = 1;
+const IST_NMI: u8 = 2;
+const IST_MACHINE_CHECK: u8 = 3;
+const IST_STACKS: usize = 3;
+static mut IST_STACK_MEMORY: [[CpuStack<IST_STACK_SIZE>; IST_STACKS]; MAX_CPUS] =
+    [const { [const { CpuStack::new() }; IST_STACKS] }; MAX_CPUS];
 
 static mut CPU_TSS: [TaskStateSegment; MAX_CPUS] = [const { TaskStateSegment::new() }; MAX_CPUS];
 
@@ -1051,6 +1068,11 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
     );
     reserve_storage_frames(
         pool,
+        core::ptr::addr_of!(IST_STACK_MEMORY) as usize,
+        core::mem::size_of::<[[CpuStack<IST_STACK_SIZE>; IST_STACKS]; MAX_CPUS]>(),
+    );
+    reserve_storage_frames(
+        pool,
         core::ptr::addr_of!(crate::memory::KERNEL_GLOBAL_ALLOCATOR) as usize,
         core::mem::size_of::<crate::memory::KernelGlobalAllocator<'static>>(),
     );
@@ -1543,6 +1565,12 @@ fn initialize_post_uefi(cpu_count: usize) {
     install_gdt(0);
     install_idt(0);
     configure_sse();
+    match enable_smep_smap() {
+        (true, true) => debug_line(b"LogOS vNext: SMEP/SMAP enabled"),
+        (true, false) => debug_line(b"LogOS vNext: SMEP enabled, SMAP unsupported"),
+        (false, true) => debug_line(b"LogOS vNext: SMAP enabled, SMEP unsupported"),
+        (false, false) => debug_line(b"LogOS vNext: SMEP/SMAP unsupported"),
+    }
     enable_local_apic();
     configure_pic();
     if !configure_keyboard() {
@@ -1609,16 +1637,98 @@ fn enter_scheduler(_cpu: usize) -> ! {
 }
 
 pub fn fatal(message: &[u8]) -> ! {
+    unsafe { asm!("cli") };
     if !HALTED.swap(true, Ordering::AcqRel) {
         debug_line(b"LogOS vNext: FATAL");
         debug_line(message);
+        halt_other_cpus();
     }
+    halt_forever()
+}
+
+fn halt_forever() -> ! {
     unsafe {
         asm!("cli");
         loop {
             asm!("hlt");
         }
     }
+}
+
+/// Stops every other CPU that has an IDT loaded with an NMI, which is delivered
+/// even to CPUs spinning with interrupts disabled. The receiving handler sees
+/// `HALTED` and parks. Never calls `fatal`, so it cannot recurse.
+fn halt_other_cpus() {
+    if APIC.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let loaded = IDT_LOADED.load(Ordering::Acquire);
+    let own_id = unsafe { read_apic(APIC_ID) } >> 24;
+    for (cpu, apic_id) in APIC_IDS.iter().enumerate().take(CPU_COUNT.load(Ordering::Acquire)) {
+        let apic_id = apic_id.load(Ordering::Acquire);
+        if loaded & (1 << cpu) == 0 || apic_id == own_id {
+            continue;
+        }
+        unsafe {
+            let mut spins = 0u32;
+            while read_apic(APIC_ICR_LOW) & 0x1000 != 0 && spins < 1_000_000 {
+                spins += 1;
+                core::hint::spin_loop();
+            }
+            write_apic(APIC_ICR_HIGH, apic_id << 24);
+            // Fixed destination, NMI delivery mode, level assert.
+            write_apic(APIC_ICR_LOW, 0x4400);
+        }
+    }
+}
+
+/// Fixed-size `core::fmt::Write` sink for one debug-console line. Output beyond
+/// the capacity is truncated.
+pub(crate) struct LineBuf {
+    bytes: [u8; 240],
+    len: usize,
+}
+
+impl LineBuf {
+    pub(crate) const fn new() -> Self {
+        Self { bytes: [0; 240], len: 0 }
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl core::fmt::Write for LineBuf {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let room = self.bytes.len() - self.len;
+        let take = text.len().min(room);
+        self.bytes[self.len..self.len + take].copy_from_slice(&text.as_bytes()[..take]);
+        self.len += take;
+        Ok(())
+    }
+}
+
+/// Rust half of the vector-specific exception stubs in `context.rs`.
+/// `frame` points at `[vector, error code, rip, cs, rflags, rsp, ss]`.
+#[unsafe(no_mangle)]
+extern "C" fn exception_fatal_rust(frame: *const u64) -> ! {
+    use core::fmt::Write;
+
+    let [vector, error, rip, cs, rflags, rsp] =
+        core::array::from_fn(|index| unsafe { frame.add(index).read_volatile() });
+    if vector == 2 && HALTED.load(Ordering::Acquire) {
+        halt_forever();
+    }
+    let mut line = LineBuf::new();
+    let _ = write!(
+        line,
+        "LogOS vNext: exception vector={vector:#x} error={error:#x} rip={rip:#x} cs={cs:#x} rflags={rflags:#x} rsp={rsp:#x}"
+    );
+    if vector == 14 {
+        let _ = write!(line, " cr2={:#x}", page_fault_address());
+    }
+    fatal(line.as_bytes())
 }
 
 pub(crate) fn power_control(process: ProcessHandle, action: usize) -> bool {
@@ -1698,6 +1808,7 @@ fn install_gdt(cpu: usize) {
     unsafe {
         CPU_GDTS[cpu][..GDT.len()].copy_from_slice(&GDT);
         write_tss_rsp0(cpu, CPU_LOCALS[cpu].user_entry_stack_top);
+        write_tss_ist(cpu);
         let base = core::ptr::addr_of!(CPU_TSS[cpu]) as u64;
         let limit = (core::mem::size_of::<TaskStateSegment>() - 1) as u64;
         let low = (limit & 0xffff)
@@ -1734,6 +1845,16 @@ fn install_gdt(cpu: usize) {
 pub(crate) fn set_task_kernel_stack(cpu: usize, stack_top: usize) {
     unsafe {
         write_tss_rsp0(cpu, stack_top as u64);
+    }
+}
+
+unsafe fn write_tss_ist(cpu: usize) {
+    unsafe {
+        let tss = core::ptr::addr_of_mut!(CPU_TSS[cpu]);
+        for (index, stack) in IST_STACK_MEMORY[cpu].iter().enumerate() {
+            let top = stack.0.as_ptr_range().end as u64;
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*tss).ist[index]), top);
+        }
     }
 }
 
@@ -1775,6 +1896,13 @@ fn install_idt(cpu: usize) {
             KERNEL_CODE_SELECTOR,
             0x8e,
         );
+        // Architectural exceptions that are not task faults report and halt all CPUs.
+        for (vector, stub) in exception_stubs.iter().enumerate() {
+            idt[vector] = IdtEntry::new(*stub as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        }
+        for (vector, ist) in [(8, IST_DOUBLE_FAULT), (2, IST_NMI), (18, IST_MACHINE_CHECK)] {
+            idt[vector] = idt[vector].with_ist(ist);
+        }
         // Fault vectors sharing context_common: only #GP and #PF push error codes.
         idt[6] =
             IdtEntry::new(user_fault_no_error as *const () as usize, KERNEL_CODE_SELECTOR, 0x8e);
@@ -1792,6 +1920,61 @@ fn load_idt(cpu: usize) {
         base: unsafe { CPU_IDTS[cpu].as_ptr() as u64 },
     };
     unsafe { asm!("lidt [{}]", in(reg) &pointer) };
+    IDT_LOADED.fetch_or(1 << cpu, Ordering::AcqRel);
+}
+
+const CR4_SMEP: u64 = 1 << 20;
+const CR4_SMAP: u64 = 1 << 21;
+static SMAP_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turns on SMEP and SMAP when CPUID leaf 7 reports them. Runs on the BSP and
+/// every AP; returns `(smep, smap)` as enabled on this CPU.
+#[allow(unused_unsafe)]
+fn enable_smep_smap() -> (bool, bool) {
+    let (max_leaf, _, _, _) = cpuid(0, 0);
+    if max_leaf < 7 {
+        return (false, false);
+    }
+    let (_, ebx, _, _) = cpuid(7, 0);
+    let smep = ebx & (1 << 7) != 0;
+    let smap = ebx & (1 << 20) != 0;
+    unsafe {
+        let mut cr4: u64;
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        if smep {
+            cr4 |= CR4_SMEP;
+        }
+        if smap {
+            cr4 |= CR4_SMAP;
+        }
+        asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+    }
+    if smap {
+        SMAP_ENABLED.store(true, Ordering::Release);
+    }
+    (smep, smap)
+}
+
+#[allow(unused_unsafe)]
+fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let r = unsafe { core::arch::x86_64::__cpuid_count(leaf, subleaf) };
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+/// Runs `f` with supervisor access to user pages permitted (`stac`/`clac`).
+/// Every kernel dereference of a user virtual address must be bracketed by
+/// this; accesses through identity-mapped physical frames are supervisor pages
+/// and need no bracket. Interrupts clear RFLAGS.AC on entry, so a trap inside
+/// `f` cannot leak the access window into a handler.
+#[allow(dead_code)]
+pub(crate) fn with_user_access<R>(f: impl FnOnce() -> R) -> R {
+    if !SMAP_ENABLED.load(Ordering::Acquire) {
+        return f();
+    }
+    unsafe { asm!("stac", options(nomem, nostack)) };
+    let result = f();
+    unsafe { asm!("clac", options(nomem, nostack)) };
+    result
 }
 
 fn configure_sse() {
@@ -2239,6 +2422,7 @@ extern "C" fn ap_entry(_cpu: usize) -> ! {
     install_gdt(cpu);
     install_idt(cpu);
     configure_sse();
+    enable_smep_smap();
     enable_local_apic();
     calibrate_timer();
     configure_timer();
@@ -2291,6 +2475,7 @@ unsafe extern "C" {
     fn user_fault_no_error();
     fn user_gp_fault_error();
     fn user_pf_fault_error();
+    static exception_stubs: [unsafe extern "C" fn(); 32];
     fn task_bootstrap();
     fn ap_trampoline_start();
     fn ap_trampoline_end();

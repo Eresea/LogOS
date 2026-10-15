@@ -55,7 +55,8 @@ fi
 
 log="$target/qemu-proof-linux-$cpus.log"
 rm -f "$log"
-qemu-system-x86_64 -machine q35 -m 256M -smp "$cpus" \
+# -cpu max exposes SMEP/SMAP under TCG so the kernel actually enables them.
+qemu-system-x86_64 -machine q35 -cpu max -m 256M -smp "$cpus" \
     -drive "if=pflash,format=raw,readonly=on,file=$ovmf" \
     -drive "format=raw,file=fat:rw:$esp" \
     -drive "if=none,id=storage-disk,format=raw,file=$disk,cache=writethrough" \
