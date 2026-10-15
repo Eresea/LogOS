@@ -183,10 +183,8 @@ fn request_strategy() -> impl Strategy<Value = NetworkRequest> {
     )
         .prop_map(
             |(operation, flags, request_id, handle, generation, epoch, payload_len, tail)| {
-                let mut request = NetworkRequest::new(
-                    NetworkOperation::from_raw(operation).unwrap(),
-                    request_id,
-                );
+                let mut request =
+                    NetworkRequest::new(NetworkOperation::from_raw(operation).unwrap(), request_id);
                 request.flags = flags;
                 request.handle = handle;
                 request.generation = generation;

@@ -88,7 +88,10 @@ fn mutations() -> impl Strategy<Value = Vec<Mutation>> {
         1 => proptest::collection::vec(any::<u8>(), 1..32).prop_map(MutationKind::Garbage),
         1 => Just(MutationKind::Zero),
     ];
-    proptest::collection::vec((block, kind).prop_map(|(block, kind)| Mutation { block, kind }), 1..8)
+    proptest::collection::vec(
+        (block, kind).prop_map(|(block, kind)| Mutation { block, kind }),
+        1..8,
+    )
 }
 
 fn garbage_store(blocks: usize, seeds: &[Vec<u8>]) -> VecStore {
@@ -108,7 +111,12 @@ fn garbage_store(blocks: usize, seeds: &[Vec<u8>]) -> VecStore {
 struct CollectSink(Vec<(u64, u16, Vec<u8>)>);
 
 impl ReplaySink for CollectSink {
-    fn record(&mut self, transaction_id: u64, kind: u16, payload: &[u8]) -> Result<(), ReplayError> {
+    fn record(
+        &mut self,
+        transaction_id: u64,
+        kind: u16,
+        payload: &[u8],
+    ) -> Result<(), ReplayError> {
         self.0.push((transaction_id, kind, payload.to_vec()));
         Ok(())
     }

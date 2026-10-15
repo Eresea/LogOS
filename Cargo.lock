@@ -373,6 +373,7 @@ dependencies = [
  "logos-abi",
  "logos-package",
  "logos-storage",
+ "proptest",
  "uefi",
 ]
 

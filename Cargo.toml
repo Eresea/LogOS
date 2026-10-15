@@ -67,3 +67,6 @@ name = "logos-vnext"
 path = "src/main.rs"
 test = false
 bench = false
+
+[dev-dependencies]
+proptest = { version = "=1.6.0", default-features = false, features = ["std"] }

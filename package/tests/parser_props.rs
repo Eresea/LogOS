@@ -53,7 +53,10 @@ fn manifest_strategy() -> impl Strategy<Value = PackageManifest> {
         name_strategy(),
         version_strategy(),
         prop_oneof![Just(None), (0usize..14).prop_map(Some)],
-        proptest::collection::vec((name_strategy(), range_strategy()), 0..=MAX_PACKAGE_DEPENDENCIES),
+        proptest::collection::vec(
+            (name_strategy(), range_strategy()),
+            0..=MAX_PACKAGE_DEPENDENCIES,
+        ),
     )
         .prop_map(|(name, version, service, deps)| {
             let name = PackageName::parse(&name).unwrap();

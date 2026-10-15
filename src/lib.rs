@@ -8,6 +8,8 @@ extern crate std;
 pub mod boot_resources;
 #[cfg(target_os = "uefi")]
 mod device_ipc;
+#[cfg(all(test, not(miri)))]
+mod elf_props;
 pub mod frame_pool;
 pub mod loader;
 pub mod memory;
