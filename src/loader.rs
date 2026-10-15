@@ -163,12 +163,14 @@ impl LoadedImage {
         }
 
         for offset in 0..stack_pages {
-            image.push_page(
-                pool,
-                USER_STACK_BASE + offset * PAGE_SIZE,
-                MappingFlags::DATA,
-                owner,
-            )?;
+            let virtual_address = USER_STACK_BASE + offset * PAGE_SIZE;
+            // A PT_LOAD segment must not alias the stack: two pages for one
+            // virtual address would fail the later mapping and leak frames.
+            if image.page_for_virtual(virtual_address).is_some() {
+                image.reclaim(pool);
+                return Err(LoadError::Overlap);
+            }
+            image.push_page(pool, virtual_address, MappingFlags::DATA, owner)?;
         }
         Ok(image)
     }

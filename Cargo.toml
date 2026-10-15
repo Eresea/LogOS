@@ -33,6 +33,8 @@ members = [
     "ui-lsp",
 ]
 resolver = "3"
+# cargo-fuzz targets need nightly + libFuzzer; see docs/development.md.
+exclude = ["fuzz"]
 
 [profile.release.package.logos-display]
 opt-level = 3
@@ -67,3 +69,6 @@ name = "logos-vnext"
 path = "src/main.rs"
 test = false
 bench = false
+
+[dev-dependencies]
+proptest = { version = "=1.6.0", default-features = false, features = ["std"] }

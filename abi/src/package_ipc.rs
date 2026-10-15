@@ -80,7 +80,9 @@ impl PackageTarget {
         }
         match self.kind {
             PackageTargetKind::Service => {
-                if ServiceId::from_index(self.service.saturating_sub(1) as usize).is_none()
+                // Wire service ids are 1-based; 0 must not alias the first service.
+                if self.service == 0
+                    || ServiceId::from_index(self.service as usize - 1).is_none()
                     || self.name_len != 0
                     || self.name.iter().any(|byte| *byte != 0)
                 {
@@ -91,6 +93,7 @@ impl PackageTarget {
                 if self.service != 0
                     || self.name_len == 0
                     || self.name[self.name_len as usize..].iter().any(|byte| *byte != 0)
+                    || Self::program(&self.name[..self.name_len as usize]).is_none()
                 {
                     return Err(PackageStatus::Invalid);
                 }
@@ -446,6 +449,20 @@ mod tests {
             0,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn target_validation_rejects_zero_service_and_malformed_program_names() {
+        let mut zero = PackageTarget::service(ServiceId::Input);
+        zero.service = 0;
+        assert_eq!(zero.validate(), Err(PackageStatus::Invalid));
+        assert_eq!(PackageTarget::service(ServiceId::Input).validate(), Ok(()));
+        let mut bad_name = PackageTarget::program(b"demo").unwrap();
+        bad_name.name[0] = b'/';
+        assert_eq!(bad_name.validate(), Err(PackageStatus::Invalid));
+        bad_name.name[0] = b'-';
+        assert_eq!(bad_name.validate(), Err(PackageStatus::Invalid));
+        assert_eq!(PackageTarget::program(b"demo").unwrap().validate(), Ok(()));
     }
 
     #[test]

@@ -1,0 +1,64 @@
+name: Hardening
+
+# Slower checks than verify.yml: undefined-behaviour detection under Miri and a
+# headless Linux QEMU boot proof. Property tests run in verify.yml (cargo test).
+# cargo-fuzz targets (fuzz/) are for long manual runs and are not run here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup toolchain install nightly --profile minimal --component miri
+      # Host-tested crates and the pure kernel modules. The proptest suites
+      # (tests/*_props.rs, src/elf_props.rs) are `cfg(not(miri))`: proptest is
+      # far too slow under the interpreter, and abi/tests/wire_guards.rs is the
+      # Miri-friendly deterministic counterpart.
+      - name: logos-abi
+        run: cargo +nightly miri test -p logos-abi
+      - name: logos-package
+        run: cargo +nightly miri test -p logos-package
+      # Storage: only the block-request, virtio, transport, PCI and GPU modules.
+      # The journal/cow/catalog format tests are safe code over 4 KiB-block
+      # arrays and take minutes each under Miri (one test alone exceeded 25 min),
+      # so they are left to the native proptest suite in storage/tests.
+      - name: logos-storage (request, transport, virtio, pci, gpu)
+        run: |
+          cargo +nightly miri test -p logos-storage --lib -- request:: transport:: virtio:: pci:: gpu::
+      # The kernel library is built for the host in tests. Only modules without
+      # hardware access and without a FramePool are interpreted. Excluded:
+      # - memory::, frame_pool::, page_table::, loader::, program_runtime:: build
+      #   a FramePool, whose host-test metadata (PhysicalFrameManager.test_metadata,
+      #   addressed through an integer-cast pointer) violates Stacked and Tree
+      #   Borrows at src/memory.rs:666. Test scaffolding only; tracked separately.
+      # - arch, service_runtime, user_mode and the virtio drivers touch ports,
+      #   MMIO and identity-mapped physical memory, which Miri cannot model (and
+      #   are not compiled for the host).
+      - name: kernel library (pure modules)
+        run: |
+          cargo +nightly miri test -p logos-vnext --lib -- \
+            scheduler:: process:: boot_resources:: network_config:: health:: \
+            service_lifecycle:: service_manager:: service_images:: storage_ipc:: \
+            runtime_events:: runtime_ipc:: runtime_services:: supervisor:: virtio_net::
+
+  qemu-proof:
+    name: QEMU boot proof (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: rustup target add x86_64-unknown-uefi x86_64-unknown-none
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf binutils
+      - run: scripts/proof.sh -c 1 -t 600

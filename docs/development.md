@@ -73,3 +73,46 @@ system-pool placement, corrupts the inactive root, and boots again to prove torn
 ```powershell
 .\scripts\storage-proof.ps1 -ResetDisk
 ```
+
+## Parser hardening
+
+Code that consumes untrusted bytes has property tests (`proptest`, dev-dependency only) next to the
+host tests, so `cargo test --workspace` runs them:
+
+| Parser | Tests |
+| --- | --- |
+| Package manifests and headers (`package/`) | `package/tests/parser_props.rs` |
+| ABI message decoders and `wire_enums_valid` guards (`abi/`) | `abi/tests/message_props.rs`, `abi/tests/wire_guards.rs` |
+| Storage journal, copy-on-write and catalog formats (`storage/`) | `storage/tests/format_props.rs` |
+| Network frames, requests and checksums (`network/`) | `network/tests/packet_props.rs` |
+| ELF plan, loader and page tables (`src/`) | `src/elf_props.rs` (in-crate: the host frame pool only exists under the library's own `cfg(test)`) |
+
+Each asserts that arbitrary bytes never panic, that valid encodings round-trip, and that mutated
+valid inputs either still validate consistently or are rejected. `wire_guards.rs` uses a
+deterministic xorshift loop instead of proptest so it also runs under Miri, where an enum field a
+guard forgot to check is reported as undefined behaviour. Proptest suites are skipped under Miri.
+A failing case is saved to a `proptest-regressions` file; commit it with the fix.
+
+Long fuzz runs use cargo-fuzz. `fuzz/` is excluded from the workspace and is not part of CI:
+
+```text
+cargo install cargo-fuzz
+cd fuzz
+cargo +nightly fuzz list
+cargo +nightly fuzz run package_decode -- -max_total_time=300
+```
+
+Targets are `package_decode`, `abi_messages`, `storage_volumes`, `network_frames` and `elf_plan`.
+Crashing inputs land in `fuzz/artifacts/<target>/`; reproduce with
+`cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<file>` and turn the input into a unit or
+property regression test with the fix. Corpora live in `fuzz/corpus/` and are not committed.
+
+## Miri and Linux boot proof (CI)
+
+`.github/workflows/hardening.yml` runs two jobs on pull requests and `main`:
+
+- Miri (`cargo +nightly miri test`) over the host-tested crates. Run it locally with
+  `rustup toolchain install nightly --component miri`; the package list and the excluded modules (with
+  the reason for each) are in the workflow.
+- A headless Linux QEMU boot proof, `scripts/proof.sh -c 1 -t 600`, which needs `qemu-system-x86`,
+  `ovmf` and the `x86_64-unknown-uefi` and `x86_64-unknown-none` targets.
