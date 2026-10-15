@@ -364,7 +364,13 @@ impl Scheduler {
     pub(crate) fn reset_events(&self) {
         for (index, slot) in self.tasks.iter().enumerate() {
             let word = slot.state.load(Ordering::Acquire);
-            if state(word) == BLOCKED {
+            // Only event or deadline waiters belong to the runtime being reset.
+            // A task parked by a plain block is owned by its explicit waker;
+            // waking it here races that waker on SMP and loses the wake.
+            if state(word) == BLOCKED
+                && (slot.wait_object.load(Ordering::Acquire) != 0
+                    || slot.wake_deadline.load(Ordering::Acquire) != NO_DEADLINE)
+            {
                 let handle = TaskHandle { slot: index as u8, generation: generation(word) };
                 self.wake(handle);
             }
@@ -873,6 +879,18 @@ mod tests {
         scheduler.reset_events();
         assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
         assert_eq!(scheduler.wake_due(20), 0);
+    }
+
+    #[test]
+    fn reset_events_leaves_plainly_blocked_tasks_for_their_explicit_waker() {
+        let scheduler = Scheduler::new();
+        let handle = running(&scheduler);
+        assert!(scheduler.save_context(handle, 0x2180));
+        assert!(scheduler.finish(handle, FinishState::Blocked));
+        scheduler.reset_events();
+        assert_eq!(scheduler.state(handle), Some(TaskState::Blocked));
+        assert!(scheduler.wake(handle));
+        assert_eq!(scheduler.state(handle), Some(TaskState::Runnable));
     }
 
     #[test]

@@ -899,13 +899,11 @@ pub extern "C" fn _start() -> ! {
         common::sleep();
     }
     #[cfg(all(feature = "qemu-proof", not(feature = "lockscreen-proof")))]
-    if !manager_command_probe(pending, network, &mut transport) {
-        // The storage proof exercises the normal Flow->Storage command path;
-        // a failed optional manager/network preflight must not strand Flow
-        // before that workload can run.
-        #[cfg(not(feature = "storage-proof"))]
-        common::idle();
-    }
+    // A failed optional manager/network preflight (for example Network not
+    // running in a network-disabled proof, so its endpoint is Disconnected)
+    // must not strand Flow: an idle Flow never heartbeats and the supervisor
+    // restarts the whole graph once the startup grace expires, forever.
+    let _ = manager_command_probe(pending, network, &mut transport);
     #[cfg(feature = "storage-proof")]
     let mut proof = StorageProof::new();
     let mut heartbeat_ticks = 0u16;
