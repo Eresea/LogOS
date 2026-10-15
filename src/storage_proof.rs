@@ -3,6 +3,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 static API_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 /// True once the command API proof reported its cleanup (kept across service restarts).
+#[cfg(feature = "qemu-proof")]
 pub(crate) fn api_complete() -> bool {
     API_COMPLETE.load(Ordering::Acquire)
 }
@@ -84,15 +85,16 @@ impl StorageProofObserver {
         let operation = self.pending_operation.load(Ordering::Acquire);
         let path = self.pending_path.load(Ordering::Acquire);
         self.pending_request.store(0, Ordering::Release);
-        if operation == logos_abi::StorageApiOperation::CreateFile as u8 {
-            if path == PATH_SURVIVOR && self.mode.load(Ordering::Acquire) == 0 {
-                if response.status == logos_abi::StorageApiStatus::Ok {
-                    self.mode.store(1, Ordering::Release);
-                } else if response.status == logos_abi::StorageApiStatus::AlreadyExists {
-                    self.mode.store(2, Ordering::Release);
-                } else {
-                    crate::arch_proof_line(b"LogOS vNext: storage command API FAIL");
-                }
+        if operation == logos_abi::StorageApiOperation::CreateFile as u8
+            && path == PATH_SURVIVOR
+            && self.mode.load(Ordering::Acquire) == 0
+        {
+            if response.status == logos_abi::StorageApiStatus::Ok {
+                self.mode.store(1, Ordering::Release);
+            } else if response.status == logos_abi::StorageApiStatus::AlreadyExists {
+                self.mode.store(2, Ordering::Release);
+            } else {
+                crate::arch_proof_line(b"LogOS vNext: storage command API FAIL");
             }
         }
         let mode = self.mode.load(Ordering::Acquire);

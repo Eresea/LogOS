@@ -856,6 +856,8 @@ fn handoff_to_runtime() {
 }
 
 fn discover_cpus() -> usize {
+    // `__cpuid` is safe on newer toolchains; MSRV 1.85 still requires `unsafe`.
+    #[allow(unused_unsafe)]
     let bsp = unsafe { core::arch::x86_64::__cpuid(1).ebx >> 24 };
     APIC_IDS[0].store(bsp, Ordering::Release);
     let Ok(handle) = boot::get_handle_for_protocol::<MpServices>() else {

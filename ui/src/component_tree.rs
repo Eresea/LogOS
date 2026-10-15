@@ -614,11 +614,9 @@ impl UiComponentTree {
                     self.pressed = target.unwrap_or(UiNodeHandle::EMPTY);
                 }
             }
-            UiInputEvent::PointerUp { .. } => {
-                if self.pressed.is_valid() {
-                    self.tree.set_pressed(self.pressed, false).map_err(map_tree_error)?;
-                    self.pressed = UiNodeHandle::EMPTY;
-                }
+            UiInputEvent::PointerUp { .. } if self.pressed.is_valid() => {
+                self.tree.set_pressed(self.pressed, false).map_err(map_tree_error)?;
+                self.pressed = UiNodeHandle::EMPTY;
             }
             _ => {}
         }

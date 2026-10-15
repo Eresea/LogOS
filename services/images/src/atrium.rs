@@ -2670,18 +2670,16 @@ pub extern "C" fn _start() -> ! {
                         pending_app_render = render(display, atrium, calculator, atrium_client);
                     }
                 }
-                logos_atrium::AtriumAction::Split(_) => {
-                    if atrium.apply_action(action).is_ok() {
-                        queue_surface_updates(
-                            display_control,
-                            &mut surface_commands,
-                            atrium,
-                            &mut next_request,
-                            &mut pending_terminal_update,
-                            &mut last_terminal_bounds,
-                        );
-                        pending_app_render = render(display, atrium, calculator, atrium_client);
-                    }
+                logos_atrium::AtriumAction::Split(_) if atrium.apply_action(action).is_ok() => {
+                    queue_surface_updates(
+                        display_control,
+                        &mut surface_commands,
+                        atrium,
+                        &mut next_request,
+                        &mut pending_terminal_update,
+                        &mut last_terminal_bounds,
+                    );
+                    pending_app_render = render(display, atrium, calculator, atrium_client);
                 }
                 _ => {}
             }
