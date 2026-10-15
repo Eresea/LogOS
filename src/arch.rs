@@ -1565,6 +1565,12 @@ fn initialize_post_uefi(cpu_count: usize) {
     install_gdt(0);
     install_idt(0);
     configure_sse();
+    match enable_smep_smap() {
+        (true, true) => debug_line(b"LogOS vNext: SMEP/SMAP enabled"),
+        (true, false) => debug_line(b"LogOS vNext: SMEP enabled, SMAP unsupported"),
+        (false, true) => debug_line(b"LogOS vNext: SMAP enabled, SMEP unsupported"),
+        (false, false) => debug_line(b"LogOS vNext: SMEP/SMAP unsupported"),
+    }
     enable_local_apic();
     configure_pic();
     if !configure_keyboard() {
@@ -1915,6 +1921,60 @@ fn load_idt(cpu: usize) {
     };
     unsafe { asm!("lidt [{}]", in(reg) &pointer) };
     IDT_LOADED.fetch_or(1 << cpu, Ordering::AcqRel);
+}
+
+const CR4_SMEP: u64 = 1 << 20;
+const CR4_SMAP: u64 = 1 << 21;
+static SMAP_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turns on SMEP and SMAP when CPUID leaf 7 reports them. Runs on the BSP and
+/// every AP; returns `(smep, smap)` as enabled on this CPU.
+#[allow(unused_unsafe)]
+fn enable_smep_smap() -> (bool, bool) {
+    let (max_leaf, _, _, _) = cpuid(0, 0);
+    if max_leaf < 7 {
+        return (false, false);
+    }
+    let (_, ebx, _, _) = cpuid(7, 0);
+    let smep = ebx & (1 << 7) != 0;
+    let smap = ebx & (1 << 20) != 0;
+    unsafe {
+        let mut cr4: u64;
+        asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        if smep {
+            cr4 |= CR4_SMEP;
+        }
+        if smap {
+            cr4 |= CR4_SMAP;
+        }
+        asm!("mov cr4, {}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+    }
+    if smap {
+        SMAP_ENABLED.store(true, Ordering::Release);
+    }
+    (smep, smap)
+}
+
+#[allow(unused_unsafe)]
+fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    let r = unsafe { core::arch::x86_64::__cpuid_count(leaf, subleaf) };
+    (r.eax, r.ebx, r.ecx, r.edx)
+}
+
+/// Runs `f` with supervisor access to user pages permitted (`stac`/`clac`).
+/// Every kernel dereference of a user virtual address must be bracketed by
+/// this; accesses through identity-mapped physical frames are supervisor pages
+/// and need no bracket. Interrupts clear RFLAGS.AC on entry, so a trap inside
+/// `f` cannot leak the access window into a handler.
+#[allow(dead_code)]
+pub(crate) fn with_user_access<R>(f: impl FnOnce() -> R) -> R {
+    if !SMAP_ENABLED.load(Ordering::Acquire) {
+        return f();
+    }
+    unsafe { asm!("stac", options(nomem, nostack)) };
+    let result = f();
+    unsafe { asm!("clac", options(nomem, nostack)) };
+    result
 }
 
 fn configure_sse() {
@@ -2362,6 +2422,7 @@ extern "C" fn ap_entry(_cpu: usize) -> ! {
     install_gdt(cpu);
     install_idt(cpu);
     configure_sse();
+    enable_smep_smap();
     enable_local_apic();
     calibrate_timer();
     configure_timer();
