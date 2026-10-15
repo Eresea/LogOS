@@ -49,7 +49,8 @@ impl<const SLOTS: usize> FrameQueue<SLOTS> {
             .ok_or(FrameQueueError::Full)?;
         let token = self.next_token;
         self.next_token = self.next_token.wrapping_add(1).max(1);
-        self.states[slot] = FrameSlotState::Building { token, sequence };
+        let state = self.states.get_mut(slot).ok_or(FrameQueueError::InvalidLease)?;
+        *state = FrameSlotState::Building { token, sequence };
         Ok(FrameLease { slot, token, sequence })
     }
 
@@ -80,12 +81,14 @@ impl<const SLOTS: usize> FrameQueue<SLOTS> {
                         sequence: lease.sequence,
                     }) =>
             {
+                *state = FrameSlotState::Presented { sequence: lease.sequence };
                 if let Some(active) = self.active.replace(lease.slot) {
                     if active != lease.slot {
-                        self.states[active] = FrameSlotState::Free;
+                        if let Some(previous) = self.states.get_mut(active) {
+                            *previous = FrameSlotState::Free;
+                        }
                     }
                 }
-                self.states[lease.slot] = FrameSlotState::Presented { sequence: lease.sequence };
                 Ok(())
             }
             Some(FrameSlotState::Submitted { .. }) => Err(FrameQueueError::StaleLease),
@@ -134,5 +137,20 @@ mod tests {
         let stale = FrameLease { token: lease.token.wrapping_add(1), ..lease };
         assert_eq!(queue.complete(stale), Err(FrameQueueError::StaleLease));
         assert_eq!(queue.complete(lease), Ok(()));
+    }
+
+    #[test]
+    fn hostile_leases_are_rejected() {
+        let mut queue = FrameQueue::<2>::new();
+        let lease = queue.acquire(1).unwrap();
+        let out_of_range = FrameLease { slot: 99, ..lease };
+        assert_eq!(queue.submit(out_of_range), Err(FrameQueueError::InvalidLease));
+        assert_eq!(queue.complete(out_of_range), Err(FrameQueueError::InvalidLease));
+        assert_eq!(queue.complete(lease), Err(FrameQueueError::InvalidLease));
+        queue.submit(lease).unwrap();
+        assert_eq!(queue.submit(lease), Err(FrameQueueError::InvalidLease));
+        queue.complete(lease).unwrap();
+        assert_eq!(queue.complete(lease), Err(FrameQueueError::InvalidLease));
+        assert_eq!(queue.state(lease.slot), Some(FrameSlotState::Presented { sequence: 1 }));
     }
 }
