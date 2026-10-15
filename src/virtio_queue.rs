@@ -10,7 +10,15 @@ use core::ptr::{read_volatile, write_volatile};
 
 use logos_storage::VirtioBlkHeader;
 
+/// Request slots: how many block requests can be posted at once.
 pub(crate) const QUEUE_SIZE: usize = 8;
+/// Virtqueue size programmed into the device. Every request uses a chain of up to three
+/// descriptors with its head at `slot * 3`, so the descriptor table needs `QUEUE_SIZE * 3`
+/// entries and the device reads head ids below the programmed size. The smallest power of two
+/// that holds them is 32; the rings are sized to match so a device honouring the programmed
+/// size can never address memory outside this structure.
+pub(crate) const RING_SIZE: usize = 32;
+const _: () = assert!(RING_SIZE.is_power_of_two() && RING_SIZE >= QUEUE_SIZE * 3);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -41,15 +49,15 @@ impl DmaBlock {
 
 #[repr(C, align(4096))]
 pub(crate) struct QueueMemory {
-    pub(crate) descriptors: [Descriptor; QUEUE_SIZE * 3],
+    pub(crate) descriptors: [Descriptor; RING_SIZE],
     pub(crate) available_flags: u16,
     pub(crate) available_index: u16,
-    pub(crate) available_ring: [u16; QUEUE_SIZE],
+    pub(crate) available_ring: [u16; RING_SIZE],
     pub(crate) available_used_event: u16,
     pub(crate) available_padding: u16,
     pub(crate) used_flags: u16,
     pub(crate) used_index: u16,
-    pub(crate) used_ring: [UsedElement; QUEUE_SIZE],
+    pub(crate) used_ring: [UsedElement; RING_SIZE],
     pub(crate) used_available_event: u16,
     pub(crate) headers: [VirtioBlkHeader; QUEUE_SIZE],
     pub(crate) statuses: [u8; QUEUE_SIZE],
@@ -62,15 +70,15 @@ impl QueueMemory {
 
     pub(crate) const fn new() -> Self {
         Self {
-            descriptors: [Self::EMPTY_DESCRIPTOR; QUEUE_SIZE * 3],
+            descriptors: [Self::EMPTY_DESCRIPTOR; RING_SIZE],
             available_flags: 0,
             available_index: 0,
-            available_ring: [0; QUEUE_SIZE],
+            available_ring: [0; RING_SIZE],
             available_used_event: 0,
             available_padding: 0,
             used_flags: 0,
             used_index: 0,
-            used_ring: [Self::EMPTY_USED; QUEUE_SIZE],
+            used_ring: [Self::EMPTY_USED; RING_SIZE],
             used_available_event: 0,
             headers: [VirtioBlkHeader { request_type: 0, reserved: 0, sector: 0 }; QUEUE_SIZE],
             statuses: [0xff; QUEUE_SIZE],
@@ -188,6 +196,9 @@ pub(crate) fn write_shared<T: Copy>(field: &mut T, value: T) {
 
 const _: () = assert!(core::mem::align_of::<DmaBlock>() == 4096);
 const _: () = assert!(core::mem::offset_of!(QueueMemory, data) % 4096 == 0);
+const _: () = assert!(core::mem::offset_of!(QueueMemory, descriptors) % 16 == 0);
+const _: () = assert!(core::mem::offset_of!(QueueMemory, available_flags) % 2 == 0);
+const _: () = assert!(core::mem::offset_of!(QueueMemory, used_flags) % 4 == 0);
 
 #[cfg(test)]
 mod tests {
