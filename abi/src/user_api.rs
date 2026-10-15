@@ -621,62 +621,101 @@ const _: () = assert!(core::mem::size_of::<AtriumSettingsResponse>() <= MAX_IPC_
 mod tests {
     use super::*;
 
-    fn invalid_byte<T>(value: &T, offset: usize) -> [u8; MAX_IPC_BYTES] {
-        let bytes = unsafe {
-            core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
-        };
-        let mut invalid = [0; MAX_IPC_BYTES];
-        invalid[..bytes.len()].copy_from_slice(bytes);
+    /// Wire bytes for `value`: zeros, except the given enum-discriminant bytes, which are
+    /// copied from `value`. Copying the whole struct would read padding bytes, which are
+    /// uninitialised (Miri reports that as undefined behaviour).
+    fn wire_bytes<T>(value: &T, enum_offsets: &[usize]) -> [u8; MAX_IPC_BYTES] {
+        let mut bytes = [0; MAX_IPC_BYTES];
+        for offset in enum_offsets {
+            assert!(*offset < core::mem::size_of::<T>());
+            // SAFETY: `offset` is inside `value` and names a field that holds an enum
+            // discriminant, so the byte is initialised.
+            bytes[*offset] = unsafe { *(value as *const T).cast::<u8>().add(*offset) };
+        }
+        bytes
+    }
+
+    fn invalid_byte<T>(value: &T, enum_offsets: &[usize], offset: usize) -> [u8; MAX_IPC_BYTES] {
+        let mut invalid = wire_bytes(value, enum_offsets);
         invalid[offset] = u8::MAX;
         invalid
     }
 
     #[test]
     fn user_wire_enum_validation_rejects_invalid_request_and_responses() {
+        use core::mem::offset_of;
+
         let request = UserRequest::new(UserOperation::Login, 1);
         let response = UserResponse::new(request, UserStatus::Ok);
         let storage_request = UserStorageRequest::new(UserStorageOperation::Load, 1, 0);
         let storage_response = UserStorageResponse::invalid(storage_request);
-
-        assert!(UserRequest::wire_enums_valid(unsafe {
-            core::slice::from_raw_parts(
-                (&request as *const UserRequest).cast::<u8>(),
-                core::mem::size_of::<UserRequest>(),
-            )
-        }));
-        assert!(!UserRequest::wire_enums_valid(&invalid_byte(
-            &request,
-            core::mem::offset_of!(UserRequest, operation),
-        )));
-        assert!(!UserResponse::wire_enums_valid(&invalid_byte(
-            &response,
-            core::mem::offset_of!(UserResponse, status),
-        )));
-        assert!(!UserStorageRequest::wire_enums_valid(&invalid_byte(
-            &storage_request,
-            core::mem::offset_of!(UserStorageRequest, operation),
-        )));
-        assert!(!UserStorageResponse::wire_enums_valid(&invalid_byte(
-            &storage_response,
-            core::mem::offset_of!(UserStorageResponse, status),
-        )));
-
         let settings_request = AtriumSettingsRequest::new(AtriumSettingsOperation::Load, 1);
         let settings_response =
             AtriumSettingsResponse::new(settings_request, AtriumSettingsStatus::Ok);
-        assert!(AtriumSettingsRequest::wire_enums_valid(unsafe {
-            core::slice::from_raw_parts(
-                (&settings_request as *const AtriumSettingsRequest).cast::<u8>(),
-                core::mem::size_of::<AtriumSettingsRequest>(),
-            )
-        }));
+
+        let request_enums = [offset_of!(UserRequest, operation)];
+        assert!(UserRequest::wire_enums_valid(&wire_bytes(&request, &request_enums)));
+        assert!(!UserRequest::wire_enums_valid(&invalid_byte(
+            &request,
+            &request_enums,
+            offset_of!(UserRequest, operation),
+        )));
+
+        let response_enums =
+            [offset_of!(UserResponse, operation), offset_of!(UserResponse, status)];
+        assert!(UserResponse::wire_enums_valid(&wire_bytes(&response, &response_enums)));
+        assert!(!UserResponse::wire_enums_valid(&invalid_byte(
+            &response,
+            &response_enums,
+            offset_of!(UserResponse, status),
+        )));
+
+        let storage_request_enums = [offset_of!(UserStorageRequest, operation)];
+        assert!(UserStorageRequest::wire_enums_valid(&wire_bytes(
+            &storage_request,
+            &storage_request_enums,
+        )));
+        assert!(!UserStorageRequest::wire_enums_valid(&invalid_byte(
+            &storage_request,
+            &storage_request_enums,
+            offset_of!(UserStorageRequest, operation),
+        )));
+
+        let storage_response_enums =
+            [offset_of!(UserStorageResponse, operation), offset_of!(UserStorageResponse, status)];
+        assert!(UserStorageResponse::wire_enums_valid(&wire_bytes(
+            &storage_response,
+            &storage_response_enums,
+        )));
+        assert!(!UserStorageResponse::wire_enums_valid(&invalid_byte(
+            &storage_response,
+            &storage_response_enums,
+            offset_of!(UserStorageResponse, status),
+        )));
+
+        let settings_request_enums = [offset_of!(AtriumSettingsRequest, operation)];
+        assert!(AtriumSettingsRequest::wire_enums_valid(&wire_bytes(
+            &settings_request,
+            &settings_request_enums,
+        )));
         assert!(!AtriumSettingsRequest::wire_enums_valid(&invalid_byte(
             &settings_request,
-            core::mem::offset_of!(AtriumSettingsRequest, operation),
+            &settings_request_enums,
+            offset_of!(AtriumSettingsRequest, operation),
+        )));
+
+        let settings_response_enums = [
+            offset_of!(AtriumSettingsResponse, operation),
+            offset_of!(AtriumSettingsResponse, status),
+        ];
+        assert!(AtriumSettingsResponse::wire_enums_valid(&wire_bytes(
+            &settings_response,
+            &settings_response_enums,
         )));
         assert!(!AtriumSettingsResponse::wire_enums_valid(&invalid_byte(
             &settings_response,
-            core::mem::offset_of!(AtriumSettingsResponse, status),
+            &settings_response_enums,
+            offset_of!(AtriumSettingsResponse, status),
         )));
         assert!(settings_response.is_valid_for(settings_request));
     }
