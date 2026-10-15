@@ -3063,22 +3063,11 @@ impl ServiceRuntime {
     }
 
     fn endpoint_requires_core_dispatch(&self, endpoint: logos_abi::EndpointHandle) -> bool {
-        [
-            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_STORAGE_REQUEST),
-            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_STORAGE_RESPONSE),
-            (Some(ServiceId::Network), None, logos_abi::IPC_CONTRACT_PACKET),
-            (None, Some(ServiceId::Network), logos_abi::IPC_CONTRACT_PACKET),
-            (Some(ServiceId::Device), None, logos_abi::IPC_CONTRACT_DEVICE_REQUEST),
-            (None, Some(ServiceId::Device), logos_abi::IPC_CONTRACT_DEVICE_RESPONSE),
-            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_PACKAGE_REQUEST),
-            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_PACKAGE_RESPONSE),
-            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_STORAGE_MAP_REQUEST),
-            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_STORAGE_MAP_RESPONSE),
-        ]
-        .into_iter()
-        .any(|(producer, consumer, contract)| {
-            self.dynamic_contract_matches(endpoint, producer, consumer, contract)
-        })
+        crate::ipc_contracts::CORE_DISPATCH_CONTRACTS.iter().any(
+            |&(producer, consumer, contract)| {
+                self.dynamic_contract_matches(endpoint, producer, consumer, contract)
+            },
+        )
     }
 
     pub(crate) fn ipc_send(
