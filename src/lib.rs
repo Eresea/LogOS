@@ -18,6 +18,8 @@ pub mod process;
 mod program_runtime;
 mod scheduler;
 pub mod supervisor;
+#[cfg(any(test, target_os = "uefi"))]
+mod syscall;
 pub use scheduler::{
     FinishState, IDLE_STACK_SIZE, MAX_CPUS, MAX_TASKS, SCHEDULER, SCHEDULER_STACK_SIZE,
     ScheduledUserLaunch, Scheduler, SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,

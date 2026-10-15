@@ -311,6 +311,7 @@ pub const NETWORK_PING_TIMEOUT_TICKS: u32 = 128;
 pub const NETWORK_TCP_CONNECT_TIMEOUT_TICKS: u32 = 128;
 pub const NETWORK_REQUEST_FLAG_LISTENER: u8 = 1 << 0;
 
+pub const YIELD_SYSCALL: usize = 1;
 pub const IPC_SYSCALL_SEND: usize = 4;
 pub const IPC_SYSCALL_RECEIVE: usize = 5;
 pub const SERVICE_HEAP_GROW_SYSCALL: usize = 15;
@@ -326,6 +327,7 @@ pub const WALL_CLOCK_TICKS_PER_SECOND: u64 = 100;
 pub const MANAGER_SYSCALL: usize = 12;
 pub const PROGRAM_EXIT_SYSCALL: usize = 14;
 pub const POWER_SYSCALL: usize = 11;
+pub const SERVICE_HEARTBEAT_SYSCALL: usize = 10;
 pub const POWER_SHUTDOWN: usize = 1;
 pub const POWER_REBOOT: usize = 2;
 pub const IPC_ENDPOINT_COUNT: usize = 68;
