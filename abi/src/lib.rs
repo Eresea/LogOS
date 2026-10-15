@@ -24,7 +24,7 @@ mod user_api;
 mod walltime;
 mod wire;
 
-pub use wire::{WireBytes, WireDecode};
+pub use wire::{NoPadding, WireBytes, WireDecode};
 
 pub use atrium::{
     AtriumApp, AtriumControl, AtriumControlOperation, AtriumControlResponse, AtriumSection,
@@ -352,6 +352,7 @@ pub struct FramebufferConfig {
     pub height: u32,
     pub stride: u32,
     pub format: FramebufferFormat,
+    pub reserved: [u8; 3],
 }
 
 impl FramebufferConfig {
@@ -362,7 +363,7 @@ impl FramebufferConfig {
         stride: u32,
         format: FramebufferFormat,
     ) -> Self {
-        Self { bytes, width, height, stride, format }
+        Self { bytes, width, height, stride, format, reserved: [0; 3] }
     }
 }
 
@@ -676,6 +677,8 @@ pub struct StorageResponse {
     pub generation: u16,
     pub blocks_completed: u16,
     pub payload_bytes: u16,
+    /// Explicit padding before `transaction_id`; always zero.
+    pub reserved_align: [u8; 4],
     pub transaction_id: u64,
     pub block_count: u64,
 }
@@ -691,6 +694,8 @@ pub struct StorageMapRequest {
     pub generation: u64,
     pub client: u16,
     pub pages: u16,
+    /// Explicit padding before `source_page`; always zero.
+    pub reserved_align: [u8; 4],
     pub source_page: u64,
     pub target_page: u64,
     pub window_generation: u32,
@@ -922,14 +927,20 @@ pub struct NetworkResponse {
     pub operation: NetworkOperation,
     pub result: NetworkResult,
     pub state: NetworkState,
+    /// Explicit padding before `request_id`; always zero.
+    pub reserved_state: [u8; 3],
     pub request_id: u32,
     pub handle: u32,
     pub generation: u16,
     pub reserved: u16,
+    /// Explicit padding before `service_epoch`; always zero.
+    pub reserved_align: [u8; 4],
     pub service_epoch: u64,
     pub payload_len: u16,
     pub detail: [u8; 16],
     pub payload: [u8; NETWORK_INLINE_PAYLOAD_BYTES],
+    /// Explicit trailing padding; always zero.
+    pub reserved_end: [u8; 6],
 }
 
 impl NetworkResponse {
@@ -944,14 +955,17 @@ impl NetworkResponse {
             operation,
             result,
             state,
+            reserved_state: [0; 3],
             request_id,
             handle: 0,
             generation: 0,
             reserved: 0,
+            reserved_align: [0; 4],
             service_epoch: 0,
             payload_len: 0,
             detail: [0; 16],
             payload: [0; NETWORK_INLINE_PAYLOAD_BYTES],
+            reserved_end: [0; 6],
         }
     }
 
@@ -1006,10 +1020,14 @@ pub struct NetworkPacketDescriptor {
     pub length: u16,
     pub generation: u16,
     pub reserved: u16,
+    /// Explicit padding before `service_epoch`; always zero.
+    pub reserved_align: [u8; 4],
     pub service_epoch: u64,
     pub sequence: u32,
     pub mac: [u8; 6],
     pub reserved_tail: [u8; 8],
+    /// Explicit trailing padding; always zero.
+    pub reserved_end: [u8; 6],
 }
 
 impl NetworkPacketDescriptor {
@@ -1022,10 +1040,12 @@ impl NetworkPacketDescriptor {
             length: 0,
             generation: 0,
             reserved: 0,
+            reserved_align: [0; 4],
             service_epoch: 0,
             sequence,
             mac: [0; 6],
             reserved_tail: [0; 8],
+            reserved_end: [0; 6],
         }
     }
 
@@ -1064,6 +1084,7 @@ impl StorageResponse {
             generation,
             blocks_completed,
             payload_bytes,
+            reserved_align: [0; 4],
             transaction_id,
             block_count: 0,
         }

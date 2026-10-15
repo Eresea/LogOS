@@ -608,6 +608,7 @@ impl RuntimeIpcRegistry {
                 kind: DirectoryRecordKind::Capability,
                 rights: capability.rights as u8,
                 flags: 0,
+                reserved_flags: [0; 4],
                 handle: capability.handle.raw(),
                 peer: if endpoint.producer == capability.owner {
                     endpoint.consumer
@@ -617,6 +618,7 @@ impl RuntimeIpcRegistry {
                 contract_id: endpoint.contract_id,
                 message_bytes: endpoint.message_bytes as u16,
                 queue_capacity: endpoint.queue_capacity as u16,
+                reserved_capacity: [0; 2],
                 event: if capability.rights == IpcRights::Send {
                     endpoint.write_event
                 } else {
@@ -625,6 +627,7 @@ impl RuntimeIpcRegistry {
                 name_len: 0,
                 reserved: [0; 1],
                 name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+                reserved_end: [0; 6],
             };
             written += 1;
             seen += 1;
@@ -662,15 +665,18 @@ impl RuntimeIpcRegistry {
                 kind: DirectoryRecordKind::Endpoint,
                 rights: 0,
                 flags: 0,
+                reserved_flags: [0; 4],
                 handle: endpoint.handle.raw(),
                 peer: endpoint.consumer,
                 contract_id: endpoint.contract_id,
                 message_bytes: endpoint.message_bytes as u16,
                 queue_capacity: endpoint.queue_capacity as u16,
+                reserved_capacity: [0; 2],
                 event: EventHandle::EMPTY,
                 name_len: 0,
                 reserved: [0; 1],
                 name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+                reserved_end: [0; 6],
             };
             written += 1;
             seen += 1;

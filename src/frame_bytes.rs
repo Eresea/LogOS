@@ -10,7 +10,7 @@
 
 use core::mem::MaybeUninit;
 
-use logos_abi::{WireBytes, WireDecode};
+use logos_abi::{NoPadding, WireBytes, WireDecode};
 
 use crate::memory::FrameAddress;
 
@@ -113,11 +113,10 @@ impl FrameBytes {
 
     /// Writes `value` at offset zero (unaligned); `false` if it does not fit.
     ///
-    /// Writing a valid `T` is always sound. A struct with padding copies its
-    /// padding bytes too, which are not guaranteed initialized; wire types
-    /// written into user-visible frames should be padding-free (see
-    /// `docs/architecture.md`, wire type padding).
-    pub(crate) fn write<T: Copy>(&mut self, value: T) -> bool {
+    /// `T: NoPadding` guarantees every byte of the value is initialized, so the
+    /// write cannot copy uninitialized kernel bytes into a user-visible frame
+    /// (see `docs/architecture.md`, "Wire frame reads").
+    pub(crate) fn write<T: NoPadding>(&mut self, value: T) -> bool {
         self.write_init(value)
     }
 
@@ -135,7 +134,7 @@ impl FrameBytes {
 
     /// Volatile variant of [`Self::write`]; `false` if it does not fit or the
     /// base is not aligned for `T`.
-    pub(crate) fn write_volatile<T: Copy>(&mut self, value: T) -> bool {
+    pub(crate) fn write_volatile<T: NoPadding>(&mut self, value: T) -> bool {
         if core::mem::size_of::<T>() > self.capacity
             || self.base.align_offset(core::mem::align_of::<T>()) != 0
         {
@@ -148,8 +147,9 @@ impl FrameBytes {
 }
 
 /// The in-memory bytes of a plain `repr(C)` wire value, for copying into a
-/// message or page.
-pub(crate) fn value_bytes<T: Copy>(value: &T) -> &[u8] {
+/// message or page. `T: NoPadding` makes every byte initialized, so the slice
+/// over the value is sound and leaks nothing.
+pub(crate) fn value_bytes<T: NoPadding>(value: &T) -> &[u8] {
     // SAFETY: `value` is a live reference, so it is valid for `size_of::<T>()`
     // bytes; `u8` has no alignment requirement and the borrow keeps the value
     // alive and unmutated for the lifetime of the slice.
@@ -214,6 +214,8 @@ mod tests {
 
     // SAFETY: `repr(C)`, integer fields only, no padding.
     unsafe impl WireBytes for Wire {}
+    // SAFETY: 4 + 4 + 8 bytes of fields in a 16-byte struct.
+    unsafe impl NoPadding for Wire {}
 
     #[repr(u8)]
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -230,6 +232,9 @@ mod tests {
         other: Mode,
         len: u16,
     }
+
+    // SAFETY: 1 + 1 + 2 bytes of fields in a 4-byte struct.
+    unsafe impl NoPadding for Command {}
 
     impl WireDecode for Command {
         fn wire_valid(bytes: &[u8]) -> bool {
@@ -373,6 +378,62 @@ mod tests {
         let bytes = value_bytes(&wire);
         assert_eq!(bytes.len(), core::mem::size_of::<Wire>());
         assert_eq!(read_from_slice::<Wire>(bytes), Some(wire));
+    }
+
+    /// Writes `value` over a 0xAA-filled buffer and checks that no 0xAA byte
+    /// survives inside the value and none is touched past it. Every field of the
+    /// values used here is zero or avoids the 0xAA byte, so a surviving 0xAA
+    /// can only be a padding byte the write failed to initialize.
+    fn assert_no_stale_bytes<T: NoPadding>(value: T) {
+        let size = core::mem::size_of::<T>();
+        let mut buffer = std::vec![0xAAu8; size + 16];
+        let mut frame = view(&mut buffer);
+        assert!(frame.write(value));
+        assert!(buffer[..size].iter().all(|byte| *byte != 0xAA), "padding leaked");
+        assert!(buffer[size..].iter().all(|byte| *byte == 0xAA), "write overran");
+        assert!(value_bytes(&value).iter().all(|byte| *byte != 0xAA));
+    }
+
+    #[test]
+    fn padded_wire_types_write_no_uninitialized_bytes() {
+        use logos_abi::*;
+        let mut network = NetworkResponse::new(
+            NetworkOperation::Status,
+            NetworkResult::Ok,
+            NetworkState::Ready,
+            7,
+        );
+        network.payload[0] = 0x55;
+        assert_no_stale_bytes(network);
+        let mut descriptor = NetworkPacketDescriptor::new(NetworkPacketOperation::SubmitTx, 1, 9);
+        descriptor.mac = [1, 2, 3, 4, 5, 6];
+        assert_no_stale_bytes(descriptor);
+        assert_no_stale_bytes(DirectoryResponse::empty(
+            DirectoryOperation::Capabilities,
+            DirectoryStatus::Ok,
+            3,
+        ));
+        assert_no_stale_bytes(EventResponse::empty(EventStatus::Ok, 5));
+        assert_no_stale_bytes(StorageResponse::new(1, StorageStatus::Ok, 2, 3, 4, 5));
+        assert_no_stale_bytes(ManagerResponse::new(ManagerOperation::List, ManagerStatus::Ok, 6));
+        assert_no_stale_bytes(ProgramBootstrapPage::empty());
+        assert_no_stale_bytes(FramebufferConfig::new(4096, 64, 32, 64, FramebufferFormat::Bgr8));
+    }
+
+    #[test]
+    fn volatile_write_of_aligned_wire_type_initializes_every_byte() {
+        use logos_abi::*;
+        #[repr(align(16))]
+        struct Aligned([u8; 2112]);
+        let mut backing = Aligned([0xAA; 2112]);
+        let mut frame = unsafe { FrameBytes::from_raw(backing.0.as_mut_ptr(), 2112) };
+        let response =
+            DirectoryResponse::empty(DirectoryOperation::Capabilities, DirectoryStatus::Ok, 3);
+        assert!(frame.write_volatile(response));
+        let size = core::mem::size_of::<DirectoryResponse>();
+        assert_eq!(size, 2080);
+        assert!(backing.0[..size].iter().all(|byte| *byte != 0xAA));
+        assert!(backing.0[size..].iter().all(|byte| *byte == 0xAA));
     }
 
     #[test]

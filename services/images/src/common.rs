@@ -1680,6 +1680,7 @@ mod tests {
             name_len: 0,
             reserved: [0; 1],
             name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+            ..logos_abi::DirectoryRecord::EMPTY
         };
         response.count = 1;
         assert_eq!(

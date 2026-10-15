@@ -154,11 +154,14 @@ untrusted, so it accepts a type only through `logos_abi::WireBytes` (every bit p
 integers, arrays, handles, integer-only structs) via `read`, or `logos_abi::WireDecode` (enum-bearing
 types; `wire_valid` checks every discriminant) via `decode`, which snapshots the bytes, validates
 the snapshot and materializes from that same snapshot. Reading a type with enum fields without
-`decode` does not compile. Writes keep `T: Copy`; a struct with padding copies its padding bytes into
-the frame. `IpcBytes`, `ManagerRequest`, `EventRequest` and `DirectoryRequest` are asserted
-padding-free; the other written wire types (for example `NetworkResponse`, `StorageResponse`,
-`DeviceResponse`, `PackageResponse`, `DirectoryResponse`, `NetworkPacketDescriptor`) are padded and
-still open work: give them explicit reserved fields at the same offsets or write them field-wise.
+`decode` does not compile. Writes (`write`, `write_volatile`, `value_bytes`) accept only
+`logos_abi::NoPadding` types: `repr(C)` wire structs with no implicit padding, implemented solely by
+`assert_no_padding!` in `abi/src/wire.rs`, which proves `size_of` equals the sum of the field sizes at
+compile time (nested structs must be `NoPadding` too). Where the C layout would insert padding, the
+structs carry explicit `reserved*` byte fields (always written as zero, ignored by receivers), and
+`layout_proofs` in the same file pins every pre-existing field offset and size so the ABI is
+unchanged. A new frame-written type that has padding does not compile until its padding is made
+explicit.
 
 ## Persistence boundary
 

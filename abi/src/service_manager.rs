@@ -175,6 +175,8 @@ pub struct ServiceManagerRecord {
     pub state: ManagerState,
     pub restarts: u8,
     pub name_len: u8,
+    /// Explicit padding before `dependencies`; always zero.
+    pub reserved_name: u8,
     pub dependencies: u16,
     pub reserved: [u8; 2],
     pub program_slot: u8,
@@ -189,6 +191,7 @@ impl ServiceManagerRecord {
         state: ManagerState::Vacant,
         restarts: 0,
         name_len: 0,
+        reserved_name: 0,
         dependencies: 0,
         reserved: [0; 2],
         program_slot: u8::MAX,

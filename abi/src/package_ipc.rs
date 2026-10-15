@@ -162,14 +162,20 @@ pub struct PackageRequest {
     pub operation: PackageOperation,
     pub flags: u8,
     pub target: PackageTarget,
+    /// Explicit padding before `request_id`; always zero.
+    pub reserved_target: [u8; 2],
     pub request_id: u32,
     pub generation: u16,
+    /// Explicit padding before `capability`; always zero.
+    pub reserved_generation: [u8; 2],
     pub capability: CapabilityHandle,
     pub service_epoch: u64,
     pub package_generation: u32,
     pub offset: u32,
     pub length: u16,
     pub reserved2: u16,
+    /// Explicit trailing padding; always zero.
+    pub reserved_end: [u8; 4],
 }
 
 impl PackageRequest {
@@ -201,14 +207,17 @@ impl PackageRequest {
             operation,
             flags: 0,
             target: PackageTarget::service(service),
+            reserved_target: [0; 2],
             request_id,
             generation,
+            reserved_generation: [0; 2],
             capability,
             service_epoch,
             package_generation,
             offset,
             length,
             reserved2: 0,
+            reserved_end: [0; 4],
         })
     }
 
@@ -319,6 +328,8 @@ pub struct PackageResponse {
     pub operation: PackageOperation,
     pub status: PackageStatus,
     pub target: PackageTarget,
+    /// Explicit padding before `request_id`; always zero.
+    pub reserved_target: [u8; 2],
     pub request_id: u32,
     pub generation: u16,
     pub reserved2: u16,
@@ -338,6 +349,7 @@ impl PackageResponse {
             operation: request.operation,
             status,
             target: request.target,
+            reserved_target: [0; 2],
             request_id: request.request_id,
             generation: request.generation,
             reserved2: 0,

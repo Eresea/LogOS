@@ -13,6 +13,8 @@ macro_rules! define_handle {
 
         // SAFETY: a `repr(transparent)` `u64`; every bit pattern is a valid value.
         unsafe impl crate::WireBytes for $name {}
+        // SAFETY: a `repr(transparent)` `u64` has no padding.
+        unsafe impl crate::NoPadding for $name {}
 
         impl $name {
             pub const EMPTY: Self = Self(0);
@@ -79,6 +81,8 @@ pub struct ProgramBootstrapPage {
     pub ipc_generation: u16,
     pub reserved: u16,
     pub program_generation: u32,
+    /// Explicit padding before `client`; always zero.
+    pub reserved_generation: [u8; 4],
     pub client: ServiceHandle,
     pub surface_request: CapabilityHandle,
     pub surface_response: CapabilityHandle,
@@ -204,6 +208,8 @@ pub struct EventResponse {
     pub request_id: u32,
     pub event: EventHandle,
     pub event_set: EventSetHandle,
+    /// Explicit trailing padding (the type is 16-byte aligned); always zero.
+    pub reserved_end: [u8; 8],
 }
 
 impl EventResponse {
@@ -222,6 +228,7 @@ impl EventResponse {
             request_id,
             event: EventHandle::EMPTY,
             event_set: EventSetHandle::EMPTY,
+            reserved_end: [0; 8],
         }
     }
 
@@ -278,6 +285,7 @@ impl ProgramBootstrapPage {
             ipc_generation: 0,
             reserved: 0,
             program_generation: 0,
+            reserved_generation: [0; 4],
             client: ServiceHandle::EMPTY,
             surface_request: CapabilityHandle::EMPTY,
             surface_response: CapabilityHandle::EMPTY,
@@ -402,15 +410,21 @@ pub struct DirectoryRecord {
     pub kind: DirectoryRecordKind,
     pub rights: u8,
     pub flags: u16,
+    /// Explicit padding before `handle`; always zero.
+    pub reserved_flags: [u8; 4],
     pub handle: u64,
     pub peer: ServiceHandle,
     pub contract_id: u16,
     pub message_bytes: u16,
     pub queue_capacity: u16,
+    /// Explicit padding before `event`; always zero.
+    pub reserved_capacity: [u8; 2],
     pub event: EventHandle,
     pub name_len: u8,
     pub reserved: [u8; 1],
     pub name: [u8; MAX_SERVICE_NAME_BYTES],
+    /// Explicit trailing padding; always zero.
+    pub reserved_end: [u8; 6],
 }
 
 impl DirectoryRecord {
@@ -418,15 +432,18 @@ impl DirectoryRecord {
         kind: DirectoryRecordKind::Empty,
         rights: 0,
         flags: 0,
+        reserved_flags: [0; 4],
         handle: 0,
         peer: ServiceHandle::EMPTY,
         contract_id: 0,
         message_bytes: 0,
         queue_capacity: 0,
+        reserved_capacity: [0; 2],
         event: EventHandle::EMPTY,
         name_len: 0,
         reserved: [0; 1],
         name: [0; MAX_SERVICE_NAME_BYTES],
+        reserved_end: [0; 6],
     };
 
     pub fn service(handle: ServiceHandle, name: &[u8]) -> Option<Self> {
@@ -514,7 +531,11 @@ pub struct DirectoryResponse {
     pub count: u8,
     pub flags: u8,
     pub reserved: [u8; 2],
+    /// Explicit padding before `records`; always zero.
+    pub reserved_records: [u8; 4],
     pub records: [DirectoryRecord; DIRECTORY_RECORDS_PER_PAGE],
+    /// Explicit trailing padding (the type is 16-byte aligned); always zero.
+    pub reserved_end: [u8; 8],
 }
 
 impl DirectoryResponse {
@@ -532,7 +553,9 @@ impl DirectoryResponse {
             count: 0,
             flags: 0,
             reserved: [0; 2],
+            reserved_records: [0; 4],
             records: [DirectoryRecord::EMPTY; DIRECTORY_RECORDS_PER_PAGE],
+            reserved_end: [0; 8],
         }
     }
 
@@ -601,6 +624,7 @@ mod tests {
             ipc_generation: 2,
             reserved: 0,
             program_generation: 3,
+            reserved_generation: [0; 4],
             client,
             surface_request: capability(1),
             surface_response: capability(2),
