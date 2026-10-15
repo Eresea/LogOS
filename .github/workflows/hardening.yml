@@ -37,21 +37,19 @@ jobs:
       - name: logos-storage (request, transport, virtio, pci, gpu)
         run: |
           cargo +nightly miri test -p logos-storage --lib -- request:: transport:: virtio:: pci:: gpu::
-      # The kernel library is built for the host in tests. Only modules without
-      # hardware access and without a FramePool are interpreted. Excluded:
-      # - memory::, frame_pool::, page_table::, loader::, program_runtime:: build
-      #   a FramePool, whose host-test metadata (PhysicalFrameManager.test_metadata,
-      #   addressed through an integer-cast pointer) violates Stacked and Tree
-      #   Borrows at src/memory.rs:666. Test scaffolding only; tracked separately.
-      # - arch, service_runtime, user_mode and the virtio drivers touch ports,
-      #   MMIO and identity-mapped physical memory, which Miri cannot model (and
-      #   are not compiled for the host).
+      # The kernel library is built for the host in tests. Excluded: arch,
+      # service_runtime, user_mode and the virtio drivers, which touch ports,
+      # MMIO and identity-mapped physical memory that Miri cannot model (and
+      # are not compiled for the host). The frame allocator modules (memory::,
+      # frame_pool::, page_table::, loader::, program_runtime::) run under Miri
+      # and check the allocator's shard aliasing rules.
       - name: kernel library (pure modules)
         run: |
           cargo +nightly miri test -p logos-vnext --lib -- \
             scheduler:: process:: boot_resources:: network_config:: health:: \
             service_lifecycle:: service_manager:: service_images:: storage_ipc:: \
-            runtime_events:: runtime_ipc:: runtime_services:: supervisor:: virtio_net::
+            runtime_events:: runtime_ipc:: runtime_services:: supervisor:: virtio_net:: \
+            memory:: frame_pool:: page_table:: loader:: program_runtime::
 
   qemu-proof:
     name: QEMU boot proof (Linux)
