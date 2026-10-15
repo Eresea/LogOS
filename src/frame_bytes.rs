@@ -85,6 +85,12 @@ impl FrameBytes {
 
     /// Writes `value` at offset zero (unaligned); `false` if it does not fit.
     pub(crate) fn write<T: Copy>(&mut self, value: T) -> bool {
+        self.write_init(value)
+    }
+
+    /// Like [`Self::write`] for values that are not `Copy` (for example types
+    /// holding atomics) and are moved into a freshly cleared frame.
+    pub(crate) fn write_init<T>(&mut self, value: T) -> bool {
         if core::mem::size_of::<T>() > self.capacity {
             return false;
         }
@@ -93,6 +99,56 @@ impl FrameBytes {
         unsafe { core::ptr::write_unaligned(self.base.cast::<T>(), value) };
         true
     }
+
+    /// Volatile variant of [`Self::read`] for frames a user task can mutate
+    /// concurrently; the access is a single unaligned-tolerant copy.
+    pub(crate) fn read_volatile<T: Copy>(&self) -> Option<T> {
+        if core::mem::size_of::<T>() > self.capacity {
+            return None;
+        }
+        if self.base.align_offset(core::mem::align_of::<T>()) != 0 {
+            return None;
+        }
+        // SAFETY: the size check above keeps the read inside the region and the
+        // alignment check makes the volatile access well defined.
+        Some(unsafe { core::ptr::read_volatile(self.base.cast::<T>()) })
+    }
+
+    /// Volatile variant of [`Self::write`]; `false` if it does not fit or the
+    /// base is not aligned for `T`.
+    pub(crate) fn write_volatile<T: Copy>(&mut self, value: T) -> bool {
+        if core::mem::size_of::<T>() > self.capacity
+            || self.base.align_offset(core::mem::align_of::<T>()) != 0
+        {
+            return false;
+        }
+        // SAFETY: size and alignment were checked above.
+        unsafe { core::ptr::write_volatile(self.base.cast::<T>(), value) };
+        true
+    }
+}
+
+/// The in-memory bytes of a plain `repr(C)` wire value, for copying into a
+/// message or page.
+pub(crate) fn value_bytes<T: Copy>(value: &T) -> &[u8] {
+    // SAFETY: `value` is a live reference, so it is valid for `size_of::<T>()`
+    // bytes; `u8` has no alignment requirement and the borrow keeps the value
+    // alive and unmutated for the lifetime of the slice.
+    unsafe {
+        core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
+    }
+}
+
+/// Reads a `T` (unaligned) from the start of `bytes`, or `None` if `bytes` is
+/// shorter than `T`. Same contract as [`FrameBytes::read`], for byte arrays that
+/// are already inside a validated message.
+pub(crate) fn read_from_slice<T: Copy>(bytes: &[u8]) -> Option<T> {
+    if core::mem::size_of::<T>() > bytes.len() {
+        return None;
+    }
+    // SAFETY: the length check keeps the read inside `bytes`, and
+    // `read_unaligned` places no alignment requirement on the pointer.
+    Some(unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<T>()) })
 }
 
 #[cfg(test)]
@@ -182,5 +238,37 @@ mod tests {
         assert!(frame.write(0x0102_0304u32));
         assert_eq!(frame.bytes(4), Some(&[4, 3, 2, 1][..]));
         assert_eq!(frame.read::<u32>(), Some(0x0102_0304));
+    }
+
+    #[test]
+    fn volatile_round_trip_and_bounds() {
+        #[repr(align(8))]
+        struct Aligned([u8; 16]);
+        let mut backing = Aligned([0; 16]);
+        let mut frame = unsafe { FrameBytes::from_raw(backing.0.as_mut_ptr(), 16) };
+        assert!(frame.write_volatile(0x1122_3344_5566_7788u64));
+        assert_eq!(frame.read_volatile::<u64>(), Some(0x1122_3344_5566_7788));
+        assert!(!frame.write_volatile([0u8; 17]));
+        assert!(frame.read_volatile::<[u8; 17]>().is_none());
+        let mut frame = unsafe { FrameBytes::from_raw(backing.0.as_mut_ptr().add(1), 15) };
+        assert!(!frame.write_volatile(1u64));
+        assert!(frame.read_volatile::<u64>().is_none());
+    }
+
+    #[test]
+    fn value_bytes_round_trips_through_read_from_slice() {
+        let wire = Wire { a: 7, b: 9 };
+        let bytes = value_bytes(&wire);
+        assert_eq!(bytes.len(), core::mem::size_of::<Wire>());
+        assert_eq!(read_from_slice::<Wire>(bytes), Some(wire));
+    }
+
+    #[test]
+    fn read_from_slice_bounds() {
+        let bytes = [1u8, 0, 0, 0, 9];
+        assert_eq!(read_from_slice::<u32>(&bytes), Some(1));
+        assert_eq!(read_from_slice::<u32>(&bytes[1..]), Some(0x0900_0000));
+        assert!(read_from_slice::<u32>(&bytes[..3]).is_none());
+        assert!(read_from_slice::<u8>(&[]).is_none());
     }
 }
