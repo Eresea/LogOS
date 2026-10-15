@@ -4,6 +4,7 @@ use crate::arch::{USER_CODE_SELECTOR, USER_DATA_SELECTOR};
 use crate::process::{
     AddressSpaceRoot, ElfLoadPlan, MappingFlags, ProcessHandle, ProcessTable, VirtualMapping,
 };
+use crate::syscall::{Syscall, SyscallFrame};
 use crate::{SCHEDULER, TaskHandle};
 
 const PAGE_SIZE: usize = 4096;
@@ -15,22 +16,7 @@ const USER_CODE_VA: usize = 0x0000_0080_0000_0000;
 const USER_STACK_VA: usize = USER_CODE_VA + PAGE_SIZE;
 const SWITCH_VECTOR: u8 = 49;
 const PROOF_IMAGE_LEN: usize = 0x89;
-const SYSCALL_YIELD: usize = 1;
-const SYSCALL_EVENT: usize = logos_abi::EVENT_SYSCALL;
-const SYSCALL_CURRENT_TICKS: usize = logos_abi::CURRENT_TICKS_SYSCALL;
-const SYSCALL_WALL_TIME: usize = logos_abi::WALL_TIME_SYSCALL;
-const SYSCALL_SYSTEM_INFO: usize = logos_abi::SYSTEM_INFO_SYSCALL;
-#[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
-const SYSCALL_DEBUG_LINE: usize = logos_abi::DEBUG_LINE_SYSCALL;
-const SYSCALL_SERVICE_HEAP_GROW: usize = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
-const SYSCALL_SERVICE_HEAP_SHRINK: usize = logos_abi::SERVICE_HEAP_SHRINK_SYSCALL;
-const SYSCALL_DIRECTORY: usize = logos_abi::SERVICE_DIRECTORY_SYSCALL;
-const SYSCALL_IPC_SEND: usize = logos_abi::IPC_SYSCALL_SEND;
-const SYSCALL_IPC_RECEIVE: usize = logos_abi::IPC_SYSCALL_RECEIVE;
-const SYSCALL_MANAGER: usize = logos_abi::MANAGER_SYSCALL;
-const SYSCALL_EXIT: usize = logos_abi::PROGRAM_EXIT_SYSCALL;
-const SYSCALL_POWER: usize = logos_abi::POWER_SYSCALL;
-const SYSCALL_HEARTBEAT: usize = 10;
+const SYSCALL_YIELD: usize = logos_abi::YIELD_SYSCALL;
 
 #[repr(C, align(4096))]
 struct PageTable([u64; 512]);
@@ -183,204 +169,141 @@ fn mark_fault(vector: usize) -> bool {
     true
 }
 
+/// Syscalls that run kernel services and so need the kernel address space.
+fn needs_kernel_space(syscall: Syscall) -> bool {
+    matches!(
+        syscall,
+        Syscall::Event
+            | Syscall::DebugLine
+            | Syscall::HeapGrow
+            | Syscall::HeapShrink
+            | Syscall::IpcSend
+            | Syscall::IpcReceive
+            | Syscall::Directory
+            | Syscall::Manager
+    )
+}
+
 pub(crate) fn dispatch_syscall(handle: TaskHandle, fx_context: usize) -> bool {
-    let gpr = unsafe { core::ptr::read_unaligned((fx_context as *const usize).add(64)) };
-    let number = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(14)) };
-    if number == SYSCALL_YIELD {
-        if USER_FAULTED.load(Ordering::Acquire)
-            || handle.raw() != USER_TASK_RAW.load(Ordering::Acquire)
-        {
-            return false;
-        }
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), 0) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
-    if number == SYSCALL_EVENT {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
-        prepare_kernel();
-        let status = crate::arch::event_call(launch.process(), length);
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        prepare_address_space(launch.address_space_root());
-        return true;
-    }
-    if number == SYSCALL_CURRENT_TICKS {
-        if SCHEDULER.user_launch(handle).is_none() {
-            return false;
-        }
-        unsafe {
-            core::ptr::write_unaligned((gpr as *mut usize).add(14), crate::current_ticks() as usize)
-        };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
-    if number == SYSCALL_WALL_TIME {
-        if SCHEDULER.user_launch(handle).is_none() {
-            return false;
-        }
-        let packed = crate::arch::wall_time().pack();
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), packed as usize) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
-    if number == SYSCALL_SYSTEM_INFO {
-        if SCHEDULER.user_launch(handle).is_none() {
-            return false;
-        }
-        let packed = crate::arch::system_info().pack();
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), packed as usize) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
-    #[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
-    if number == SYSCALL_DEBUG_LINE {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
-        prepare_kernel();
-        let status = if crate::arch::service_debug_line(launch.process(), length) { 0 } else { 1 };
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        prepare_address_space(launch.address_space_root());
-        return true;
-    }
-    if number == SYSCALL_SERVICE_HEAP_GROW {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let capability_raw =
-            unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
-        let pages = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
-        prepare_kernel();
-        let status = crate::arch::grow_service_heap(launch.process(), capability_raw, pages);
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        prepare_address_space(launch.address_space_root());
-        return true;
-    }
-    if number == SYSCALL_SERVICE_HEAP_SHRINK {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let capability_raw =
-            unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
-        let pages = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
-        prepare_kernel();
-        let status = crate::arch::shrink_service_heap(launch.process(), capability_raw, pages);
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        prepare_address_space(launch.address_space_root());
-        return true;
-    }
-    if number == SYSCALL_IPC_SEND {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let capability_raw =
-            unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
-        let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
-        prepare_kernel();
-        let outcome = crate::arch::ipc_send(launch.process(), capability_raw, length);
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), outcome.status as usize) };
-        #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
-        if outcome.status == logos_abi::IpcStatus::Unauthorized {
-            crate::proof::hostile_ipc_syscall_rejected();
-        }
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        prepare_address_space(launch.address_space_root());
-        return true;
-    }
-    if number == SYSCALL_DIRECTORY {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let capability_raw =
-            unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
-        let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
-        prepare_kernel();
-        let status = crate::arch::directory_call(launch.process(), capability_raw, length);
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        prepare_address_space(launch.address_space_root());
-        return true;
-    }
-    if number == SYSCALL_IPC_RECEIVE {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let capability_raw =
-            unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
-        prepare_kernel();
-        let outcome = crate::arch::ipc_receive(launch.process(), capability_raw);
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), outcome.status as usize) };
-        #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
-        if outcome.status == logos_abi::IpcStatus::Unauthorized {
-            crate::proof::hostile_ipc_syscall_rejected();
-        }
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        prepare_address_space(launch.address_space_root());
-        return true;
-    }
-    if number == SYSCALL_MANAGER {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let capability_raw =
-            unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u64;
-        let length = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(9)) };
-        prepare_kernel();
-        let status = crate::arch::manager_call(launch.process(), capability_raw, length);
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status as usize) };
-        #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
-        if status == logos_abi::IpcStatus::Ok {
-            crate::proof::manager_syscall_succeeded();
-        }
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        prepare_address_space(launch.address_space_root());
-        return true;
-    }
-    if number == SYSCALL_POWER {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let action = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) };
-        let status = if crate::arch::power_control(launch.process(), action) { 0 } else { 1 };
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
-    if number == SYSCALL_EXIT {
-        let Some(launch) = SCHEDULER.user_launch(handle) else {
-            return false;
-        };
-        let code = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) } as u8;
-        let status = if crate::arch::exit_process(launch.process(), code) { 0 } else { 1 };
-        if status == 0 {
-            let _ = SCHEDULER.request_stop(handle);
-        }
-        unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), status) };
-        USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
-        return true;
-    }
-    if number != SYSCALL_HEARTBEAT {
+    // SAFETY: the vector-49 stub passes the fxsave area built by `context_common`.
+    let mut frame = unsafe { SyscallFrame::from_fx_context(fx_context) };
+    // Unknown numbers fall through to the caller's contained-fault path.
+    let Ok(syscall) = frame.number() else {
         return false;
+    };
+    match syscall {
+        Syscall::Yield => {
+            if USER_FAULTED.load(Ordering::Acquire)
+                || handle.raw() != USER_TASK_RAW.load(Ordering::Acquire)
+            {
+                return false;
+            }
+            frame.set_return(0);
+            USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        Syscall::Heartbeat => return heartbeat(handle, &mut frame),
+        // Without a debug console the number behaves like an unknown one.
+        #[cfg(not(any(feature = "qemu-proof", feature = "input-debug")))]
+        Syscall::DebugLine => return false,
+        _ => {}
     }
     let Some(launch) = SCHEDULER.user_launch(handle) else {
         return false;
     };
-    let service = unsafe { core::ptr::read_unaligned((gpr as *const usize).add(8)) as u64 };
-    let Some(service) = logos_abi::ServiceHandle::from_raw(service) else {
+    let process = launch.process();
+    let kernel_space = needs_kernel_space(syscall);
+    if kernel_space {
+        prepare_kernel();
+    }
+    let value = match syscall {
+        Syscall::Yield | Syscall::Heartbeat => unreachable!("handled before the common path"),
+        Syscall::Event => crate::arch::event_call(process, frame.arg(1)) as usize,
+        Syscall::CurrentTicks => crate::current_ticks() as usize,
+        Syscall::WallTime => crate::arch::wall_time().pack() as usize,
+        Syscall::SystemInfo => crate::arch::system_info().pack() as usize,
+        #[cfg(any(feature = "qemu-proof", feature = "input-debug"))]
+        Syscall::DebugLine => {
+            if crate::arch::service_debug_line(process, frame.arg(0)) {
+                0
+            } else {
+                1
+            }
+        }
+        #[cfg(not(any(feature = "qemu-proof", feature = "input-debug")))]
+        Syscall::DebugLine => unreachable!("rejected before the common path"),
+        Syscall::HeapGrow => {
+            crate::arch::grow_service_heap(process, frame.arg(0) as u64, frame.arg(1)) as usize
+        }
+        Syscall::HeapShrink => {
+            crate::arch::shrink_service_heap(process, frame.arg(0) as u64, frame.arg(1)) as usize
+        }
+        Syscall::IpcSend => {
+            let outcome = crate::arch::ipc_send(process, frame.arg(0) as u64, frame.arg(1));
+            #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
+            if outcome.status == logos_abi::IpcStatus::Unauthorized {
+                crate::proof::hostile_ipc_syscall_rejected();
+            }
+            outcome.status as usize
+        }
+        Syscall::Directory => {
+            crate::arch::directory_call(process, frame.arg(0) as u64, frame.arg(1)) as usize
+        }
+        Syscall::IpcReceive => {
+            let outcome = crate::arch::ipc_receive(process, frame.arg(0) as u64);
+            #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
+            if outcome.status == logos_abi::IpcStatus::Unauthorized {
+                crate::proof::hostile_ipc_syscall_rejected();
+            }
+            outcome.status as usize
+        }
+        Syscall::Manager => {
+            let status = crate::arch::manager_call(process, frame.arg(0) as u64, frame.arg(1));
+            #[cfg(all(feature = "qemu-proof", target_os = "uefi"))]
+            if status == logos_abi::IpcStatus::Ok {
+                crate::proof::manager_syscall_succeeded();
+            }
+            status as usize
+        }
+        Syscall::Power => {
+            if crate::arch::power_control(process, frame.arg(0)) {
+                0
+            } else {
+                1
+            }
+        }
+        Syscall::Exit => {
+            let code = frame.arg(0) as u8;
+            if crate::arch::exit_process(process, code) {
+                let _ = SCHEDULER.request_stop(handle);
+                0
+            } else {
+                1
+            }
+        }
+    };
+    // The frame lives in kernel memory: write the result before leaving the
+    // kernel address space.
+    frame.set_return(value);
+    USER_SYSCALLS.fetch_add(1, Ordering::Relaxed);
+    if kernel_space {
+        prepare_address_space(launch.address_space_root());
+    }
+    true
+}
+
+/// Heartbeat is not counted and rejects (contained fault) on a bad handle.
+fn heartbeat(handle: TaskHandle, frame: &mut SyscallFrame) -> bool {
+    let Some(launch) = SCHEDULER.user_launch(handle) else {
+        return false;
+    };
+    let Some(service) = logos_abi::ServiceHandle::from_raw(frame.arg(0) as u64) else {
         return false;
     };
     if !crate::arch::record_service_heartbeat(service, launch.process(), crate::current_ticks()) {
         return false;
     }
-    unsafe { core::ptr::write_unaligned((gpr as *mut usize).add(14), 0) };
+    frame.set_return(0);
     true
 }
 
