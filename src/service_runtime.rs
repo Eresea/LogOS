@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use logos_abi::{ServiceHandle, ServiceId};
 
+use crate::frame_bytes::FrameBytes;
 use crate::memory::{ExclusionKind, MemoryExclusion, OwnerId};
 use crate::{
     frame_pool::{FrameAddress, FramePool},
@@ -137,6 +138,17 @@ fn service_id_for_handle(
     handle: logos_abi::ServiceHandle,
 ) -> Option<ServiceId> {
     handles.iter().position(|current| *current == handle).and_then(ServiceId::from_index)
+}
+
+fn write_manager_response(
+    staging_frame: FrameAddress,
+    response: logos_abi::ManagerResponse,
+) -> logos_abi::IpcStatus {
+    if FrameBytes::from_frame(staging_frame).write(response) {
+        logos_abi::IpcStatus::Ok
+    } else {
+        logos_abi::IpcStatus::Malformed
+    }
 }
 
 fn event_status(error: crate::runtime_events::EventError) -> logos_abi::EventStatus {
@@ -1202,9 +1214,8 @@ impl ServiceRuntime {
                     self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
                 self.network_config_frame = Some(config);
                 memory.clear(config).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
-                unsafe {
-                    (config.raw() as usize as *mut logos_abi::NetworkConfig)
-                        .write(self.network_config);
+                if !FrameBytes::from_frame(config).write(self.network_config) {
+                    return Err(ServiceRuntimeError::Resources);
                 }
                 self.map_ipc_private_page(
                     process,
@@ -1232,13 +1243,17 @@ impl ServiceRuntime {
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
         self.framebuffer_config_frame = Some(framebuffer_config_frame);
         memory.clear(framebuffer_config_frame).map_err(ServiceRuntimeError::FramebufferConfig)?;
-        initialize_framebuffer_config(framebuffer_config_frame, framebuffer);
+        if !initialize_framebuffer_config(framebuffer_config_frame, framebuffer) {
+            return Err(ServiceRuntimeError::Resources);
+        }
         self.map_framebuffer_config(framebuffer_config_frame)?;
         let framebuffer_present_frame =
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
         self.framebuffer_present_frame = Some(framebuffer_present_frame);
         memory.clear(framebuffer_present_frame).map_err(ServiceRuntimeError::FramebufferPresent)?;
-        initialize_framebuffer_present(framebuffer_present_frame);
+        if !initialize_framebuffer_present(framebuffer_present_frame) {
+            return Err(ServiceRuntimeError::Resources);
+        }
         self.map_framebuffer_present(framebuffer_present_frame)?;
         let keyboard_frame =
             self.frame_pool.allocate().map_err(|_| ServiceRuntimeError::Resources)?;
@@ -1285,7 +1300,10 @@ impl ServiceRuntime {
                 + if service == ServiceId::User { logos_abi::USER_KDF_WORKSPACE_PAGES } else { 0 };
             let image_frames = match source {
                 ServiceImageSource::FilesystemPackage => {
-                    image.page_count() + execution.table.as_ref().unwrap().table_count()
+                    let Some(tables) = execution.table.as_ref() else {
+                        return false;
+                    };
+                    image.page_count() + tables.table_count()
                 }
                 ServiceImageSource::Builtin => 0,
             };
@@ -1300,9 +1318,9 @@ impl ServiceRuntime {
         if !self.executions[index].table_ready {
             return None;
         }
-        // SAFETY: `table_ready` is set only after the corresponding builder is
-        // initialized and remains true for the runtime lifetime.
-        Some(self.executions[index].table.as_ref().unwrap().root().raw() as usize)
+        // `table_ready` is set only after the builder is initialized, so the
+        // `?` below does not fire in practice; it keeps the API total.
+        Some(self.executions[index].table.as_ref()?.root().raw() as usize)
     }
 
     pub fn launch(&self, service: ServiceId) -> Option<(ProcessHandle, UserLaunch)> {
@@ -1351,7 +1369,10 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::FramebufferProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.executions[index].table.as_mut().unwrap();
+        let tables = self.executions[index]
+            .table
+            .as_mut()
+            .ok_or(ServiceRuntimeError::FramebufferProcess(ProcessError::InvalidHandle))?;
         for page in 0..pages {
             let offset = (page as u64)
                 .checked_mul(crate::boot_resources::PAGE_SIZE)
@@ -1387,7 +1408,10 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::KeyboardProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.executions[index].table.as_mut().unwrap();
+        let tables = self.executions[index]
+            .table
+            .as_mut()
+            .ok_or(ServiceRuntimeError::KeyboardProcess(ProcessError::InvalidHandle))?;
         tables
             .map_raw_page(
                 logos_abi::INPUT_KEYBOARD_RING_BASE,
@@ -1414,7 +1438,10 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::PointerProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.executions[index].table.as_mut().unwrap();
+        let tables = self.executions[index]
+            .table
+            .as_mut()
+            .ok_or(ServiceRuntimeError::PointerProcess(ProcessError::InvalidHandle))?;
         tables
             .map_raw_page(
                 logos_abi::INPUT_POINTER_RING_BASE,
@@ -1448,7 +1475,7 @@ impl ServiceRuntime {
         self.executions[index]
             .table
             .as_mut()
-            .unwrap()
+            .ok_or(ServiceRuntimeError::IpcPrivateProcess(ProcessError::InvalidHandle))?
             .map_raw_page(virtual_address, frame, flags, &mut self.frame_pool, &mut memory)
             .map_err(ServiceRuntimeError::IpcPrivateMapping)?;
         let mapping = VirtualMapping::new(virtual_address, frame.raw() as usize, 1, flags)
@@ -1526,7 +1553,9 @@ impl ServiceRuntime {
             heap_pages: initial_heap_pages as u32,
             heap_quota_pages: heap_quota_pages as u32,
         };
-        unsafe { core::ptr::write_unaligned(bootstrap.raw() as usize as *mut _, page) };
+        if !FrameBytes::from_frame(bootstrap).write(page) {
+            return Err(ServiceRuntimeError::Resources);
+        }
         tables
             .map_raw_page(
                 logos_abi::SERVICE_BOOTSTRAP_BASE,
@@ -1626,11 +1655,9 @@ impl ServiceRuntime {
                     for rollback in 0..offset {
                         let address = logos_abi::SERVICE_HEAP_BASE
                             + (page + rollback) * crate::loader::PAGE_SIZE;
-                        let _ = self.executions[index]
-                            .table
-                            .as_mut()
-                            .unwrap()
-                            .unmap_page(address, &mut memory);
+                        if let Some(tables) = self.executions[index].table.as_mut() {
+                            let _ = tables.unmap_page(address, &mut memory);
+                        }
                     }
                     for frame in frames[..offset].iter().flatten().copied() {
                         let _ = self.frame_pool.release(frame);
@@ -1642,11 +1669,9 @@ impl ServiceRuntime {
                 for rollback in 0..offset {
                     let address =
                         logos_abi::SERVICE_HEAP_BASE + (page + rollback) * crate::loader::PAGE_SIZE;
-                    let _ = self.executions[index]
-                        .table
-                        .as_mut()
-                        .unwrap()
-                        .unmap_page(address, &mut memory);
+                    if let Some(tables) = self.executions[index].table.as_mut() {
+                        let _ = tables.unmap_page(address, &mut memory);
+                    }
                 }
                 let _ = self.frame_pool.release(frame);
                 for frame in frames[..offset].iter().flatten().copied() {
@@ -1655,21 +1680,25 @@ impl ServiceRuntime {
                 return logos_abi::IpcStatus::Full;
             }
             let address = logos_abi::SERVICE_HEAP_BASE + (page + offset) * crate::loader::PAGE_SIZE;
-            if self.executions[index]
-                .table
-                .as_mut()
-                .unwrap()
-                .map_raw_page(address, frame, MappingFlags::DATA, &mut self.frame_pool, &mut memory)
-                .is_err()
-            {
+            let mapped = match self.executions[index].table.as_mut() {
+                Some(tables) => tables
+                    .map_raw_page(
+                        address,
+                        frame,
+                        MappingFlags::DATA,
+                        &mut self.frame_pool,
+                        &mut memory,
+                    )
+                    .is_ok(),
+                None => false,
+            };
+            if !mapped {
                 for rollback in 0..offset {
                     let rollback_address =
                         logos_abi::SERVICE_HEAP_BASE + (page + rollback) * crate::loader::PAGE_SIZE;
-                    let _ = self.executions[index]
-                        .table
-                        .as_mut()
-                        .unwrap()
-                        .unmap_page(rollback_address, &mut memory);
+                    if let Some(tables) = self.executions[index].table.as_mut() {
+                        let _ = tables.unmap_page(rollback_address, &mut memory);
+                    }
                 }
                 let _ = self.frame_pool.release(frame);
                 for frame in frames[..offset].iter().flatten().copied() {
@@ -1693,11 +1722,9 @@ impl ServiceRuntime {
             for (offset, frame) in frames.iter().enumerate().take(pages) {
                 let address =
                     logos_abi::SERVICE_HEAP_BASE + (page + offset) * crate::loader::PAGE_SIZE;
-                let _ = self.executions[index]
-                    .table
-                    .as_mut()
-                    .unwrap()
-                    .unmap_page(address, &mut IdentityPageTableMemory);
+                if let Some(tables) = self.executions[index].table.as_mut() {
+                    let _ = tables.unmap_page(address, &mut IdentityPageTableMemory);
+                }
                 let _ = self.executions[index].heap.frames.pop();
                 if let Some(frame) = *frame {
                     let _ = self.frame_pool.release(frame);
@@ -1744,7 +1771,9 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Full;
         }
         let address = logos_abi::SERVICE_HEAP_BASE + (page - 1) * crate::loader::PAGE_SIZE;
-        let tables = self.executions[index].table.as_mut().unwrap();
+        let Some(tables) = self.executions[index].table.as_mut() else {
+            return logos_abi::IpcStatus::Stale;
+        };
         let mut memory = IdentityPageTableMemory;
         let frame = match tables.unmap_page(address, &mut memory) {
             Ok(frame) => frame,
@@ -1776,7 +1805,10 @@ impl ServiceRuntime {
             return Err(ServiceRuntimeError::FramebufferConfigProcess(ProcessError::InvalidHandle));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.executions[index].table.as_mut().unwrap();
+        let tables = self.executions[index]
+            .table
+            .as_mut()
+            .ok_or(ServiceRuntimeError::FramebufferConfigProcess(ProcessError::InvalidHandle))?;
         tables
             .map_raw_page(
                 logos_abi::DISPLAY_CONFIG_BASE,
@@ -1805,7 +1837,10 @@ impl ServiceRuntime {
             ));
         };
         let mut memory = IdentityPageTableMemory;
-        let tables = self.executions[index].table.as_mut().unwrap();
+        let tables = self.executions[index]
+            .table
+            .as_mut()
+            .ok_or(ServiceRuntimeError::FramebufferPresentProcess(ProcessError::InvalidHandle))?;
         tables
             .map_raw_page(
                 logos_abi::DISPLAY_PRESENT_BASE,
@@ -2023,9 +2058,8 @@ impl ServiceRuntime {
         if service == ServiceId::Network {
             if let Some(frame) = self.network_config_frame {
                 memory.clear(frame).map_err(ServiceRuntimeError::IpcPrivateMapping)?;
-                unsafe {
-                    (frame.raw() as usize as *mut logos_abi::NetworkConfig)
-                        .write(self.network_config);
+                if !FrameBytes::from_frame(frame).write(self.network_config) {
+                    return Err(ServiceRuntimeError::Resources);
                 }
             }
             // Packet pages are Core-owned VirtIO DMA buffers. A targeted
@@ -2464,17 +2498,15 @@ impl ServiceRuntime {
                 self.set_package_request_slot(None);
                 return Err(ProcessError::ReadFailure);
             };
-            unsafe {
-                core::ptr::write_unaligned(
-                    staging_frame.raw() as usize as *mut logos_abi::PackageRequest,
-                    request,
-                );
+            let mut staging = FrameBytes::from_frame(staging_frame);
+            if !staging.write(request) {
+                self.set_package_request_slot(None);
+                return Err(ProcessError::ReadFailure);
             }
-            let bytes = unsafe {
-                core::slice::from_raw_parts(
-                    staging_frame.raw() as usize as *const u8,
-                    core::mem::size_of::<logos_abi::PackageRequest>(),
-                )
+            let Some(bytes) = staging.bytes(core::mem::size_of::<logos_abi::PackageRequest>())
+            else {
+                self.set_package_request_slot(None);
+                return Err(ProcessError::ReadFailure);
             };
             let core = match dynamic_core_handle((self.service_epoch as u32).max(1)) {
                 Ok(core) => core,
@@ -2513,12 +2545,11 @@ impl ServiceRuntime {
                     let Some(frame) = self.storage_data_frames[0] else {
                         return Err(ProcessError::ReadFailure);
                     };
-                    unsafe {
-                        output[..amount].copy_from_slice(core::slice::from_raw_parts(
-                            frame.raw() as usize as *const u8,
-                            amount,
-                        ));
-                    }
+                    let data = FrameBytes::from_frame(frame);
+                    let Some(source) = data.bytes(amount) else {
+                        return Err(ProcessError::ReadFailure);
+                    };
+                    output[..amount].copy_from_slice(source);
                 }
                 return Ok(response);
             }
@@ -2761,8 +2792,12 @@ impl ServiceRuntime {
             };
         };
         let request_bytes = core::mem::size_of::<logos_abi::DeviceRequest>();
-        let request = unsafe {
-            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, request_bytes)
+        let mut staging = FrameBytes::from_frame(staging_frame);
+        let Some(request) = staging.bytes(request_bytes) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
         };
         let request_status = self.send_dynamic(caller, capability, request);
         if request_status != logos_abi::IpcStatus::Ok {
@@ -2792,20 +2827,27 @@ impl ServiceRuntime {
                 Ok(capability) => capability,
                 Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
             };
-        let request = unsafe {
-            core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, request_bytes)
+        let Some(request) = staging.bytes_mut(request_bytes) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
         };
         let receive_status = self.receive_dynamic(core, core_capability, request);
         if receive_status != logos_abi::IpcStatus::Ok {
             return crate::service_ipc::IpcOutcome { status: receive_status, notified: false };
         }
-        let wire = unsafe {
-            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, request_bytes)
+        let Some(wire) = staging.bytes(request_bytes) else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
         };
-        let request = unsafe {
-            core::ptr::read_unaligned(
-                staging_frame.raw() as usize as *const logos_abi::DeviceRequest
-            )
+        let Some(request) = staging.read::<logos_abi::DeviceRequest>() else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
         };
         if !logos_abi::DeviceRequest::wire_enums_valid(wire)
             || crate::device_ipc::validate_dynamic_request(
@@ -2825,11 +2867,11 @@ impl ServiceRuntime {
                 crate::arch::device_list_response(request, self.ipc_generation, self.service_epoch)
             }
         };
-        unsafe {
-            core::ptr::write_unaligned(
-                staging_frame.raw() as usize as *mut logos_abi::DeviceResponse,
-                response,
-            );
+        if !staging.write(response) {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
         }
         let Some(response_endpoint) = self
             .dynamic_endpoint(
@@ -2849,11 +2891,12 @@ impl ServiceRuntime {
                 Ok(capability) => capability,
                 Err(status) => return crate::service_ipc::IpcOutcome { status, notified: false },
             };
-        let response_bytes = unsafe {
-            core::slice::from_raw_parts(
-                staging_frame.raw() as usize as *const u8,
-                core::mem::size_of::<logos_abi::DeviceResponse>(),
-            )
+        let Some(response_bytes) = staging.bytes(core::mem::size_of::<logos_abi::DeviceResponse>())
+        else {
+            return crate::service_ipc::IpcOutcome {
+                status: logos_abi::IpcStatus::Malformed,
+                notified: false,
+            };
         };
         let response_status = self.send_dynamic(core, response_capability, response_bytes);
         crate::service_ipc::IpcOutcome {
@@ -2873,8 +2916,9 @@ impl ServiceRuntime {
         let Some(staging_frame) = self.executions[service.index()].ipc_staging_frame else {
             return logos_abi::IpcStatus::Unauthorized;
         };
-        let request = unsafe {
-            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, message_bytes)
+        let mut staging = FrameBytes::from_frame(staging_frame);
+        let Some(request) = staging.bytes(message_bytes) else {
+            return logos_abi::IpcStatus::Malformed;
         };
         let status = self.send_dynamic(caller, capability, request);
         if status != logos_abi::IpcStatus::Ok {
@@ -2888,8 +2932,8 @@ impl ServiceRuntime {
             Ok(capability) => capability,
             Err(status) => return status,
         };
-        let request = unsafe {
-            core::slice::from_raw_parts_mut(staging_frame.raw() as usize as *mut u8, message_bytes)
+        let Some(request) = staging.bytes_mut(message_bytes) else {
+            return logos_abi::IpcStatus::Malformed;
         };
         self.receive_dynamic(core, core_capability, request)
     }
@@ -2911,8 +2955,9 @@ impl ServiceRuntime {
             Ok(capability) => capability,
             Err(status) => return status,
         };
-        let bytes = unsafe {
-            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, message_bytes)
+        let staging = FrameBytes::from_frame(staging_frame);
+        let Some(bytes) = staging.bytes(message_bytes) else {
+            return logos_abi::IpcStatus::Malformed;
         };
         self.send_dynamic(core, core_capability, bytes)
     }
@@ -3018,22 +3063,11 @@ impl ServiceRuntime {
     }
 
     fn endpoint_requires_core_dispatch(&self, endpoint: logos_abi::EndpointHandle) -> bool {
-        [
-            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_STORAGE_REQUEST),
-            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_STORAGE_RESPONSE),
-            (Some(ServiceId::Network), None, logos_abi::IPC_CONTRACT_PACKET),
-            (None, Some(ServiceId::Network), logos_abi::IPC_CONTRACT_PACKET),
-            (Some(ServiceId::Device), None, logos_abi::IPC_CONTRACT_DEVICE_REQUEST),
-            (None, Some(ServiceId::Device), logos_abi::IPC_CONTRACT_DEVICE_RESPONSE),
-            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_PACKAGE_REQUEST),
-            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_PACKAGE_RESPONSE),
-            (Some(ServiceId::Storage), None, logos_abi::IPC_CONTRACT_STORAGE_MAP_REQUEST),
-            (None, Some(ServiceId::Storage), logos_abi::IPC_CONTRACT_STORAGE_MAP_RESPONSE),
-        ]
-        .into_iter()
-        .any(|(producer, consumer, contract)| {
-            self.dynamic_contract_matches(endpoint, producer, consumer, contract)
-        })
+        crate::ipc_contracts::CORE_DISPATCH_CONTRACTS.iter().any(
+            |&(producer, consumer, contract)| {
+                self.dynamic_contract_matches(endpoint, producer, consumer, contract)
+            },
+        )
     }
 
     pub(crate) fn ipc_send(
@@ -3119,8 +3153,12 @@ impl ServiceRuntime {
                     notified: false,
                 };
             };
-            let bytes = unsafe {
-                core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
+            let staging = FrameBytes::from_frame(staging_frame);
+            let Some(bytes) = staging.bytes(length) else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             #[cfg(feature = "storage-proof")]
             if service == Some(ServiceId::Flow)
@@ -3169,6 +3207,7 @@ impl ServiceRuntime {
                 notified: false,
             };
         };
+        let mut staging = FrameBytes::from_frame(staging_frame);
         if service == Some(ServiceId::Network)
             && self.dynamic_contract_matches(
                 endpoint,
@@ -3183,11 +3222,13 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let wire = unsafe {
-                core::slice::from_raw_parts(
-                    staging_frame.raw() as usize as *const u8,
-                    core::mem::size_of::<logos_abi::NetworkPacketDescriptor>(),
-                )
+            let Some(wire) =
+                staging.bytes(core::mem::size_of::<logos_abi::NetworkPacketDescriptor>())
+            else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             if !logos_abi::NetworkPacketDescriptor::wire_enums_valid(wire) {
                 return crate::service_ipc::IpcOutcome {
@@ -3195,8 +3236,12 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let descriptor: logos_abi::NetworkPacketDescriptor =
-                unsafe { core::ptr::read_unaligned(staging_frame.raw() as usize as *const _) };
+            let Some(descriptor) = staging.read::<logos_abi::NetworkPacketDescriptor>() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            };
             if !descriptor.is_valid() {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
@@ -3264,11 +3309,11 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let wire = unsafe {
-                core::slice::from_raw_parts(
-                    staging_frame.raw() as usize as *const u8,
-                    core::mem::size_of::<logos_abi::IpcBytes>(),
-                )
+            let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::IpcBytes>()) else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             if !logos_abi::IpcBytes::wire_enums_valid(wire) {
                 return crate::service_ipc::IpcOutcome {
@@ -3276,8 +3321,11 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let request_message = unsafe {
-                core::ptr::read_unaligned(staging_frame.raw() as usize as *const logos_abi::IpcBytes)
+            let Some(request_message) = staging.read::<logos_abi::IpcBytes>() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             if request_message.kind != logos_abi::MessageKind::NetworkRequest
                 || request_message.len as usize != core::mem::size_of::<logos_abi::NetworkRequest>()
@@ -3295,20 +3343,21 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let request: logos_abi::NetworkRequest =
-                unsafe { core::ptr::read_unaligned(request_message.bytes.as_ptr().cast()) };
+            let Some(request) = crate::frame_bytes::read_from_slice::<logos_abi::NetworkRequest>(
+                &request_message.bytes,
+            ) else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            };
             let response = logos_abi::NetworkResponse::new(
                 request.operation,
                 logos_abi::NetworkResult::Disabled,
                 logos_abi::NetworkState::Disabled,
                 request.request_id,
             );
-            let response_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    (&response as *const logos_abi::NetworkResponse).cast::<u8>(),
-                    core::mem::size_of::<logos_abi::NetworkResponse>(),
-                )
-            };
+            let response_bytes = crate::frame_bytes::value_bytes(&response);
             let response_message = logos_abi::IpcBytes::from_bytes(
                 logos_abi::MessageKind::NetworkResponse,
                 response_bytes,
@@ -3318,17 +3367,17 @@ impl ServiceRuntime {
             .unwrap_or_else(|_| {
                 logos_abi::IpcBytes::empty(logos_abi::MessageKind::NetworkResponse)
             });
-            unsafe {
-                core::ptr::write_unaligned(
-                    staging_frame.raw() as usize as *mut logos_abi::IpcBytes,
-                    response_message,
-                );
+            if !staging.write(response_message) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             }
-            let bytes = unsafe {
-                core::slice::from_raw_parts(
-                    staging_frame.raw() as usize as *const u8,
-                    core::mem::size_of::<logos_abi::IpcBytes>(),
-                )
+            let Some(bytes) = staging.bytes(core::mem::size_of::<logos_abi::IpcBytes>()) else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             let network = match self.runtime_service_handle(ServiceId::Network) {
                 Ok(network) => network,
@@ -3386,10 +3435,11 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let request = unsafe {
-                core::ptr::read_unaligned(
-                    staging_frame.raw() as usize as *const logos_abi::StorageMapRequest
-                )
+            let Some(request) = staging.read::<logos_abi::StorageMapRequest>() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             let status = if request.operation == crate::storage_ipc::STORAGE_MAP_OPERATION {
                 if request.request_id == 0
@@ -3518,11 +3568,11 @@ impl ServiceRuntime {
             {
                 return crate::service_ipc::IpcOutcome { status, notified: false };
             }
-            unsafe {
-                core::ptr::write_unaligned(
-                    staging_frame.raw() as usize as *mut logos_abi::StorageMapResponse,
-                    response,
-                );
+            if !staging.write(response) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             }
             let status = self.queue_dynamic_core_response(
                 ServiceId::Storage,
@@ -3554,15 +3604,24 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let bytes = staging_frame.raw() as usize as *const u8;
-            let operation = unsafe { *bytes };
+            let Some(&operation) = staging.bytes(1).and_then(|bytes| bytes.first()) else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            };
             if !(1..=9).contains(&operation) {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
                     notified: false,
                 };
             }
-            let request = unsafe { core::ptr::read_unaligned(bytes.cast()) };
+            let Some(request) = staging.read::<logos_abi::StorageRequest>() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
+            };
             let request = match crate::storage_ipc::validate_request(
                 request,
                 self.ipc_generation,
@@ -3681,11 +3740,11 @@ impl ServiceRuntime {
             {
                 return crate::service_ipc::IpcOutcome { status, notified: false };
             }
-            unsafe {
-                core::ptr::write_unaligned(
-                    staging_frame.raw() as usize as *mut logos_abi::StorageResponse,
-                    response,
-                );
+            if !staging.write(response) {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             }
             let status = self.queue_dynamic_core_response(
                 ServiceId::Storage,
@@ -3717,11 +3776,11 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let wire = unsafe {
-                core::slice::from_raw_parts(
-                    staging_frame.raw() as usize as *const u8,
-                    core::mem::size_of::<logos_abi::DeviceRequest>(),
-                )
+            let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::DeviceRequest>()) else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             if !logos_abi::DeviceRequest::wire_enums_valid(wire) {
                 return crate::service_ipc::IpcOutcome {
@@ -3729,10 +3788,11 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let request = unsafe {
-                core::ptr::read_unaligned(
-                    staging_frame.raw() as usize as *const logos_abi::DeviceRequest
-                )
+            let Some(request) = staging.read::<logos_abi::DeviceRequest>() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             if crate::device_ipc::validate_request(request, self.ipc_generation, self.service_epoch)
                 .is_err()
@@ -3775,11 +3835,12 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let wire = unsafe {
-                core::slice::from_raw_parts(
-                    staging_frame.raw() as usize as *const u8,
-                    core::mem::size_of::<logos_abi::PackageResponse>(),
-                )
+            let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::PackageResponse>())
+            else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             if !logos_abi::PackageResponse::wire_enums_valid(wire) {
                 return crate::service_ipc::IpcOutcome {
@@ -3787,10 +3848,11 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let response = unsafe {
-                core::ptr::read_unaligned(
-                    staging_frame.raw() as usize as *const logos_abi::PackageResponse
-                )
+            let Some(response) = staging.read::<logos_abi::PackageResponse>() else {
+                return crate::service_ipc::IpcOutcome {
+                    status: logos_abi::IpcStatus::Malformed,
+                    notified: false,
+                };
             };
             let Some(request) = self.package_request_slot() else {
                 return crate::service_ipc::IpcOutcome {
@@ -3810,14 +3872,11 @@ impl ServiceRuntime {
                 notified: true,
             };
         }
-        let Some(staging_frame) = self.staging_frame_for_process(process) else {
+        let Some(bytes) = staging.bytes(length) else {
             return crate::service_ipc::IpcOutcome {
-                status: logos_abi::IpcStatus::Unauthorized,
+                status: logos_abi::IpcStatus::Malformed,
                 notified: false,
             };
-        };
-        let bytes = unsafe {
-            core::slice::from_raw_parts(staging_frame.raw() as usize as *const u8, length)
         };
         #[cfg(feature = "storage-proof")]
         if service == Some(ServiceId::Flow)
@@ -3892,11 +3951,12 @@ impl ServiceRuntime {
                         notified: false,
                     };
                 };
-                let bytes = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        staging_frame.raw() as usize as *mut u8,
-                        expected_bytes,
-                    )
+                let mut staging = FrameBytes::from_frame(staging_frame);
+                let Some(bytes) = staging.bytes_mut(expected_bytes) else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
                 };
                 let status = self.receive_dynamic(caller, dynamic_capability, bytes);
                 return crate::service_ipc::IpcOutcome {
@@ -3916,11 +3976,12 @@ impl ServiceRuntime {
                         notified: false,
                     };
                 };
-                let bytes = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        staging_frame.raw() as usize as *mut u8,
-                        expected_bytes,
-                    )
+                let mut staging = FrameBytes::from_frame(staging_frame);
+                let Some(bytes) = staging.bytes_mut(expected_bytes) else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
                 };
                 let status = self.receive_dynamic(caller, dynamic_capability, bytes);
                 return crate::service_ipc::IpcOutcome {
@@ -3940,11 +4001,12 @@ impl ServiceRuntime {
                         notified: false,
                     };
                 };
-                let bytes = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        staging_frame.raw() as usize as *mut u8,
-                        expected_bytes,
-                    )
+                let mut staging = FrameBytes::from_frame(staging_frame);
+                let Some(bytes) = staging.bytes_mut(expected_bytes) else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
                 };
                 let status = self.receive_dynamic(caller, dynamic_capability, bytes);
                 return crate::service_ipc::IpcOutcome {
@@ -3964,11 +4026,12 @@ impl ServiceRuntime {
                         notified: false,
                     };
                 };
-                let bytes = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        staging_frame.raw() as usize as *mut u8,
-                        expected_bytes,
-                    )
+                let mut staging = FrameBytes::from_frame(staging_frame);
+                let Some(bytes) = staging.bytes_mut(expected_bytes) else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
                 };
                 let status = self.receive_dynamic(caller, dynamic_capability, bytes);
                 return crate::service_ipc::IpcOutcome {
@@ -4018,11 +4081,13 @@ impl ServiceRuntime {
                         self.network_packet_sequence.wrapping_add(1).max(1);
                     response
                 };
-                unsafe {
-                    core::ptr::write_unaligned(
-                        staging_frame.raw() as usize as *mut logos_abi::NetworkPacketDescriptor,
-                        response,
-                    );
+                let mut staging = FrameBytes::from_frame(staging_frame);
+                if !staging.write(response) {
+                    self.network_packet_response = Some(response);
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
                 }
                 let status = self.queue_dynamic_core_response(
                     ServiceId::Network,
@@ -4033,11 +4098,11 @@ impl ServiceRuntime {
                     self.network_packet_response = Some(response);
                     return crate::service_ipc::IpcOutcome { status, notified: false };
                 }
-                let bytes = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        staging_frame.raw() as usize as *mut u8,
-                        expected_bytes,
-                    )
+                let Some(bytes) = staging.bytes_mut(expected_bytes) else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
                 };
                 let status = self.receive_dynamic(caller, dynamic_capability, bytes);
                 return crate::service_ipc::IpcOutcome {
@@ -4052,11 +4117,12 @@ impl ServiceRuntime {
                         notified: false,
                     };
                 };
-                let bytes = unsafe {
-                    core::slice::from_raw_parts_mut(
-                        staging_frame.raw() as usize as *mut u8,
-                        expected_bytes,
-                    )
+                let mut staging = FrameBytes::from_frame(staging_frame);
+                let Some(bytes) = staging.bytes_mut(expected_bytes) else {
+                    return crate::service_ipc::IpcOutcome {
+                        status: logos_abi::IpcStatus::Malformed,
+                        notified: false,
+                    };
                 };
                 let status = self.receive_dynamic(caller, dynamic_capability, bytes);
                 if status == logos_abi::IpcStatus::Ok {
@@ -4075,8 +4141,13 @@ impl ServiceRuntime {
                                 notified: false,
                             };
                         }
-                        let message = unsafe {
-                            core::ptr::read_unaligned(bytes.as_ptr().cast::<logos_abi::IpcBytes>())
+                        let Some(message) =
+                            crate::frame_bytes::read_from_slice::<logos_abi::IpcBytes>(bytes)
+                        else {
+                            return crate::service_ipc::IpcOutcome {
+                                status: logos_abi::IpcStatus::Malformed,
+                                notified: false,
+                            };
                         };
                         if message.kind == logos_abi::MessageKind::NetworkResponse
                             && message.len as usize
@@ -4091,10 +4162,13 @@ impl ServiceRuntime {
                                     notified: false,
                                 };
                             }
-                            let response = unsafe {
-                                core::ptr::read_unaligned(
-                                    message.bytes.as_ptr().cast::<logos_abi::NetworkResponse>(),
-                                )
+                            let Some(response) = crate::frame_bytes::read_from_slice::<
+                                logos_abi::NetworkResponse,
+                            >(&message.bytes) else {
+                                return crate::service_ipc::IpcOutcome {
+                                    status: logos_abi::IpcStatus::Malformed,
+                                    notified: false,
+                                };
                             };
                             if response.operation == logos_abi::NetworkOperation::TcpConnect
                                 && response.result == logos_abi::NetworkResult::Ok
@@ -4153,19 +4227,15 @@ impl ServiceRuntime {
         else {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
-        let wire = unsafe {
-            core::slice::from_raw_parts(
-                staging_frame.raw() as usize as *const u8,
-                core::mem::size_of::<logos_abi::DirectoryRequest>(),
-            )
+        let mut staging = FrameBytes::from_frame(staging_frame);
+        let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::DirectoryRequest>()) else {
+            return logos_abi::DirectoryStatus::Malformed;
         };
         if !logos_abi::DirectoryRequest::wire_enums_valid(wire) {
             return logos_abi::DirectoryStatus::Malformed;
         }
-        let request = unsafe {
-            core::ptr::read_volatile(
-                staging_frame.raw() as usize as *const logos_abi::DirectoryRequest
-            )
+        let Some(request) = staging.read_volatile::<logos_abi::DirectoryRequest>() else {
+            return logos_abi::DirectoryStatus::Malformed;
         };
         if !request.is_valid() {
             return logos_abi::DirectoryStatus::Malformed;
@@ -4220,11 +4290,8 @@ impl ServiceRuntime {
             crate::proof::dynamic_directory_used();
         }
         core::sync::atomic::fence(Ordering::Release);
-        unsafe {
-            core::ptr::write_volatile(
-                staging_frame.raw() as usize as *mut logos_abi::DirectoryResponse,
-                response,
-            );
+        if !staging.write_volatile(response) {
+            return logos_abi::DirectoryStatus::Malformed;
         }
         status
     }
@@ -4269,20 +4336,24 @@ impl ServiceRuntime {
         else {
             return logos_abi::IpcStatus::Unauthorized;
         };
-        let bytes = staging_frame.raw() as usize as *const u8;
-        let operation =
-            unsafe { *bytes.add(core::mem::offset_of!(logos_abi::ManagerRequest, operation)) };
+        let staging = FrameBytes::from_frame(staging_frame);
+        let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::ManagerRequest>()) else {
+            return logos_abi::IpcStatus::Malformed;
+        };
+        let Some(&operation) =
+            wire.get(core::mem::offset_of!(logos_abi::ManagerRequest, operation))
+        else {
+            return logos_abi::IpcStatus::Malformed;
+        };
         if logos_abi::ManagerOperation::from_raw(operation).is_none() {
             return logos_abi::IpcStatus::Malformed;
         }
-        let wire = unsafe {
-            core::slice::from_raw_parts(bytes, core::mem::size_of::<logos_abi::ManagerRequest>())
-        };
         if !logos_abi::ManagerRequest::wire_enums_valid(wire) {
             return logos_abi::IpcStatus::Malformed;
         }
-        let request =
-            unsafe { core::ptr::read_unaligned(bytes.cast::<logos_abi::ManagerRequest>()) };
+        let Some(request) = staging.read::<logos_abi::ManagerRequest>() else {
+            return logos_abi::IpcStatus::Malformed;
+        };
         if matches!(
             request.operation,
             logos_abi::ManagerOperation::List
@@ -4298,13 +4369,7 @@ impl ServiceRuntime {
                 logos_abi::ManagerStatus::Malformed,
                 request.request_id,
             );
-            unsafe {
-                core::ptr::write_unaligned(
-                    staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
-                    response,
-                );
-            }
-            return logos_abi::IpcStatus::Ok;
+            return write_manager_response(staging_frame, response);
         }
         let service_operation = matches!(
             request.operation,
@@ -4332,13 +4397,7 @@ impl ServiceRuntime {
                 logos_abi::ManagerStatus::Unauthorized,
                 request.request_id,
             );
-            unsafe {
-                core::ptr::write_unaligned(
-                    staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
-                    response,
-                );
-            }
-            return logos_abi::IpcStatus::Ok;
+            return write_manager_response(staging_frame, response);
         }
         if request.operation == logos_abi::ManagerOperation::Register {
             if self.dynamic_services.is_none() {
@@ -4347,8 +4406,7 @@ impl ServiceRuntime {
                     logos_abi::ManagerStatus::Stale,
                     request.request_id,
                 );
-                self.write_manager_response(staging_frame, response);
-                return logos_abi::IpcStatus::Ok;
+                return write_manager_response(staging_frame, response);
             }
             let handle = match self.dynamic_services.as_mut().and_then(|registry| {
                 registry
@@ -4362,8 +4420,7 @@ impl ServiceRuntime {
                         logos_abi::ManagerStatus::Capacity,
                         request.request_id,
                     );
-                    self.write_manager_response(staging_frame, response);
-                    return logos_abi::IpcStatus::Ok;
+                    return write_manager_response(staging_frame, response);
                 }
             };
             let mut status_request = logos_abi::ManagerRequest::new(
@@ -4385,8 +4442,7 @@ impl ServiceRuntime {
             response.operation = request.operation;
             response.status = logos_abi::ManagerStatus::Ok;
             response.request_id = request.request_id;
-            self.write_manager_response(staging_frame, response);
-            return logos_abi::IpcStatus::Ok;
+            return write_manager_response(staging_frame, response);
         }
         if matches!(
             request.operation,
@@ -4410,13 +4466,7 @@ impl ServiceRuntime {
             ) {
                 crate::proof::dynamic_manager_used();
             }
-            unsafe {
-                core::ptr::write_unaligned(
-                    staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
-                    response,
-                );
-            }
-            return logos_abi::IpcStatus::Ok;
+            return write_manager_response(staging_frame, response);
         }
         let service_lifecycle = matches!(
             request.operation,
@@ -4431,13 +4481,7 @@ impl ServiceRuntime {
                     logos_abi::ManagerStatus::Stale,
                     request.request_id,
                 );
-                unsafe {
-                    core::ptr::write_unaligned(
-                        staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
-                        response,
-                    );
-                }
-                return logos_abi::IpcStatus::Ok;
+                return write_manager_response(staging_frame, response);
             };
             let action = match registry.begin_lifecycle_action(request.operation, request.service) {
                 Ok(action) => action,
@@ -4447,13 +4491,7 @@ impl ServiceRuntime {
                         status,
                         request.request_id,
                     );
-                    unsafe {
-                        core::ptr::write_unaligned(
-                            staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
-                            response,
-                        );
-                    }
-                    return logos_abi::IpcStatus::Ok;
+                    return write_manager_response(staging_frame, response);
                 }
             };
             let action = match action {
@@ -4474,13 +4512,7 @@ impl ServiceRuntime {
                     logos_abi::ManagerStatus::Unsupported,
                     request.request_id,
                 );
-                unsafe {
-                    core::ptr::write_unaligned(
-                        staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
-                        response,
-                    );
-                }
-                return logos_abi::IpcStatus::Ok;
+                return write_manager_response(staging_frame, response);
             };
             let mut status_request = logos_abi::ManagerRequest::new(
                 logos_abi::ManagerOperation::Status,
@@ -4507,8 +4539,7 @@ impl ServiceRuntime {
                         );
                         decision.response.status = status;
                         self.refresh_manager_response_record(&mut decision.response);
-                        self.write_manager_response(staging_frame, decision.response);
-                        return logos_abi::IpcStatus::Ok;
+                        return write_manager_response(staging_frame, decision.response);
                     }
                 };
                 if ServiceId::from_index(slot).is_none() {
@@ -4524,8 +4555,7 @@ impl ServiceRuntime {
                     } else {
                         self.pending_dynamic_start = Some(handle);
                     }
-                    self.write_manager_response(staging_frame, decision.response);
-                    return logos_abi::IpcStatus::Ok;
+                    return write_manager_response(staging_frame, decision.response);
                 }
                 let service =
                     ServiceId::from_index(slot).ok_or(logos_abi::ManagerStatus::Unsupported);
@@ -4536,8 +4566,7 @@ impl ServiceRuntime {
                     );
                     decision.response.status = logos_abi::ManagerStatus::Unsupported;
                     self.refresh_manager_response_record(&mut decision.response);
-                    self.write_manager_response(staging_frame, decision.response);
-                    return logos_abi::IpcStatus::Ok;
+                    return write_manager_response(staging_frame, decision.response);
                 };
                 if self.uses_package_image(service) {
                     if self.pending_restart.is_some() {
@@ -4581,8 +4610,7 @@ impl ServiceRuntime {
                         );
                         decision.response.status = status;
                         self.refresh_manager_response_record(&mut decision.response);
-                        self.write_manager_response(staging_frame, decision.response);
-                        return logos_abi::IpcStatus::Ok;
+                        return write_manager_response(staging_frame, decision.response);
                     }
                 };
                 if ServiceId::from_index(slot).is_none() {
@@ -4594,8 +4622,7 @@ impl ServiceRuntime {
                         decision.response.status = logos_abi::ManagerStatus::Busy;
                         self.refresh_manager_response_record(&mut decision.response);
                     }
-                    self.write_manager_response(staging_frame, decision.response);
-                    return logos_abi::IpcStatus::Ok;
+                    return write_manager_response(staging_frame, decision.response);
                 }
                 let Some(service) = ServiceId::from_index(slot) else {
                     self.abort_dynamic_service_lifecycle_handle(
@@ -4604,8 +4631,7 @@ impl ServiceRuntime {
                     );
                     decision.response.status = logos_abi::ManagerStatus::Unsupported;
                     self.refresh_manager_response_record(&mut decision.response);
-                    self.write_manager_response(staging_frame, decision.response);
-                    return logos_abi::IpcStatus::Ok;
+                    return write_manager_response(staging_frame, decision.response);
                 };
                 match self.request_stop_service(service) {
                     Ok(true) => {}
@@ -4645,8 +4671,7 @@ impl ServiceRuntime {
                         self.pending_dynamic_restart = Some(handle);
                     }
                     self.refresh_manager_response_record(&mut decision.response);
-                    self.write_manager_response(staging_frame, decision.response);
-                    return logos_abi::IpcStatus::Ok;
+                    return write_manager_response(staging_frame, decision.response);
                 }
                 let mut services = Vec::new();
                 if services.try_reserve(handles.len()).is_err() {
@@ -4656,8 +4681,7 @@ impl ServiceRuntime {
                     );
                     decision.response.status = logos_abi::ManagerStatus::Capacity;
                     self.refresh_manager_response_record(&mut decision.response);
-                    self.write_manager_response(staging_frame, decision.response);
-                    return logos_abi::IpcStatus::Ok;
+                    return write_manager_response(staging_frame, decision.response);
                 }
                 for handle in &handles {
                     let service = match self.lifecycle_service_for_handle(*handle) {
@@ -4669,8 +4693,7 @@ impl ServiceRuntime {
                             );
                             decision.response.status = status;
                             self.refresh_manager_response_record(&mut decision.response);
-                            self.write_manager_response(staging_frame, decision.response);
-                            return logos_abi::IpcStatus::Ok;
+                            return write_manager_response(staging_frame, decision.response);
                         }
                     };
                     services.push(service);
@@ -4767,13 +4790,7 @@ impl ServiceRuntime {
         {
             decision.response.record.service = request.service;
         }
-        unsafe {
-            core::ptr::write_unaligned(
-                staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
-                decision.response,
-            );
-        }
-        logos_abi::IpcStatus::Ok
+        write_manager_response(staging_frame, decision.response)
     }
 
     pub(crate) fn event_call(
@@ -4800,17 +4817,15 @@ impl ServiceRuntime {
         else {
             return logos_abi::EventStatus::Unauthorized;
         };
-        let wire = unsafe {
-            core::slice::from_raw_parts(
-                staging_frame.raw() as usize as *const u8,
-                core::mem::size_of::<logos_abi::EventRequest>(),
-            )
+        let mut staging = FrameBytes::from_frame(staging_frame);
+        let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::EventRequest>()) else {
+            return logos_abi::EventStatus::Malformed;
         };
         if !logos_abi::EventRequest::wire_enums_valid(wire) {
             return logos_abi::EventStatus::Malformed;
         }
-        let request = unsafe {
-            core::ptr::read_unaligned(staging_frame.raw() as usize as *const logos_abi::EventRequest)
+        let Some(request) = staging.read::<logos_abi::EventRequest>() else {
+            return logos_abi::EventStatus::Malformed;
         };
         if !request.is_valid() {
             return logos_abi::EventStatus::Malformed;
@@ -4889,11 +4904,8 @@ impl ServiceRuntime {
         };
         response.status = status;
         self.refresh_dynamic_service_counts_handle(owner);
-        unsafe {
-            core::ptr::write_unaligned(
-                staging_frame.raw() as usize as *mut logos_abi::EventResponse,
-                response,
-            );
+        if !staging.write(response) {
+            return logos_abi::EventStatus::Malformed;
         }
         status
     }
@@ -4910,19 +4922,6 @@ impl ServiceRuntime {
         let status = registry.manager_request(request);
         if status.status == logos_abi::ManagerStatus::Ok {
             response.record = status.record;
-        }
-    }
-
-    fn write_manager_response(
-        &self,
-        staging_frame: FrameAddress,
-        response: logos_abi::ManagerResponse,
-    ) {
-        unsafe {
-            core::ptr::write_unaligned(
-                staging_frame.raw() as usize as *mut logos_abi::ManagerResponse,
-                response,
-            );
         }
     }
 
@@ -4976,11 +4975,8 @@ impl ServiceRuntime {
     ) -> Option<logos_abi::ManagerResponse> {
         let process = self.launch(ServiceId::Flow)?.0;
         let frame = self.executions[ServiceId::Flow.index()].ipc_staging_frame?;
-        unsafe {
-            core::ptr::write_unaligned(
-                frame.raw() as usize as *mut logos_abi::ManagerRequest,
-                request,
-            );
+        if !FrameBytes::from_frame(frame).write(request) {
+            return None;
         }
         if self.manager_call(
             process,
@@ -4990,9 +4986,7 @@ impl ServiceRuntime {
         {
             return None;
         }
-        Some(unsafe {
-            core::ptr::read_unaligned(frame.raw() as usize as *const logos_abi::ManagerResponse)
-        })
+        FrameBytes::from_frame(frame).read::<logos_abi::ManagerResponse>()
     }
 
     #[cfg(feature = "qemu-proof")]
@@ -5225,8 +5219,10 @@ impl ServiceRuntime {
         let Some(staging) = self.staging_frame_for_process(process) else {
             return false;
         };
-        let bytes =
-            unsafe { core::slice::from_raw_parts(staging.raw() as usize as *const u8, length) };
+        let staging = FrameBytes::from_frame(staging);
+        let Some(bytes) = staging.bytes(length) else {
+            return false;
+        };
         crate::arch_proof_line(bytes);
         true
     }
@@ -5348,16 +5344,11 @@ impl ServiceRuntime {
     ) -> Option<(logos_abi::EventStatus, logos_abi::EventResponse)> {
         let slot = self.service_slot_for_process(process)?;
         let frame = self.executions.get(slot).and_then(|execution| execution.ipc_staging_frame)?;
-        unsafe {
-            core::ptr::write_unaligned(
-                frame.raw() as usize as *mut logos_abi::EventRequest,
-                request,
-            );
+        if !FrameBytes::from_frame(frame).write(request) {
+            return None;
         }
         let status = self.event_call(process, core::mem::size_of::<logos_abi::EventRequest>());
-        let response = unsafe {
-            core::ptr::read_unaligned(frame.raw() as usize as *const logos_abi::EventResponse)
-        };
+        let response = FrameBytes::from_frame(frame).read::<logos_abi::EventResponse>()?;
         response.is_valid_for(request).then_some((status, response))
     }
 
@@ -5518,7 +5509,11 @@ impl ServiceRuntime {
                     let _ = self.frame_pool.release(frame);
                     return Err(ProcessError::AddressSpace);
                 }
-                let mapped = self.executions[index].table.as_mut().unwrap().map_raw_page(
+                let Some(tables) = self.executions[index].table.as_mut() else {
+                    let _ = self.frame_pool.release(frame);
+                    return Err(ProcessError::AddressSpace);
+                };
+                let mapped = tables.map_raw_page(
                     address,
                     frame,
                     MappingFlags::DATA,
@@ -5562,7 +5557,10 @@ impl ServiceRuntime {
         if !self.executions[index].table_ready {
             return Err(ServiceRuntimeError::Process(ProcessError::AddressSpace));
         }
-        let tables = self.executions[index].table.as_mut().unwrap();
+        let tables = self.executions[index]
+            .table
+            .as_mut()
+            .ok_or(ServiceRuntimeError::Process(ProcessError::AddressSpace))?;
         let mut memory = IdentityPageTableMemory;
         for page in 0..mapping.pages() {
             let address = mapping
@@ -5613,7 +5611,10 @@ impl ServiceRuntime {
         if !self.executions[service.index()].table_ready {
             return Err(PageTableError::InvalidMapping);
         }
-        let tables = self.executions[service.index()].table.as_mut().unwrap();
+        let tables = self.executions[service.index()]
+            .table
+            .as_mut()
+            .ok_or(PageTableError::InvalidMapping)?;
         let mut memory = IdentityPageTableMemory;
         for page in 0..request.pages as usize {
             let virtual_address = request.target_page as usize + page * crate::loader::PAGE_SIZE;
@@ -6374,7 +6375,7 @@ fn reserve_active_page_tables(pool: &mut FramePool, root: usize) -> bool {
 fn initialize_framebuffer_config(
     frame: FrameAddress,
     framebuffer: crate::boot_resources::FramebufferInfo,
-) {
+) -> bool {
     let format = match framebuffer.format() {
         crate::boot_resources::PixelFormat::Bgr8 => logos_abi::FramebufferFormat::Bgr8,
         crate::boot_resources::PixelFormat::Rgb8 => logos_abi::FramebufferFormat::Rgb8,
@@ -6388,14 +6389,11 @@ fn initialize_framebuffer_config(
     );
     // The frame is identity-mapped in the kernel root before it is mapped
     // read-only by policy into the Display address space.
-    unsafe { (frame.raw() as usize as *mut logos_abi::FramebufferConfig).write(config) };
+    FrameBytes::from_frame(frame).write(config)
 }
 
-fn initialize_framebuffer_present(frame: FrameAddress) {
-    unsafe {
-        (frame.raw() as usize as *mut logos_abi::FramebufferPresentState)
-            .write(logos_abi::FramebufferPresentState::new());
-    }
+fn initialize_framebuffer_present(frame: FrameAddress) -> bool {
+    FrameBytes::from_frame(frame).write_init(logos_abi::FramebufferPresentState::new())
 }
 
 fn service_task_entry() {

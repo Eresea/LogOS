@@ -8,6 +8,8 @@ extern crate std;
 pub mod boot_resources;
 #[cfg(target_os = "uefi")]
 mod device_ipc;
+#[cfg(any(test, target_os = "uefi"))]
+mod frame_bytes;
 pub mod frame_pool;
 pub mod loader;
 pub mod memory;
@@ -25,6 +27,8 @@ pub use scheduler::{
     ScheduledUserLaunch, Scheduler, SpawnError, TASK_STACK_SIZE, TaskEntry, TaskHandle, TaskState,
 };
 pub mod health;
+#[cfg(any(test, target_os = "uefi"))]
+mod ipc_contracts;
 pub mod runtime;
 pub mod runtime_events;
 pub mod runtime_ipc;

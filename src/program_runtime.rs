@@ -279,14 +279,9 @@ impl ProgramRuntime {
             surface_render: capabilities.render,
             surface_draw: capabilities.draw,
         };
-        // SAFETY: `ProgramBootstrapPage` is plain `repr(C)` data; the bytes are
-        // copied into the frame exactly as the former raw-pointer store did.
-        let page_bytes = unsafe {
-            core::slice::from_raw_parts(
-                (&page as *const logos_abi::ProgramBootstrapPage).cast::<u8>(),
-                core::mem::size_of::<logos_abi::ProgramBootstrapPage>(),
-            )
-        };
+        // `ProgramBootstrapPage` is plain `repr(C)` data; the bytes are copied into
+        // the frame exactly as the former raw-pointer store did.
+        let page_bytes = crate::frame_bytes::value_bytes(&page);
         if PageSink::write(deps.memory, bootstrap, 0, page_bytes).is_err() {
             fail_late!(
                 ProgramError::IpcPrivateMapping(PageTableError::InvalidVirtualAddress),
