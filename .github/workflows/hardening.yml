@@ -62,3 +62,4 @@ jobs:
       - run: rustup target add x86_64-unknown-uefi x86_64-unknown-none
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf binutils
       - run: scripts/proof.sh -c 1 -t 600
+      - run: scripts/proof.sh -c 2 -t 600
