@@ -360,6 +360,11 @@ impl IdtEntry {
         reserved: 0,
     };
 
+    fn with_ist(mut self, ist: u8) -> Self {
+        self.ist = ist;
+        self
+    }
+
     fn new(handler: usize, selector: u16, attributes: u8) -> Self {
         Self {
             offset_low: handler as u16,
@@ -416,6 +421,16 @@ impl TaskStateSegment {
         }
     }
 }
+
+/// Dedicated exception stacks selected through the TSS IST so #DF, NMI and #MC
+/// never run on a possibly corrupt or overflowed kernel stack.
+const IST_STACK_SIZE: usize = 16 * 1024;
+const IST_DOUBLE_FAULT: u8 = 1;
+const IST_NMI: u8 = 2;
+const IST_MACHINE_CHECK: u8 = 3;
+const IST_STACKS: usize = 3;
+static mut IST_STACK_MEMORY: [[CpuStack<IST_STACK_SIZE>; IST_STACKS]; MAX_CPUS] =
+    [const { [const { CpuStack::new() }; IST_STACKS] }; MAX_CPUS];
 
 static mut CPU_TSS: [TaskStateSegment; MAX_CPUS] = [const { TaskStateSegment::new() }; MAX_CPUS];
 
@@ -1050,6 +1065,11 @@ pub(crate) fn reserve_kernel_frames(pool: &mut crate::frame_pool::FramePool) {
         pool,
         core::ptr::addr_of!(CPU_TSS) as usize,
         core::mem::size_of::<[TaskStateSegment; MAX_CPUS]>(),
+    );
+    reserve_storage_frames(
+        pool,
+        core::ptr::addr_of!(IST_STACK_MEMORY) as usize,
+        core::mem::size_of::<[[CpuStack<IST_STACK_SIZE>; IST_STACKS]; MAX_CPUS]>(),
     );
     reserve_storage_frames(
         pool,
@@ -1782,6 +1802,7 @@ fn install_gdt(cpu: usize) {
     unsafe {
         CPU_GDTS[cpu][..GDT.len()].copy_from_slice(&GDT);
         write_tss_rsp0(cpu, CPU_LOCALS[cpu].user_entry_stack_top);
+        write_tss_ist(cpu);
         let base = core::ptr::addr_of!(CPU_TSS[cpu]) as u64;
         let limit = (core::mem::size_of::<TaskStateSegment>() - 1) as u64;
         let low = (limit & 0xffff)
@@ -1818,6 +1839,16 @@ fn install_gdt(cpu: usize) {
 pub(crate) fn set_task_kernel_stack(cpu: usize, stack_top: usize) {
     unsafe {
         write_tss_rsp0(cpu, stack_top as u64);
+    }
+}
+
+unsafe fn write_tss_ist(cpu: usize) {
+    unsafe {
+        let tss = core::ptr::addr_of_mut!(CPU_TSS[cpu]);
+        for (index, stack) in IST_STACK_MEMORY[cpu].iter().enumerate() {
+            let top = stack.0.as_ptr_range().end as u64;
+            core::ptr::write_unaligned(core::ptr::addr_of_mut!((*tss).ist[index]), top);
+        }
     }
 }
 
@@ -1862,6 +1893,9 @@ fn install_idt(cpu: usize) {
         // Architectural exceptions that are not task faults report and halt all CPUs.
         for (vector, stub) in exception_stubs.iter().enumerate() {
             idt[vector] = IdtEntry::new(*stub as usize, KERNEL_CODE_SELECTOR, 0x8e);
+        }
+        for (vector, ist) in [(8, IST_DOUBLE_FAULT), (2, IST_NMI), (18, IST_MACHINE_CHECK)] {
+            idt[vector] = idt[vector].with_ist(ist);
         }
         // Fault vectors sharing context_common: only #GP and #PF push error codes.
         idt[6] =
