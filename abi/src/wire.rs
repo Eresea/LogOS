@@ -102,6 +102,39 @@ wire_decode_via_enums!(
     UserStorageResponse,
 );
 
+/// Compile-time proof that a `repr(C)` wire type has no padding: its size must
+/// equal the sum of its field sizes.
+///
+/// The Core copies written values into user-visible frames; padding bytes are
+/// not guaranteed initialized, so a padded type would leak (or expose
+/// uninitialized) bytes. Types listed below are asserted padding-free.
+/// Writers of the other wire types (`DeviceResponse`, `StorageResponse`,
+/// `NetworkResponse`, ...) still copy padding and are tracked in
+/// `docs/architecture.md`.
+macro_rules! assert_no_padding {
+    ($ty:ty; $($field:ty),+ $(,)?) => {
+        const _: () = assert!(
+            core::mem::size_of::<$ty>() == 0 $(+ core::mem::size_of::<$field>())+,
+            "wire type has padding"
+        );
+    };
+}
+
+assert_no_padding!(IpcBytes; crate::MessageKind, u8, u16, [u8; crate::MAX_IPC_BYTES]);
+assert_no_padding!(
+    ManagerRequest;
+    u16, crate::ManagerOperation, crate::ManagerTargetKind, u32, crate::ServiceHandle, u64, u8, u8,
+    [u8; 2], u32, [u8; crate::MAX_PACKAGE_NAME_BYTES]
+);
+assert_no_padding!(
+    EventRequest;
+    u16, crate::EventOperation, u8, u32, crate::EventSetHandle, crate::EventHandle, u64
+);
+assert_no_padding!(
+    DirectoryRequest;
+    u16, crate::DirectoryOperation, u8, u32, u64, crate::ServiceHandle
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

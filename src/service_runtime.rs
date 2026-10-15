@@ -2837,25 +2837,18 @@ impl ServiceRuntime {
         if receive_status != logos_abi::IpcStatus::Ok {
             return crate::service_ipc::IpcOutcome { status: receive_status, notified: false };
         }
-        let Some(wire) = staging.bytes(request_bytes) else {
+        let Some(request) = staging.decode::<logos_abi::DeviceRequest>() else {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Malformed,
                 notified: false,
             };
         };
-        let Some(request) = staging.read::<logos_abi::DeviceRequest>() else {
-            return crate::service_ipc::IpcOutcome {
-                status: logos_abi::IpcStatus::Malformed,
-                notified: false,
-            };
-        };
-        if !logos_abi::DeviceRequest::wire_enums_valid(wire)
-            || crate::device_ipc::validate_dynamic_request(
-                request,
-                self.ipc_generation,
-                self.service_epoch,
-            )
-            .is_err()
+        if crate::device_ipc::validate_dynamic_request(
+            request,
+            self.ipc_generation,
+            self.service_epoch,
+        )
+        .is_err()
         {
             return crate::service_ipc::IpcOutcome {
                 status: logos_abi::IpcStatus::Malformed,
@@ -3222,21 +3215,7 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let Some(wire) =
-                staging.bytes(core::mem::size_of::<logos_abi::NetworkPacketDescriptor>())
-            else {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            };
-            if !logos_abi::NetworkPacketDescriptor::wire_enums_valid(wire) {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            }
-            let Some(descriptor) = staging.read::<logos_abi::NetworkPacketDescriptor>() else {
+            let Some(descriptor) = staging.decode::<logos_abi::NetworkPacketDescriptor>() else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
                     notified: false,
@@ -3309,19 +3288,7 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::IpcBytes>()) else {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            };
-            if !logos_abi::IpcBytes::wire_enums_valid(wire) {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            }
-            let Some(request_message) = staging.read::<logos_abi::IpcBytes>() else {
+            let Some(request_message) = staging.decode::<logos_abi::IpcBytes>() else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
                     notified: false,
@@ -3335,15 +3302,7 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            if !logos_abi::NetworkRequest::wire_enums_valid(
-                &request_message.bytes[..core::mem::size_of::<logos_abi::NetworkRequest>()],
-            ) {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            }
-            let Some(request) = crate::frame_bytes::read_from_slice::<logos_abi::NetworkRequest>(
+            let Some(request) = crate::frame_bytes::decode_from_slice::<logos_abi::NetworkRequest>(
                 &request_message.bytes,
             ) else {
                 return crate::service_ipc::IpcOutcome {
@@ -3604,19 +3563,7 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let Some(&operation) = staging.bytes(1).and_then(|bytes| bytes.first()) else {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            };
-            if !(1..=9).contains(&operation) {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            }
-            let Some(request) = staging.read::<logos_abi::StorageRequest>() else {
+            let Some(request) = staging.decode::<logos_abi::StorageRequest>() else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
                     notified: false,
@@ -3776,19 +3723,7 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::DeviceRequest>()) else {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            };
-            if !logos_abi::DeviceRequest::wire_enums_valid(wire) {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            }
-            let Some(request) = staging.read::<logos_abi::DeviceRequest>() else {
+            let Some(request) = staging.decode::<logos_abi::DeviceRequest>() else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
                     notified: false,
@@ -3835,20 +3770,7 @@ impl ServiceRuntime {
                     notified: false,
                 };
             }
-            let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::PackageResponse>())
-            else {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            };
-            if !logos_abi::PackageResponse::wire_enums_valid(wire) {
-                return crate::service_ipc::IpcOutcome {
-                    status: logos_abi::IpcStatus::Malformed,
-                    notified: false,
-                };
-            }
-            let Some(response) = staging.read::<logos_abi::PackageResponse>() else {
+            let Some(response) = staging.decode::<logos_abi::PackageResponse>() else {
                 return crate::service_ipc::IpcOutcome {
                     status: logos_abi::IpcStatus::Malformed,
                     notified: false,
@@ -4135,14 +4057,8 @@ impl ServiceRuntime {
                             logos_abi::IPC_CONTRACT_BYTES,
                         )
                     {
-                        if !logos_abi::IpcBytes::wire_enums_valid(bytes) {
-                            return crate::service_ipc::IpcOutcome {
-                                status: logos_abi::IpcStatus::Malformed,
-                                notified: false,
-                            };
-                        }
                         let Some(message) =
-                            crate::frame_bytes::read_from_slice::<logos_abi::IpcBytes>(bytes)
+                            crate::frame_bytes::decode_from_slice::<logos_abi::IpcBytes>(bytes)
                         else {
                             return crate::service_ipc::IpcOutcome {
                                 status: logos_abi::IpcStatus::Malformed,
@@ -4153,16 +4069,7 @@ impl ServiceRuntime {
                             && message.len as usize
                                 == core::mem::size_of::<logos_abi::NetworkResponse>()
                         {
-                            if !logos_abi::NetworkResponse::wire_enums_valid(
-                                &message.bytes
-                                    [..core::mem::size_of::<logos_abi::NetworkResponse>()],
-                            ) {
-                                return crate::service_ipc::IpcOutcome {
-                                    status: logos_abi::IpcStatus::Malformed,
-                                    notified: false,
-                                };
-                            }
-                            let Some(response) = crate::frame_bytes::read_from_slice::<
+                            let Some(response) = crate::frame_bytes::decode_from_slice::<
                                 logos_abi::NetworkResponse,
                             >(&message.bytes) else {
                                 return crate::service_ipc::IpcOutcome {
@@ -4228,13 +4135,7 @@ impl ServiceRuntime {
             return logos_abi::DirectoryStatus::Unauthorized;
         };
         let mut staging = FrameBytes::from_frame(staging_frame);
-        let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::DirectoryRequest>()) else {
-            return logos_abi::DirectoryStatus::Malformed;
-        };
-        if !logos_abi::DirectoryRequest::wire_enums_valid(wire) {
-            return logos_abi::DirectoryStatus::Malformed;
-        }
-        let Some(request) = staging.read_volatile::<logos_abi::DirectoryRequest>() else {
+        let Some(request) = staging.decode::<logos_abi::DirectoryRequest>() else {
             return logos_abi::DirectoryStatus::Malformed;
         };
         if !request.is_valid() {
@@ -4337,21 +4238,7 @@ impl ServiceRuntime {
             return logos_abi::IpcStatus::Unauthorized;
         };
         let staging = FrameBytes::from_frame(staging_frame);
-        let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::ManagerRequest>()) else {
-            return logos_abi::IpcStatus::Malformed;
-        };
-        let Some(&operation) =
-            wire.get(core::mem::offset_of!(logos_abi::ManagerRequest, operation))
-        else {
-            return logos_abi::IpcStatus::Malformed;
-        };
-        if logos_abi::ManagerOperation::from_raw(operation).is_none() {
-            return logos_abi::IpcStatus::Malformed;
-        }
-        if !logos_abi::ManagerRequest::wire_enums_valid(wire) {
-            return logos_abi::IpcStatus::Malformed;
-        }
-        let Some(request) = staging.read::<logos_abi::ManagerRequest>() else {
+        let Some(request) = staging.decode::<logos_abi::ManagerRequest>() else {
             return logos_abi::IpcStatus::Malformed;
         };
         if matches!(
@@ -4818,13 +4705,7 @@ impl ServiceRuntime {
             return logos_abi::EventStatus::Unauthorized;
         };
         let mut staging = FrameBytes::from_frame(staging_frame);
-        let Some(wire) = staging.bytes(core::mem::size_of::<logos_abi::EventRequest>()) else {
-            return logos_abi::EventStatus::Malformed;
-        };
-        if !logos_abi::EventRequest::wire_enums_valid(wire) {
-            return logos_abi::EventStatus::Malformed;
-        }
-        let Some(request) = staging.read::<logos_abi::EventRequest>() else {
+        let Some(request) = staging.decode::<logos_abi::EventRequest>() else {
             return logos_abi::EventStatus::Malformed;
         };
         if !request.is_valid() {
@@ -4986,7 +4867,7 @@ impl ServiceRuntime {
         {
             return None;
         }
-        FrameBytes::from_frame(frame).read::<logos_abi::ManagerResponse>()
+        FrameBytes::from_frame(frame).decode::<logos_abi::ManagerResponse>()
     }
 
     #[cfg(feature = "qemu-proof")]
@@ -5348,7 +5229,7 @@ impl ServiceRuntime {
             return None;
         }
         let status = self.event_call(process, core::mem::size_of::<logos_abi::EventRequest>());
-        let response = FrameBytes::from_frame(frame).read::<logos_abi::EventResponse>()?;
+        let response = FrameBytes::from_frame(frame).decode::<logos_abi::EventResponse>()?;
         response.is_valid_for(request).then_some((status, response))
     }
 
