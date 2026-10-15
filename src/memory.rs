@@ -604,9 +604,9 @@ impl RunMetadata {
 struct FrameMetadata {
     records: *mut FrameRecord,
     records_len: usize,
-    free: *mut u64,
+    free: *mut AtomicU64,
     free_len: usize,
-    summary: *mut u64,
+    summary: *mut AtomicU64,
     summary_len: usize,
     heap_slots: *mut HeapSlot,
     heap_slots_len: usize,
@@ -640,7 +640,7 @@ impl FrameMetadata {
         frame_count: usize,
     ) -> Result<(), FrameError> {
         let layout = region.layout(frame_count).ok_or(FrameError::Capacity)?;
-        let base = region.base() as *mut u8;
+        let base = core::ptr::with_exposed_provenance_mut::<u8>(region.base() as usize);
         // SAFETY: the region is page-aligned, sized by `layout`, and reserved
         // exclusively for allocator metadata before publication.
         unsafe {
@@ -661,11 +661,17 @@ impl FrameMetadata {
     }
 
     fn clear(&mut self) {
-        // SAFETY: all slices were established by `configure`.
+        // SAFETY: all slices were established by `configure`; `&mut self` plus
+        // the caller's exclusive borrow of the allocator means no other thread
+        // can observe the metadata while it is reset.
         unsafe {
             slice::from_raw_parts_mut(self.records, self.records_len).fill(FrameRecord::EMPTY);
-            slice::from_raw_parts_mut(self.free, self.free_len).fill(0);
-            slice::from_raw_parts_mut(self.summary, self.summary_len).fill(0);
+            for word in slice::from_raw_parts(self.free, self.free_len) {
+                word.store(0, Ordering::Relaxed);
+            }
+            for word in slice::from_raw_parts(self.summary, self.summary_len) {
+                word.store(0, Ordering::Relaxed);
+            }
             slice::from_raw_parts_mut(self.heap_slots, self.heap_slots_len).fill(HeapSlot::empty());
             slice::from_raw_parts_mut(self.heap_records, self.heap_records_len)
                 .fill(HeapPageRecord::empty());
@@ -674,34 +680,47 @@ impl FrameMetadata {
         }
     }
 
-    fn records(&self) -> &[FrameRecord] {
-        // SAFETY: all slices were established by `configure`.
-        unsafe { slice::from_raw_parts(self.records, self.records_len) }
+    /// Copy of one frame record.
+    ///
+    /// The metadata is shared between allocator shards, so it is only ever
+    /// reached element-wise through raw pointers: no reference to the whole
+    /// record array is formed, which keeps concurrent shards that touch
+    /// disjoint slots free of overlapping borrows.
+    fn record(&self, slot: usize) -> Option<FrameRecord> {
+        if slot >= self.records_len {
+            return None;
+        }
+        // SAFETY: `slot` is in bounds; the caller's shard lock (or exclusive
+        // access) excludes concurrent writers of this slot.
+        Some(unsafe { self.records.add(slot).read() })
     }
 
-    fn records_mut(&mut self) -> &mut [FrameRecord] {
-        // SAFETY: all slices were established by `configure`.
-        unsafe { slice::from_raw_parts_mut(self.records, self.records_len) }
+    /// Mutates one frame record in place.
+    ///
+    /// # Safety
+    /// The caller must have exclusive access to `slot` (its shard lock, every
+    /// shard lock, or an exclusive borrow of the allocator).
+    unsafe fn update_record<R>(
+        &self,
+        slot: usize,
+        update: impl FnOnce(&mut FrameRecord) -> R,
+    ) -> R {
+        assert!(slot < self.records_len);
+        // SAFETY: in bounds, and exclusive per the caller's contract.
+        update(unsafe { &mut *self.records.add(slot) })
     }
 
-    fn free(&self) -> &[u64] {
-        // SAFETY: all slices were established by `configure`.
-        unsafe { slice::from_raw_parts(self.free, self.free_len) }
+    fn free_word(&self, index: usize) -> &AtomicU64 {
+        assert!(index < self.free_len);
+        // SAFETY: in bounds; `AtomicU64` has the layout of `u64`.
+        unsafe { &*self.free.add(index) }
     }
 
-    fn free_mut(&mut self) -> &mut [u64] {
-        // SAFETY: all slices were established by `configure`.
-        unsafe { slice::from_raw_parts_mut(self.free, self.free_len) }
-    }
-
-    fn summary(&self) -> &[u64] {
-        // SAFETY: all slices were established by `configure`.
-        unsafe { slice::from_raw_parts(self.summary, self.summary_len) }
-    }
-
-    fn summary_mut(&mut self) -> &mut [u64] {
-        // SAFETY: all slices were established by `configure`.
-        unsafe { slice::from_raw_parts_mut(self.summary, self.summary_len) }
+    fn summary_word(&self, index: usize) -> &AtomicU64 {
+        assert!(index < self.summary_len);
+        // SAFETY: in bounds; summary words are shared by neighbouring shards,
+        // so they are atomics.
+        unsafe { &*self.summary.add(index) }
     }
 }
 
@@ -724,20 +743,55 @@ const TEST_METADATA_BYTES: usize = {
     bytes.div_ceil(PAGE_SIZE as usize) * PAGE_SIZE as usize
 };
 
+/// Host-test metadata storage. It lives in its own heap allocation, owned
+/// through a raw pointer, so the metadata pointers derived from it never alias
+/// a borrow of the manager that holds this handle (the production path uses
+/// reserved physical memory outside any Rust object).
 #[cfg(test)]
 #[repr(align(4096))]
-struct TestFrameMetadata {
+struct TestFrameMetadataBuf {
     bytes: [u8; TEST_METADATA_BYTES],
 }
 
 #[cfg(test)]
+struct TestFrameMetadata {
+    buf: *mut TestFrameMetadataBuf,
+}
+
+// SAFETY: the buffer is uniquely owned by this handle; it is only reached via
+// the metadata pointers derived from it, under the manager's own exclusion.
+#[cfg(test)]
+unsafe impl Send for TestFrameMetadata {}
+
+#[cfg(test)]
 impl TestFrameMetadata {
     const fn empty() -> Self {
-        Self { bytes: [0; TEST_METADATA_BYTES] }
+        Self { buf: core::ptr::null_mut() }
     }
 
     fn region(&mut self) -> FrameMetadataRegion {
-        FrameMetadataRegion::new(self.bytes.as_mut_ptr() as u64, self.bytes.len() as u64).unwrap()
+        if self.buf.is_null() {
+            let boxed =
+                std::boxed::Box::new(TestFrameMetadataBuf { bytes: [0; TEST_METADATA_BYTES] });
+            self.buf = std::boxed::Box::into_raw(boxed);
+        }
+        // SAFETY: `buf` is a live allocation owned by this handle; only a raw
+        // place projection is formed, no reference to the whole buffer.
+        let base = unsafe { core::ptr::addr_of_mut!((*self.buf).bytes) }.cast::<u8>();
+        // The integer address is turned back into a pointer in `configure`;
+        // exposing provenance here makes that round trip well defined.
+        FrameMetadataRegion::new(base.expose_provenance() as u64, TEST_METADATA_BYTES as u64)
+            .unwrap()
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestFrameMetadata {
+    fn drop(&mut self) {
+        if !self.buf.is_null() {
+            // SAFETY: `buf` came from `Box::into_raw` and is dropped once.
+            drop(unsafe { std::boxed::Box::from_raw(self.buf) });
+        }
     }
 }
 
@@ -805,7 +859,8 @@ impl PhysicalFrameManager {
             self.runs[self.run_count] =
                 RunMetadata { run: bounded, first_slot: self.frame_count, pages };
             for slot in self.frame_count..self.frame_count + pages {
-                self.metadata.records_mut()[slot] = FrameRecord::EMPTY;
+                // SAFETY: `&mut self` gives exclusive access to every slot.
+                unsafe { self.metadata.update_record(slot, |record| *record = FrameRecord::EMPTY) };
                 self.set_free(slot);
             }
             self.frame_count += pages;
@@ -818,20 +873,27 @@ impl PhysicalFrameManager {
         self.frame_count
     }
 
+    /// # Safety
+    /// The heap regions are disjoint from every frame record and bitmap word;
+    /// the caller must ensure the returned slices are the only references to
+    /// them (the kernel heap owns them after the allocator handoff).
     #[cfg(target_os = "uefi")]
-    fn heap_metadata(
-        &mut self,
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn heap_metadata(
+        &self,
     ) -> (&mut [HeapSlot], &mut [HeapPageRecord], &mut [HeapLeaseRecord]) {
-        let slots = unsafe {
-            slice::from_raw_parts_mut(self.metadata.heap_slots, self.metadata.heap_slots_len)
-        };
-        let records = unsafe {
-            slice::from_raw_parts_mut(self.metadata.heap_records, self.metadata.heap_records_len)
-        };
-        let leases = unsafe {
-            slice::from_raw_parts_mut(self.metadata.heap_leases, self.metadata.heap_leases_len)
-        };
-        (slots, records, leases)
+        // SAFETY: per the contract above; only the heap regions are borrowed,
+        // not the manager or the frame records.
+        unsafe {
+            (
+                slice::from_raw_parts_mut(self.metadata.heap_slots, self.metadata.heap_slots_len),
+                slice::from_raw_parts_mut(
+                    self.metadata.heap_records,
+                    self.metadata.heap_records_len,
+                ),
+                slice::from_raw_parts_mut(self.metadata.heap_leases, self.metadata.heap_leases_len),
+            )
+        }
     }
 
     pub const fn run_count(&self) -> usize {
@@ -843,9 +905,8 @@ impl PhysicalFrameManager {
     }
 
     pub fn available(&self) -> usize {
-        self.metadata.free()[..self.frame_count.div_ceil(64)]
-            .iter()
-            .map(|word| word.count_ones() as usize)
+        (0..self.frame_count.div_ceil(64))
+            .map(|word| self.metadata.free_word(word).load(Ordering::Relaxed).count_ones() as usize)
             .sum()
     }
 
@@ -864,13 +925,31 @@ impl PhysicalFrameManager {
         first: usize,
         last: usize,
     ) -> Result<FrameLease, FrameError> {
+        // SAFETY: `&mut self` gives exclusive access to every slot.
+        unsafe { self.try_alloc_in_range_shared(owner, state, first, last) }
+    }
+
+    /// Allocates from the bitmap words covering `first..last`.
+    ///
+    /// # Safety
+    /// The caller must hold exclusive access to every slot in `first..last`
+    /// (the owning shard lock). The metadata is reached through raw pointers,
+    /// so concurrent shards never hold overlapping `&mut` borrows.
+    pub(crate) unsafe fn try_alloc_in_range_shared(
+        &self,
+        owner: OwnerId,
+        state: FrameState,
+        first: usize,
+        last: usize,
+    ) -> Result<FrameLease, FrameError> {
         if owner.0 == 0 || first > last || last > self.frame_count {
             return Err(FrameError::InvalidFrame);
         }
         let Some(slot) = self.find_free_slot(first, last) else {
             return Err(FrameError::Exhausted);
         };
-        self.claim(slot, owner, state)
+        // SAFETY: exclusive access per this function's contract.
+        unsafe { self.claim(slot, owner, state) }
     }
 
     pub fn alloc_batch(
@@ -905,6 +984,18 @@ impl PhysicalFrameManager {
         count: usize,
         state: FrameState,
     ) -> Result<FrameBatch, FrameError> {
+        // SAFETY: `&mut self` gives exclusive access to every slot.
+        unsafe { self.alloc_contiguous_shared(owner, count, state) }
+    }
+
+    /// # Safety
+    /// The caller must hold exclusive access to every slot (all shard locks).
+    pub(crate) unsafe fn alloc_contiguous_shared(
+        &self,
+        owner: OwnerId,
+        count: usize,
+        state: FrameState,
+    ) -> Result<FrameBatch, FrameError> {
         if owner.0 == 0 {
             return Err(FrameError::InvalidFrame);
         }
@@ -923,7 +1014,8 @@ impl PhysicalFrameManager {
                 }
                 let mut batch = FrameBatch::empty();
                 for slot in first..first + count {
-                    let lease = self.claim(slot, owner, state)?;
+                    // SAFETY: exclusive access per this function's contract.
+                    let lease = unsafe { self.claim(slot, owner, state) }?;
                     batch.push(lease)?;
                 }
                 return Ok(batch);
@@ -933,8 +1025,17 @@ impl PhysicalFrameManager {
     }
 
     pub fn free(&mut self, lease: FrameLease) -> Result<(), FrameError> {
+        // SAFETY: `&mut self` gives exclusive access to every slot.
+        unsafe { self.free_shared(lease) }
+    }
+
+    /// # Safety
+    /// The caller must hold exclusive access to the lease's slot (its shard
+    /// lock).
+    pub(crate) unsafe fn free_shared(&self, lease: FrameLease) -> Result<(), FrameError> {
         let slot = self.validate_lease(lease)?;
-        self.release_slot(slot, lease.owner);
+        // SAFETY: exclusive access per this function's contract.
+        unsafe { self.release_slot(slot, lease.owner) };
         Ok(())
     }
 
@@ -942,12 +1043,16 @@ impl PhysicalFrameManager {
         self.validate_lease(lease).map(|_| ())
     }
 
-    fn refresh(&mut self, lease: FrameLease) -> Result<FrameLease, FrameError> {
+    /// # Safety
+    /// The caller must hold exclusive access to the lease's slot.
+    unsafe fn refresh(&self, lease: FrameLease) -> Result<FrameLease, FrameError> {
         let slot = self.validate_lease(lease)?;
-        let generation = {
-            let record = &mut self.metadata.records_mut()[slot];
-            record.generation = next_frame_generation(record.generation);
-            record.generation
+        // SAFETY: exclusive access per this function's contract.
+        let generation = unsafe {
+            self.metadata.update_record(slot, |record| {
+                record.generation = next_frame_generation(record.generation);
+                record.generation
+            })
         };
         let id = self.id_for_slot(slot).ok_or(FrameError::InvalidFrame)?;
         let address = self.address(id).ok_or(FrameError::InvalidFrame)?;
@@ -960,7 +1065,7 @@ impl PhysicalFrameManager {
             .or_else(|| self.id_for_address(address.raw))
             .ok_or(FrameError::InvalidFrame)?;
         let slot = self.slot_for_id(id).ok_or(FrameError::InvalidFrame)?;
-        let record = self.metadata.records()[slot];
+        let record = self.metadata.record(slot).ok_or(FrameError::InvalidFrame)?;
         if record.state == FREE {
             return Err(FrameError::StaleHandle);
         }
@@ -1008,7 +1113,8 @@ impl PhysicalFrameManager {
             return Err(FrameError::AlreadyUsed);
         }
         self.clear_free(slot);
-        self.claim_used(slot, owner, FrameState::Reserved)
+        // SAFETY: `&mut self` gives exclusive access to every slot.
+        unsafe { self.claim_used(slot, owner, FrameState::Reserved) }
     }
 
     pub fn release_reservation(&mut self, lease: FrameLease) -> Result<(), FrameError> {
@@ -1016,7 +1122,8 @@ impl PhysicalFrameManager {
         if lease.state != FrameState::Reserved {
             return Err(FrameError::NotReservation);
         }
-        self.release_slot(slot, lease.owner);
+        // SAFETY: `&mut self` gives exclusive access to every slot.
+        unsafe { self.release_slot(slot, lease.owner) };
         Ok(())
     }
 
@@ -1047,7 +1154,7 @@ impl PhysicalFrameManager {
         let run = self.runs.get(id.run())?;
         let offset = id.offset() as u64;
         let raw = run.run.start.checked_add(offset.checked_mul(PAGE_SIZE)?)?;
-        Some(FrameAddress::from_parts(raw, id, self.metadata.records()[slot].generation))
+        Some(FrameAddress::from_parts(raw, id, self.metadata.record(slot)?.generation))
     }
 
     pub fn id_for_address(&self, raw: u64) -> Option<FrameId> {
@@ -1073,7 +1180,7 @@ impl PhysicalFrameManager {
 
     pub fn state(&self, id: FrameId) -> Option<FrameState> {
         let slot = self.slot_for_id(id)?;
-        let record = self.metadata.records()[slot];
+        let record = self.metadata.record(slot)?;
         match record.state {
             FREE => None,
             ACTIVE => Some(FrameState::Dirty),
@@ -1083,9 +1190,8 @@ impl PhysicalFrameManager {
     }
 
     pub fn owner_live(&self, owner: OwnerId) -> u32 {
-        self.metadata
-            .records()
-            .iter()
+        (0..self.metadata.records_len)
+            .filter_map(|slot| self.metadata.record(slot))
             .filter(|record| record.state != FREE && record.owner == owner)
             .count() as u32
     }
@@ -1106,48 +1212,61 @@ impl PhysicalFrameManager {
         FragmentationSnapshot { free_frames, largest_free_run }
     }
 
-    fn claim(
-        &mut self,
+    /// # Safety
+    /// The caller must hold exclusive access to `slot`.
+    unsafe fn claim(
+        &self,
         slot: usize,
         owner: OwnerId,
         state: FrameState,
     ) -> Result<FrameLease, FrameError> {
         self.clear_free(slot);
-        self.claim_used(slot, owner, state)
+        // SAFETY: exclusive access per this function's contract.
+        unsafe { self.claim_used(slot, owner, state) }
     }
 
-    fn claim_used(
-        &mut self,
+    /// # Safety
+    /// The caller must hold exclusive access to `slot`.
+    unsafe fn claim_used(
+        &self,
         slot: usize,
         owner: OwnerId,
         state: FrameState,
     ) -> Result<FrameLease, FrameError> {
-        let generation = {
-            let record = &mut self.metadata.records_mut()[slot];
-            record.generation = next_frame_generation(record.generation);
-            record.owner = owner;
-            record.state = match state {
-                FrameState::Reserved => 2,
-                FrameState::Zeroed => ZEROED,
-                FrameState::Dirty => ACTIVE,
-            };
-            record.generation
+        // SAFETY: exclusive access per this function's contract.
+        let generation = unsafe {
+            self.metadata.update_record(slot, |record| {
+                record.generation = next_frame_generation(record.generation);
+                record.owner = owner;
+                record.state = match state {
+                    FrameState::Reserved => 2,
+                    FrameState::Zeroed => ZEROED,
+                    FrameState::Dirty => ACTIVE,
+                };
+                record.generation
+            })
         };
         let id = self.id_for_slot(slot).ok_or(FrameError::InvalidFrame)?;
         let address = self.address(id).ok_or(FrameError::InvalidFrame)?;
         Ok(FrameLease { address, id, generation, owner, state, home_cpu: 0, slot: slot as u32 })
     }
 
-    fn release_slot(&mut self, slot: usize, _owner: OwnerId) {
-        let record = &mut self.metadata.records_mut()[slot];
-        record.owner = OwnerId(0);
-        record.state = FREE;
+    /// # Safety
+    /// The caller must hold exclusive access to `slot`.
+    unsafe fn release_slot(&self, slot: usize, _owner: OwnerId) {
+        // SAFETY: exclusive access per this function's contract.
+        unsafe {
+            self.metadata.update_record(slot, |record| {
+                record.owner = OwnerId(0);
+                record.state = FREE;
+            })
+        };
         self.set_free(slot);
     }
 
     fn validate_lease(&self, lease: FrameLease) -> Result<usize, FrameError> {
         let slot = usize::try_from(lease.slot).map_err(|_| FrameError::InvalidFrame)?;
-        let Some(record) = self.metadata.records().get(slot).copied() else {
+        let Some(record) = self.metadata.record(slot) else {
             return Err(FrameError::InvalidFrame);
         };
         if record.state == FREE {
@@ -1202,7 +1321,7 @@ impl PhysicalFrameManager {
         let first_summary = first_word / 64;
         let last_summary = last_word / 64;
         for summary_index in first_summary..=last_summary {
-            let mut words = self.metadata.summary()[summary_index];
+            let mut words = self.metadata.summary_word(summary_index).load(Ordering::Relaxed);
             if summary_index == first_summary {
                 words &= u64::MAX << (first_word % 64);
             }
@@ -1211,7 +1330,7 @@ impl PhysicalFrameManager {
             }
             while words != 0 {
                 let word_index = summary_index * 64 + words.trailing_zeros() as usize;
-                let mut bits = self.metadata.free()[word_index];
+                let mut bits = self.metadata.free_word(word_index).load(Ordering::Relaxed);
                 if word_index == first_word {
                     bits &= u64::MAX << (first % 64);
                 }
@@ -1228,20 +1347,25 @@ impl PhysicalFrameManager {
     }
 
     fn is_free(&self, slot: usize) -> bool {
-        self.metadata.free()[slot / 64] & (1u64 << (slot % 64)) != 0
+        self.metadata.free_word(slot / 64).load(Ordering::Relaxed) & (1u64 << (slot % 64)) != 0
     }
 
-    fn set_free(&mut self, slot: usize) {
+    // The free and summary words are atomics: shards own disjoint free words,
+    // but neighbouring shards can share a summary word.
+    fn set_free(&self, slot: usize) {
         let word = slot / 64;
-        self.metadata.free_mut()[word] |= 1u64 << (slot % 64);
-        self.metadata.summary_mut()[word / 64] |= 1u64 << (word % 64);
+        self.metadata.free_word(word).fetch_or(1u64 << (slot % 64), Ordering::Relaxed);
+        self.metadata.summary_word(word / 64).fetch_or(1u64 << (word % 64), Ordering::Relaxed);
     }
 
-    fn clear_free(&mut self, slot: usize) {
+    fn clear_free(&self, slot: usize) {
         let word = slot / 64;
-        self.metadata.free_mut()[word] &= !(1u64 << (slot % 64));
-        if self.metadata.free()[word] == 0 {
-            self.metadata.summary_mut()[word / 64] &= !(1u64 << (word % 64));
+        let bit = 1u64 << (slot % 64);
+        let remaining = self.metadata.free_word(word).fetch_and(!bit, Ordering::Relaxed) & !bit;
+        if remaining == 0 {
+            self.metadata
+                .summary_word(word / 64)
+                .fetch_and(!(1u64 << (word % 64)), Ordering::Relaxed);
         }
     }
 }
@@ -1704,7 +1828,7 @@ impl SmpFrameAllocator {
         }
         // SAFETY: heap metadata is reserved during allocator initialization and
         // is exclusively owned by the kernel heap after this handoff.
-        Some(unsafe { (&mut *self.manager.get()).heap_metadata() })
+        Some(unsafe { (&*self.manager.get()).heap_metadata() })
     }
 
     /// Flush cached frees into the shared frame metadata.
@@ -1727,7 +1851,7 @@ impl SmpFrameAllocator {
                 return;
             };
             // SAFETY: the shard owns this frame's metadata.
-            if unsafe { &mut *self.manager.get() }.free(lease).is_err() {
+            if unsafe { (&*self.manager.get()).free_shared(lease) }.is_err() {
                 let _ = self.caches[cpu].try_lock().and_then(|mut cache| cache.push(lease).ok());
                 return;
             }
@@ -1869,7 +1993,7 @@ impl SmpFrameAllocator {
         }
         // SAFETY: every frame shard is held, so the manager bitmap and records
         // cannot change while the contiguous run is selected and claimed.
-        let result = unsafe { &mut *self.manager.get() }.alloc_contiguous(owner, count, state);
+        let result = unsafe { (&*self.manager.get()).alloc_contiguous_shared(owner, count, state) };
         drop(guards);
         result.map_err(|error| match error {
             FrameError::Exhausted => AllocationError::Exhausted,
@@ -1930,7 +2054,7 @@ impl SmpFrameAllocator {
                 return Err(AllocationError::WouldBlock);
             };
             // SAFETY: the shard owns the bitmap word containing this frame.
-            unsafe { &mut *self.manager.get() }.free(lease)
+            unsafe { (&*self.manager.get()).free_shared(lease) }
         };
         match result {
             Ok(()) => {
@@ -1990,7 +2114,7 @@ impl SmpFrameAllocator {
 
         // SAFETY: every shard is held, so validation and release are atomic
         // with respect to all allocator paths.
-        let manager = unsafe { &mut *self.manager.get() };
+        let manager = unsafe { &*self.manager.get() };
         for index in 0..batch.len {
             let lease = batch.frames[index].ok_or(AllocationError::StaleHandle)?;
             match manager.validate(lease) {
@@ -2002,7 +2126,8 @@ impl SmpFrameAllocator {
         }
         for index in 0..batch.len {
             let lease = batch.frames[index].ok_or(AllocationError::StaleHandle)?;
-            manager.free(lease).map_err(|error| match error {
+            // SAFETY: every shard is held.
+            unsafe { manager.free_shared(lease) }.map_err(|error| match error {
                 FrameError::WrongOwner => AllocationError::WrongOwner,
                 _ => AllocationError::StaleHandle,
             })?;
@@ -2106,8 +2231,9 @@ impl SmpFrameAllocator {
             let first = self.shard_first[shard];
             let last = self.shard_last[shard];
             // SAFETY: the shard owns this disjoint bitmap-word interval.
-            let result =
-                unsafe { &mut *self.manager.get() }.try_alloc_in_range(owner, state, first, last);
+            let result = unsafe {
+                (&*self.manager.get()).try_alloc_in_range_shared(owner, state, first, last)
+            };
             match result {
                 Ok(lease) => {
                     self.stats.allocations.fetch_add(1, Ordering::Relaxed);
@@ -2140,7 +2266,7 @@ impl SmpFrameAllocator {
                     break;
                 };
                 // SAFETY: the shard owns this frame's metadata.
-                unsafe { &mut *self.manager.get() }.refresh(lease)
+                unsafe { (&*self.manager.get()).refresh(lease) }
             };
             if let Ok(lease) = result {
                 let lease = lease.with_home_cpu(cpu);
@@ -2169,8 +2295,7 @@ impl SmpFrameAllocator {
             return Err(AllocationError::WouldBlock);
         };
         // SAFETY: this shard owns the frame's metadata and bitmap word.
-        unsafe { &mut *self.manager.get() }
-            .refresh(lease)
+        unsafe { (&*self.manager.get()).refresh(lease) }
             .map(|lease| lease.with_home_cpu(cpu))
             .map_err(|error| match error {
                 FrameError::WrongOwner => AllocationError::WrongOwner,
@@ -2190,7 +2315,7 @@ impl SmpFrameAllocator {
                 return;
             };
             // SAFETY: the shard owns this frame's metadata.
-            unsafe { &mut *self.manager.get() }.free(lease)
+            unsafe { (&*self.manager.get()).free_shared(lease) }
         };
         if result.is_ok() {
             self.stats.frees.fetch_add(1, Ordering::Relaxed);
