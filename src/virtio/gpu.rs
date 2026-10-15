@@ -6,6 +6,10 @@ use core::{
 };
 
 use super::frame_queue::{FrameLease, FrameQueue, FrameQueueError};
+use crate::virtio_queue::{
+    clamp_used_length, le_u32, negotiated_queue_size, notify_delta, pending_used, read_shared,
+    validate_used_id, write_shared,
+};
 
 use logos_storage::{
     PCI_CONFIG_BYTES, PciAddress, VIRTIO_F_VERSION_1, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
@@ -143,6 +147,8 @@ enum GpuError {
     Timeout,
     Device(u32),
     Busy,
+    /// The device wrote a used-ring entry that violates the VirtIO contract.
+    InvalidCompletion,
 }
 
 #[cfg(feature = "qemu-proof")]
@@ -160,6 +166,7 @@ fn gpu_error_proof_line(error: GpuError) {
         GpuError::Timeout => b"LogOS vNext: VirtIO GPU init timeout".as_slice(),
         GpuError::Device(_) => b"LogOS vNext: VirtIO GPU init device".as_slice(),
         GpuError::Busy => b"LogOS vNext: VirtIO GPU init busy".as_slice(),
+        GpuError::InvalidCompletion => b"LogOS vNext: VirtIO GPU init completion".as_slice(),
     };
     crate::arch_proof_line(marker);
 }
@@ -171,7 +178,11 @@ struct MmioRegion {
 }
 
 impl MmioRegion {
-    fn new(address: u64, length: u32) -> Result<Self, GpuError> {
+    /// # Safety
+    ///
+    /// `address..address + length` must be a device MMIO window that stays mapped for the
+    /// lifetime of the region; the volatile accessors below rely on it.
+    unsafe fn new(address: u64, length: u32) -> Result<Self, GpuError> {
         if address == 0 || address % 4 != 0 || length < 4 {
             return Err(GpuError::InvalidBar);
         }
@@ -187,36 +198,46 @@ impl MmioRegion {
         Ok(address as *mut T)
     }
 
-    unsafe fn read_u8(&self, offset: usize) -> Result<u8, GpuError> {
-        Ok(unsafe { read_volatile(self.ptr(offset)?) })
+    fn read<T: Copy>(&self, offset: usize) -> Result<T, GpuError> {
+        let pointer = self.ptr::<T>(offset)?;
+        // SAFETY: `ptr` proved `offset..offset + size_of::<T>()` lies inside the region, and
+        // `MmioRegion::new` obliges its caller to keep that window mapped device memory.
+        Ok(unsafe { read_volatile(pointer) })
     }
 
-    unsafe fn read_u16(&self, offset: usize) -> Result<u16, GpuError> {
-        Ok(unsafe { read_volatile(self.ptr(offset)?) })
-    }
-
-    unsafe fn read_u32(&self, offset: usize) -> Result<u32, GpuError> {
-        Ok(unsafe { read_volatile(self.ptr(offset)?) })
-    }
-
-    unsafe fn write_u8(&self, offset: usize, value: u8) -> Result<(), GpuError> {
-        unsafe { write_volatile(self.ptr(offset)?, value) };
+    fn write<T: Copy>(&self, offset: usize, value: T) -> Result<(), GpuError> {
+        let pointer = self.ptr::<T>(offset)?;
+        // SAFETY: as for `read`; the write stays inside the mapped device window.
+        unsafe { write_volatile(pointer, value) };
         Ok(())
     }
 
-    unsafe fn write_u16(&self, offset: usize, value: u16) -> Result<(), GpuError> {
-        unsafe { write_volatile(self.ptr(offset)?, value) };
-        Ok(())
+    fn read_u8(&self, offset: usize) -> Result<u8, GpuError> {
+        self.read(offset)
     }
 
-    unsafe fn write_u32(&self, offset: usize, value: u32) -> Result<(), GpuError> {
-        unsafe { write_volatile(self.ptr(offset)?, value) };
-        Ok(())
+    fn read_u16(&self, offset: usize) -> Result<u16, GpuError> {
+        self.read(offset)
     }
 
-    unsafe fn write_u64(&self, offset: usize, value: u64) -> Result<(), GpuError> {
-        unsafe { write_volatile(self.ptr(offset)?, value) };
-        Ok(())
+    fn read_u32(&self, offset: usize) -> Result<u32, GpuError> {
+        self.read(offset)
+    }
+
+    fn write_u8(&self, offset: usize, value: u8) -> Result<(), GpuError> {
+        self.write(offset, value)
+    }
+
+    fn write_u16(&self, offset: usize, value: u16) -> Result<(), GpuError> {
+        self.write(offset, value)
+    }
+
+    fn write_u32(&self, offset: usize, value: u32) -> Result<(), GpuError> {
+        self.write(offset, value)
+    }
+
+    fn write_u64(&self, offset: usize, value: u64) -> Result<(), GpuError> {
+        self.write(offset, value)
     }
 }
 
@@ -262,6 +283,80 @@ struct PendingFrame {
 struct FrameRect {
     transfer: VirtioGpuRect,
     flush: VirtioGpuRect,
+}
+
+/// The single accessor for the GPU driver's `DEVICE` slot.
+///
+/// # Safety
+///
+/// `DEVICE_READY` must be set (the slot holds an initialized device) and the caller must hold
+/// `DEVICE_BUSY`. That flag is the exclusivity lock: it is taken with a compare-exchange, so at
+/// most one `&mut` produced here is live at a time, and it is released only after the reference
+/// is dead.
+unsafe fn device_mut() -> &'static mut VirtioGpuDevice {
+    // SAFETY: the caller upholds the contract above, so the slot is initialized and unaliased.
+    unsafe { &mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioGpuDevice>() }
+}
+
+/// Stores a freshly initialized device into the `DEVICE` slot.
+fn install_device(device: VirtioGpuDevice) {
+    // SAFETY: only called from `present` after the one-shot `DEVICE_ATTEMPTED` swap and while
+    // `DEVICE_READY` is false, so no `device_mut` reference exists; the type has no drop glue.
+    unsafe { core::ptr::addr_of_mut!(DEVICE).write(MaybeUninit::new(device)) };
+}
+
+/// The single accessor for the control-queue DMA arena `QUEUE_MEMORY`.
+///
+/// # Safety
+///
+/// Called only from `VirtioGpuDevice::initialize`, which the one-shot `DEVICE_ATTEMPTED` swap
+/// runs at most once. The reference is moved into the single device that owns the arena.
+unsafe fn queue_memory() -> &'static mut QueueMemory {
+    // SAFETY: the caller upholds the contract above, so this is the only live reference.
+    unsafe { &mut *core::ptr::addr_of_mut!(QUEUE_MEMORY) }
+}
+
+/// The single accessor for the cursor-queue DMA arena `CURSOR_QUEUE_MEMORY`; same contract as
+/// [`queue_memory`].
+///
+/// # Safety
+///
+/// Called only from `VirtioGpuDevice::initialize` (once, see [`queue_memory`]).
+unsafe fn cursor_queue_memory() -> &'static mut QueueMemory {
+    // SAFETY: the caller upholds the contract above, so this is the only live reference.
+    unsafe { &mut *core::ptr::addr_of_mut!(CURSOR_QUEUE_MEMORY) }
+}
+
+/// The single accessor for the cursor bitmap `CURSOR_MEMORY`.
+///
+/// # Safety
+///
+/// Callers hold exclusivity: either `VirtioGpuDevice::initialize` (one-shot, before
+/// `DEVICE_READY`) or code running under `DEVICE_BUSY`. The reference must not outlive the call
+/// that obtained it.
+unsafe fn cursor_memory() -> &'static mut [u8; CURSOR_BACKING_BYTES as usize] {
+    // SAFETY: the caller upholds the contract above, so this is the only live reference.
+    unsafe { &mut (*core::ptr::addr_of_mut!(CURSOR_MEMORY)).0 }
+}
+
+/// The single accessor for the frame backing stores `FRAME_MEMORY`; `None` for a bad slot.
+///
+/// # Safety
+///
+/// Same exclusivity contract as [`cursor_memory`]: initialization or `DEVICE_BUSY`.
+unsafe fn frame_memory(slot: usize) -> Option<&'static mut [u8]> {
+    // SAFETY: the caller upholds the contract above; `get_mut` bounds-checks the slot.
+    let frames = unsafe { &mut *core::ptr::addr_of_mut!(FRAME_MEMORY) };
+    frames.get_mut(slot).map(|frame| frame.0.as_mut_slice())
+}
+
+/// Address of a frame backing store for `ResourceAttachBacking`. Creates no reference.
+fn frame_memory_address(slot: usize) -> Option<u64> {
+    if slot >= FRAME_SLOT_COUNT {
+        return None;
+    }
+    let base = core::ptr::addr_of!(FRAME_MEMORY) as u64;
+    base.checked_add((slot * core::mem::size_of::<FrameMemory>()) as u64)
 }
 
 fn frame_resource_id(slot: usize) -> u32 {
@@ -318,7 +413,7 @@ pub(crate) fn present() -> bool {
                 return false;
             }
         };
-        unsafe { core::ptr::addr_of_mut!(DEVICE).write(MaybeUninit::new(device)) };
+        install_device(device);
         DEVICE_READY.store(true, Ordering::Release);
         crate::arch::set_hardware_cursor(true);
         #[cfg(feature = "qemu-proof")]
@@ -332,6 +427,8 @@ pub(crate) fn present() -> bool {
     });
     if let Err(error) = result {
         if !matches!(error, GpuError::Busy) {
+            // Best-effort reset so a misbehaving device stops DMA before we fall back.
+            let _ = with_device_mut(|device| device.reset());
             DEVICE_READY.store(false, Ordering::Release);
             crate::arch::set_hardware_cursor(false);
             #[cfg(feature = "qemu-proof")]
@@ -350,8 +447,9 @@ fn with_device_mut<T>(
     if DEVICE_BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return Err(GpuError::Busy);
     }
-    let result =
-        unsafe { operation(&mut *core::ptr::addr_of_mut!(DEVICE).cast::<VirtioGpuDevice>()) };
+    // SAFETY: `DEVICE_READY` was observed set and `DEVICE_BUSY` was just acquired above; the
+    // reference does not outlive `operation`, and the flag is released only afterwards.
+    let result = operation(unsafe { device_mut() });
     DEVICE_BUSY.store(false, Ordering::Release);
     result
 }
@@ -410,7 +508,8 @@ fn cursor_pixel(x: i32, y: i32, pressed: bool) -> ([u8; 3], u8) {
 }
 
 fn initialize_cursor_memory(pressed: bool) {
-    let memory = unsafe { &mut (*core::ptr::addr_of_mut!(CURSOR_MEMORY)).0 };
+    // SAFETY: called from `initialize` (one-shot) or under `DEVICE_BUSY` via `present`.
+    let memory = unsafe { cursor_memory() };
     memory.fill(0);
     for row in 0..CURSOR_BITMAP_SIZE {
         for column in 0..CURSOR_BITMAP_SIZE {
@@ -463,16 +562,13 @@ impl VirtioGpuDevice {
         PciConfig::enable_device(probe.address);
         let common = region_for(&probe, probe.capabilities.common)?;
         let notify = region_for(&probe, probe.capabilities.notify)?;
-        let queue = unsafe {
-            let queue = &mut *core::ptr::addr_of_mut!(QUEUE_MEMORY);
-            *queue = QueueMemory::new();
-            queue
-        };
-        let cursor_queue = unsafe {
-            let queue = &mut *core::ptr::addr_of_mut!(CURSOR_QUEUE_MEMORY);
-            *queue = QueueMemory::new();
-            queue
-        };
+        // SAFETY: `initialize` runs at most once (`DEVICE_ATTEMPTED`) and is the only owner of
+        // both queue arenas.
+        let queue = unsafe { queue_memory() };
+        *queue = QueueMemory::new();
+        // SAFETY: as above.
+        let cursor_queue = unsafe { cursor_queue_memory() };
+        *cursor_queue = QueueMemory::new();
         let mut device = Self {
             common,
             notify,
@@ -493,32 +589,26 @@ impl VirtioGpuDevice {
             cursor_initialized: false,
         };
         device.reset()?;
-        unsafe {
-            device.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)?;
-            device.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER)?;
-        }
+        device.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE)?;
+        device.common.write_u8(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER)?;
         let features = device.device_features()?;
         if features & VIRTIO_F_VERSION_1 == 0 {
             return Err(GpuError::FeatureNegotiation);
         }
         device.driver_features(device.negotiated_features)?;
-        unsafe {
-            device.common.write_u8(
-                COMMON_DEVICE_STATUS,
-                STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
-            )?;
-            if device.common.read_u8(COMMON_DEVICE_STATUS)? & STATUS_FEATURES_OK == 0 {
-                return Err(GpuError::DeviceRejectedFeatures);
-            }
+        device.common.write_u8(
+            COMMON_DEVICE_STATUS,
+            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
+        )?;
+        if device.common.read_u8(COMMON_DEVICE_STATUS)? & STATUS_FEATURES_OK == 0 {
+            return Err(GpuError::DeviceRejectedFeatures);
         }
         device.configure_queue(0)?;
         device.configure_queue(1)?;
-        unsafe {
-            device.common.write_u8(
-                COMMON_DEVICE_STATUS,
-                STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
-            )?;
-        }
+        device.common.write_u8(
+            COMMON_DEVICE_STATUS,
+            STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
+        )?;
         device.command(VirtioGpuCommand::ResourceCreate2d {
             resource_id: RESOURCE_ID,
             format: VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
@@ -527,7 +617,7 @@ impl VirtioGpuDevice {
         })?;
         device.command(VirtioGpuCommand::ResourceAttachBacking {
             resource_id: RESOURCE_ID,
-            address: unsafe { core::ptr::addr_of!(FRAME_MEMORY[0]) as u64 },
+            address: frame_memory_address(0).ok_or(GpuError::InvalidFramebuffer)?,
             length: bytes,
         })?;
         device.command(VirtioGpuCommand::ResourceCreate2d {
@@ -538,7 +628,7 @@ impl VirtioGpuDevice {
         })?;
         device.command(VirtioGpuCommand::ResourceAttachBacking {
             resource_id: SECONDARY_RESOURCE_ID,
-            address: unsafe { core::ptr::addr_of!(FRAME_MEMORY[1]) as u64 },
+            address: frame_memory_address(1).ok_or(GpuError::InvalidFramebuffer)?,
             length: bytes,
         })?;
         let _ = cursor_state.ok_or(GpuError::InvalidFramebuffer)?;
@@ -576,9 +666,9 @@ impl VirtioGpuDevice {
     }
 
     fn reset(&mut self) -> Result<(), GpuError> {
-        unsafe { self.common.write_u8(COMMON_DEVICE_STATUS, 0)? };
+        self.common.write_u8(COMMON_DEVICE_STATUS, 0)?;
         for _ in 0..1024 {
-            if unsafe { self.common.read_u8(COMMON_DEVICE_STATUS)? } == 0 {
+            if self.common.read_u8(COMMON_DEVICE_STATUS)? == 0 {
                 return Ok(());
             }
             core::hint::spin_loop();
@@ -587,46 +677,36 @@ impl VirtioGpuDevice {
     }
 
     fn device_features(&self) -> Result<u64, GpuError> {
-        unsafe {
-            self.common.write_u32(COMMON_DEVICE_FEATURE_SELECT, 0)?;
-            let low = self.common.read_u32(COMMON_DEVICE_FEATURE)? as u64;
-            self.common.write_u32(COMMON_DEVICE_FEATURE_SELECT, 1)?;
-            let high = self.common.read_u32(COMMON_DEVICE_FEATURE)? as u64;
-            Ok(low | high << 32)
-        }
+        self.common.write_u32(COMMON_DEVICE_FEATURE_SELECT, 0)?;
+        let low = self.common.read_u32(COMMON_DEVICE_FEATURE)? as u64;
+        self.common.write_u32(COMMON_DEVICE_FEATURE_SELECT, 1)?;
+        let high = self.common.read_u32(COMMON_DEVICE_FEATURE)? as u64;
+        Ok(low | high << 32)
     }
 
     fn driver_features(&self, features: u64) -> Result<(), GpuError> {
-        unsafe {
-            self.common.write_u32(COMMON_DRIVER_FEATURE_SELECT, 0)?;
-            self.common.write_u32(COMMON_DRIVER_FEATURE, features as u32)?;
-            self.common.write_u32(COMMON_DRIVER_FEATURE_SELECT, 1)?;
-            self.common.write_u32(COMMON_DRIVER_FEATURE, (features >> 32) as u32)
-        }
+        self.common.write_u32(COMMON_DRIVER_FEATURE_SELECT, 0)?;
+        self.common.write_u32(COMMON_DRIVER_FEATURE, features as u32)?;
+        self.common.write_u32(COMMON_DRIVER_FEATURE_SELECT, 1)?;
+        self.common.write_u32(COMMON_DRIVER_FEATURE, (features >> 32) as u32)
     }
 
     fn configure_queue(&mut self, index: u16) -> Result<(), GpuError> {
-        let queue = if index == 0 {
-            self.queue as *mut QueueMemory
-        } else {
-            self.cursor_queue as *mut QueueMemory
-        };
-        unsafe {
-            self.common.write_u16(COMMON_QUEUE_SELECT, index)?;
-            if self.common.read_u16(COMMON_QUEUE_SIZE)? < QUEUE_SIZE as u16 {
-                return Err(GpuError::QueueUnavailable);
-            }
-            self.common.write_u16(COMMON_QUEUE_SIZE, QUEUE_SIZE as u16)?;
-            let queue = &mut *queue;
-            self.common.write_u64(COMMON_QUEUE_DESC, queue.descriptors.as_ptr() as u64)?;
-            self.common.write_u64(
-                COMMON_QUEUE_DRIVER,
-                core::ptr::addr_of!(queue.available_flags) as u64,
-            )?;
-            self.common
-                .write_u64(COMMON_QUEUE_DEVICE, core::ptr::addr_of!(queue.used_flags) as u64)?;
-            self.common.write_u16(COMMON_QUEUE_ENABLE, 1)
+        let queue: &QueueMemory = if index == 0 { self.queue } else { self.cursor_queue };
+        self.common.write_u16(COMMON_QUEUE_SELECT, index)?;
+        // The rings are laid out for exactly `QUEUE_SIZE` entries: program that size and
+        // require the device to accept it.
+        let maximum = self.common.read_u16(COMMON_QUEUE_SIZE)?;
+        let size = negotiated_queue_size(maximum, QUEUE_SIZE).ok_or(GpuError::QueueUnavailable)?;
+        self.common.write_u16(COMMON_QUEUE_SIZE, size)?;
+        if self.common.read_u16(COMMON_QUEUE_SIZE)? != size {
+            return Err(GpuError::QueueUnavailable);
         }
+        self.common.write_u64(COMMON_QUEUE_DESC, queue.descriptors.as_ptr() as u64)?;
+        self.common
+            .write_u64(COMMON_QUEUE_DRIVER, core::ptr::addr_of!(queue.available_flags) as u64)?;
+        self.common.write_u64(COMMON_QUEUE_DEVICE, core::ptr::addr_of!(queue.used_flags) as u64)?;
+        self.common.write_u16(COMMON_QUEUE_ENABLE, 1)
     }
 
     fn command(&mut self, command: VirtioGpuCommand) -> Result<(), GpuError> {
@@ -682,19 +762,15 @@ impl VirtioGpuDevice {
             flags: VIRTQ_DESC_F_WRITE,
             next: 0,
         };
-        let available = unsafe { read_volatile(&queue.available_index) };
+        let available = read_shared(&queue.available_index);
         queue.available_ring[usize::from(available) % QUEUE_SIZE] = 0;
         fence(Ordering::Release);
-        unsafe { write_volatile(&mut queue.available_index, available.wrapping_add(1)) };
-        let notify_offset = u64::from(unsafe {
-            common.write_u16(COMMON_QUEUE_SELECT, queue_index)?;
-            common.read_u16(COMMON_QUEUE_NOTIFY_OFF)?
-        });
-        let notify_delta = notify_offset
-            .checked_mul(u64::from(notify_multiplier))
-            .and_then(|offset| usize::try_from(offset).ok())
+        write_shared(&mut queue.available_index, available.wrapping_add(1));
+        common.write_u16(COMMON_QUEUE_SELECT, queue_index)?;
+        let notify_offset = common.read_u16(COMMON_QUEUE_NOTIFY_OFF)?;
+        let delta = notify_delta(notify.length, notify_offset, notify_multiplier)
             .ok_or(GpuError::InvalidBar)?;
-        unsafe { notify.write_u16(notify_delta, queue_index)? };
+        notify.write_u16(delta, queue_index)?;
         Ok(available.wrapping_add(1))
     }
 
@@ -710,15 +786,16 @@ impl VirtioGpuDevice {
 
     fn wait_cursor_command(queue: &mut QueueMemory, completion: u16) -> Result<(), GpuError> {
         for _ in 0..COMPLETION_SPIN_LIMIT {
-            let used = unsafe { read_volatile(&queue.used_index) };
+            let used = read_shared(&queue.used_index);
             if used != completion {
+                // A device that claims more completions than we posted is hostile, not slow.
+                if pending_used(used, completion.wrapping_sub(1), QUEUE_SIZE).is_err() {
+                    return Err(GpuError::InvalidCompletion);
+                }
                 core::hint::spin_loop();
                 continue;
             }
-            let element = queue.used_ring[usize::from(completion.wrapping_sub(1)) % QUEUE_SIZE];
-            if element.id != 0 {
-                return Err(GpuError::Timeout);
-            }
+            Self::check_used_element(queue, completion)?;
             // QEMU completes cursor-queue requests without writing the
             // response payload, so completion is the only reliable check.
             return Ok(());
@@ -726,16 +803,30 @@ impl VirtioGpuDevice {
         Err(GpuError::Timeout)
     }
 
+    /// Validates the used-ring element for the single in-flight chain (head descriptor 0).
+    fn check_used_element(queue: &QueueMemory, completion: u16) -> Result<(), GpuError> {
+        let slot = usize::from(completion.wrapping_sub(1)) % QUEUE_SIZE;
+        let element = read_shared(&queue.used_ring[slot]);
+        // Exactly one chain (head 0, two descriptors) is ever posted, so it is in flight.
+        validate_used_id(element.id, 2, QUEUE_SIZE, |candidate| candidate == 0)
+            .map_err(|_| GpuError::InvalidCompletion)?;
+        let reported = clamp_used_length(element.length, queue.response.len() as u32);
+        if reported != element.length {
+            return Err(GpuError::InvalidCompletion);
+        }
+        Ok(())
+    }
+
     fn poll_command(queue: &mut QueueMemory, completion: u16) -> Result<bool, GpuError> {
-        let used = unsafe { read_volatile(&queue.used_index) };
+        let used = read_shared(&queue.used_index);
         if used != completion {
+            if pending_used(used, completion.wrapping_sub(1), QUEUE_SIZE).is_err() {
+                return Err(GpuError::InvalidCompletion);
+            }
             return Ok(false);
         }
-        let element = queue.used_ring[usize::from(completion.wrapping_sub(1)) % QUEUE_SIZE];
-        if element.id != 0 {
-            return Err(GpuError::Timeout);
-        }
-        let response_type = u32::from_le_bytes(queue.response[..4].try_into().unwrap());
+        Self::check_used_element(queue, completion)?;
+        let response_type = le_u32(&queue.response, 0).ok_or(GpuError::InvalidCompletion)?;
         if !response_is_ok(response_type) {
             return Err(GpuError::Device(response_type));
         }
@@ -928,13 +1019,16 @@ impl VirtioGpuDevice {
         full: bool,
         rects: &[FrameRect],
     ) -> Result<(), GpuError> {
+        // SAFETY: `framebuffer` comes from the retained GOP boot resources, whose mapping covers
+        // `stride * height * 4` bytes; `initialize` bounded `frame_bytes` by exactly that.
         let source = unsafe {
             core::slice::from_raw_parts(framebuffer.base() as *const u8, self.frame_bytes as usize)
         };
-        let destination = unsafe {
-            let frame = &mut *core::ptr::addr_of_mut!(FRAME_MEMORY[slot]);
-            &mut frame.0[..self.frame_bytes as usize]
-        };
+        // SAFETY: `copy_frame` runs from `initialize` or under `DEVICE_BUSY`, the exclusivity
+        // contract of `frame_memory`.
+        let destination = unsafe { frame_memory(slot) }
+            .and_then(|frame| frame.get_mut(..self.frame_bytes as usize))
+            .ok_or(GpuError::InvalidFramebuffer)?;
         if full {
             destination.copy_from_slice(source);
             return Ok(());
@@ -985,8 +1079,8 @@ impl VirtioGpuDevice {
         }
         let rect = VirtioGpuRect::new(rect.x as u32, rect.y as u32, rect.width, rect.height)
             .ok_or(GpuError::InvalidFramebuffer)?;
-        if rect.x + rect.width > self.framebuffer.width
-            || rect.y + rect.height > self.framebuffer.height
+        if rect.x.checked_add(rect.width).is_none_or(|end| end > self.framebuffer.width)
+            || rect.y.checked_add(rect.height).is_none_or(|end| end > self.framebuffer.height)
         {
             return Err(GpuError::InvalidFramebuffer);
         }
@@ -1024,7 +1118,8 @@ fn region_for(
         return Err(GpuError::MissingBar);
     }
     let address = bar.base.checked_add(u64::from(capability.offset)).ok_or(GpuError::InvalidBar)?;
-    MmioRegion::new(address, capability.length)
+    // SAFETY: the capability window was checked to lie inside a BAR the device decodes.
+    unsafe { MmioRegion::new(address, capability.length) }
 }
 
 struct PciConfig;
@@ -1068,7 +1163,7 @@ impl PciConfig {
     fn read_config(address: PciAddress) -> [u8; PCI_CONFIG_BYTES] {
         let mut config = [0; PCI_CONFIG_BYTES];
         for offset in (0..PCI_CONFIG_BYTES).step_by(4) {
-            let value = unsafe { config_read(address, offset as u8) };
+            let value = config_read(address, offset as u8);
             config[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
         config
@@ -1079,27 +1174,22 @@ impl PciConfig {
         let mut index = 0;
         while index < bars.len() {
             let offset = 0x10 + index * 4;
-            let low = u32::from_le_bytes(config[offset..offset + 4].try_into().unwrap());
+            let Some(low) = le_u32(config, offset) else { break };
             if low & 1 != 0 {
                 index += 1;
                 continue;
             }
             let is_64 = low & 0x6 == 0x4 && index < 5;
-            let high = if is_64 {
-                u32::from_le_bytes(config[offset + 4..offset + 8].try_into().unwrap())
-            } else {
-                0
-            };
-            unsafe { config_write(address, offset as u8, u32::MAX) };
+            let high = if is_64 { le_u32(config, offset + 4).unwrap_or(0) } else { 0 };
+            config_write(address, offset as u8, u32::MAX);
             if is_64 {
-                unsafe { config_write(address, (offset + 4) as u8, u32::MAX) };
+                config_write(address, (offset + 4) as u8, u32::MAX);
             }
-            let mask_low = unsafe { config_read(address, offset as u8) };
-            let mask_high =
-                if is_64 { unsafe { config_read(address, (offset + 4) as u8) } } else { 0 };
-            unsafe { config_write(address, offset as u8, low) };
+            let mask_low = config_read(address, offset as u8);
+            let mask_high = if is_64 { config_read(address, (offset + 4) as u8) } else { 0 };
+            config_write(address, offset as u8, low);
             if is_64 {
-                unsafe { config_write(address, (offset + 4) as u8, high) };
+                config_write(address, (offset + 4) as u8, high);
             }
             let base = if is_64 {
                 (u64::from(high) << 32) | u64::from(low & !0xf)
@@ -1121,56 +1211,55 @@ impl PciConfig {
     }
 
     fn enable_device(address: PciAddress) {
-        let command = unsafe { config_read_u16(address, 0x04) };
-        unsafe { config_write_u16(address, 0x04, command | 0x0006) };
+        let command = config_read_u16(address, 0x04);
+        config_write_u16(address, 0x04, command | 0x0006);
     }
 }
 
-unsafe fn config_read(address: PciAddress, offset: u8) -> u32 {
+fn config_read(address: PciAddress, offset: u8) -> u32 {
     let value = 0x8000_0000u32
         | (u32::from(address.bus()) << 16)
         | (u32::from(address.device()) << 11)
         | (u32::from(address.function()) << 8)
         | u32::from(offset & 0xfc);
-    unsafe {
-        outl(PCI_CONFIG_ADDRESS, value);
-        inl(PCI_CONFIG_DATA)
-    }
+    outl(PCI_CONFIG_ADDRESS, value);
+    inl(PCI_CONFIG_DATA)
 }
 
-unsafe fn config_read_u16(address: PciAddress, offset: u8) -> u16 {
-    let value = unsafe { config_read(address, offset & 0xfc) };
+fn config_read_u16(address: PciAddress, offset: u8) -> u16 {
+    let value = config_read(address, offset & 0xfc);
     ((value >> (u32::from(offset & 2) * 8)) & 0xffff) as u16
 }
 
-unsafe fn config_write_u16(address: PciAddress, offset: u8, value: u16) {
+fn config_write_u16(address: PciAddress, offset: u8, value: u16) {
     let aligned = offset & 0xfc;
-    let current = unsafe { config_read(address, aligned) };
+    let current = config_read(address, aligned);
     let shift = u32::from(offset & 2) * 8;
     let mask = 0xffffu32 << shift;
-    unsafe { config_write(address, aligned, (current & !mask) | (u32::from(value) << shift)) };
+    config_write(address, aligned, (current & !mask) | (u32::from(value) << shift));
 }
 
-unsafe fn config_write(address: PciAddress, offset: u8, value: u32) {
+fn config_write(address: PciAddress, offset: u8, value: u32) {
     let address_value = 0x8000_0000u32
         | (u32::from(address.bus()) << 16)
         | (u32::from(address.device()) << 11)
         | (u32::from(address.function()) << 8)
         | u32::from(offset & 0xfc);
-    unsafe {
-        outl(PCI_CONFIG_ADDRESS, address_value);
-        outl(PCI_CONFIG_DATA, value);
-    }
+    outl(PCI_CONFIG_ADDRESS, address_value);
+    outl(PCI_CONFIG_DATA, value);
 }
 
-unsafe fn outl(port: u16, value: u32) {
+fn outl(port: u16, value: u32) {
+    // SAFETY: port I/O to the PCI configuration ports touches no Rust-visible memory; the
+    // kernel runs at ring 0 and is the sole owner of these ports.
     unsafe {
         asm!("out dx, eax", in("dx") port, in("eax") value, options(nomem, nostack, preserves_flags))
     };
 }
 
-unsafe fn inl(port: u16) -> u32 {
+fn inl(port: u16) -> u32 {
     let value: u32;
+    // SAFETY: as for `outl`; reading the PCI data port has no memory effects.
     unsafe {
         asm!("in eax, dx", in("dx") port, out("eax") value, options(nomem, nostack, preserves_flags))
     };
