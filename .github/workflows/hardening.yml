@@ -30,8 +30,13 @@ jobs:
         run: cargo +nightly miri test -p logos-abi
       - name: logos-package
         run: cargo +nightly miri test -p logos-package
-      - name: logos-storage
-        run: cargo +nightly miri test -p logos-storage
+      # Storage: only the block-request, virtio, transport, PCI and GPU modules.
+      # The journal/cow/catalog format tests are safe code over 4 KiB-block
+      # arrays and take minutes each under Miri (one test alone exceeded 25 min),
+      # so they are left to the native proptest suite in storage/tests.
+      - name: logos-storage (request, transport, virtio, pci, gpu)
+        run: |
+          cargo +nightly miri test -p logos-storage --lib -- request:: transport:: virtio:: pci:: gpu::
       # The kernel library is built for the host in tests. Only modules without
       # hardware access and without a FramePool are interpreted. Excluded:
       # - memory::, frame_pool::, page_table::, loader::, program_runtime:: build

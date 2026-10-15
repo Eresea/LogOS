@@ -112,7 +112,7 @@ property regression test with the fix. Corpora live in `fuzz/corpus/` and are no
 `.github/workflows/hardening.yml` runs two jobs on pull requests and `main`:
 
 - Miri (`cargo +nightly miri test`) over the host-tested crates. Run it locally with
-  `rustup toolchain install nightly --component miri`; the package list and the excluded tests (with
+  `rustup toolchain install nightly --component miri`; the package list and the excluded modules (with
   the reason for each) are in the workflow.
 - A headless Linux QEMU boot proof, `scripts/proof.sh -c 1 -t 600`, which needs `qemu-system-x86`,
   `ovmf` and the `x86_64-unknown-uefi` and `x86_64-unknown-none` targets.
