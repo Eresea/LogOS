@@ -54,10 +54,26 @@ pub trait WireDecode: Copy {
     fn wire_valid(bytes: &[u8]) -> bool;
 }
 
+/// Marker for types whose every byte is initialized by construction: `repr(C)`
+/// (or primitive) layout with no implicit padding.
+///
+/// The Core copies values into user-visible frames and messages; a type with
+/// padding would copy uninitialized kernel bytes (an information leak, and
+/// undefined behaviour when viewed as `&[u8]`). `FrameBytes::write` and friends
+/// therefore accept only `NoPadding` types.
+///
+/// # Safety
+///
+/// The type must have a defined layout in which `size_of::<Self>()` equals the
+/// sum of its field sizes, and every field must itself be `NoPadding` (or an
+/// integer/`repr(u8)` enum). Implement it only through `assert_no_padding!`,
+/// which proves the size equation at compile time.
+pub unsafe trait NoPadding: Copy {}
+
 macro_rules! wire_bytes_primitives {
     ($($ty:ty),* $(,)?) => {
-        // SAFETY: primitive integers accept every bit pattern.
-        $(unsafe impl WireBytes for $ty {})*
+        // SAFETY: primitive integers accept every bit pattern and have no padding.
+        $(unsafe impl WireBytes for $ty {} unsafe impl NoPadding for $ty {})*
     };
 }
 
@@ -66,6 +82,8 @@ wire_bytes_primitives!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, 
 // SAFETY: an array of values that accept every bit pattern accepts every bit
 // pattern.
 unsafe impl<T: WireBytes, const N: usize> WireBytes for [T; N] {}
+// SAFETY: an array of padding-free elements has no padding between elements.
+unsafe impl<T: NoPadding, const N: usize> NoPadding for [T; N] {}
 
 macro_rules! wire_decode_via_enums {
     ($($ty:ty),* $(,)?) => {
@@ -107,16 +125,16 @@ wire_decode_via_enums!(
 ///
 /// The Core copies written values into user-visible frames; padding bytes are
 /// not guaranteed initialized, so a padded type would leak (or expose
-/// uninitialized) bytes. Types listed below are asserted padding-free.
-/// Writers of the other wire types (`DeviceResponse`, `StorageResponse`,
-/// `NetworkResponse`, ...) still copy padding and are tracked in
-/// `docs/architecture.md`.
+/// uninitialized) bytes. The macro also implements [`NoPadding`] for the type.
 macro_rules! assert_no_padding {
     ($ty:ty; $($field:ty),+ $(,)?) => {
         const _: () = assert!(
             core::mem::size_of::<$ty>() == 0 $(+ core::mem::size_of::<$field>())+,
             "wire type has padding"
         );
+        // SAFETY: the assertion above proves the size equals the sum of the
+        // field sizes, so there are no padding bytes.
+        unsafe impl NoPadding for $ty {}
     };
 }
 
@@ -134,6 +152,290 @@ assert_no_padding!(
     DirectoryRequest;
     u16, crate::DirectoryOperation, u8, u32, u64, crate::ServiceHandle
 );
+
+/// Padding proofs for every wire type the Core copies into a frame or message.
+///
+/// Each type has explicit `reserved*` fields where the `repr(C)` layout would
+/// otherwise insert implicit padding, so the byte layout is unchanged while no
+/// byte is uninitialized. Types with nested wire structs additionally require
+/// the nested type to be `NoPadding` (the size sum alone cannot see padding
+/// inside a nested struct).
+mod padding_proofs {
+    #![allow(clippy::wildcard_imports)]
+    use super::NoPadding;
+    use crate::*;
+
+    const fn require<T: NoPadding>() {}
+
+    assert_no_padding!(FramebufferConfig; u64, u32, u32, u32, FramebufferFormat, [u8; 3]);
+    assert_no_padding!(StorageResponse; u32, StorageStatus, u8, u16, u16, u16, [u8; 4], u64, u64);
+    assert_no_padding!(StorageMapRequest; u8, u8, u16, u32, u64, u16, u16, [u8; 4], u64, u64, u32, u32);
+    assert_no_padding!(StorageMapResponse; u32, StorageStatus, [u8; 3], u64, u64, u8, [u8; 7], u32, [u8; 4]);
+    assert_no_padding!(NetworkConfig; u16, NetworkProfile, u8, [u8; 4], [u8; 4], [u8; 4], u32, u32, u64);
+    assert_no_padding!(NetworkPacketDescriptor; u16, NetworkPacketOperation, NetworkResult, u16, u16, u16, u16, [u8; 4], u64, u32, [u8; 6], [u8; 8], [u8; 6]);
+    assert_no_padding!(NetworkResponse; u16, NetworkOperation, NetworkResult, NetworkState, [u8; 3], u32, u32, u16, u16, [u8; 4], u64, u16, [u8; 16], [u8; NETWORK_INLINE_PAYLOAD_BYTES], [u8; 6]);
+    assert_no_padding!(PackageTarget; PackageTargetKind, u8, u8, u8, [u8; MAX_PACKAGE_NAME_BYTES]);
+    assert_no_padding!(PackageRequest; PackageOperation, u8, PackageTarget, [u8; 2], u32, u16, [u8; 2], CapabilityHandle, u64, u32, u32, u16, u16, [u8; 4]);
+    const _: () = require::<PackageTarget>();
+    assert_no_padding!(PackageResponse; PackageOperation, PackageStatus, PackageTarget, [u8; 2], u32, u16, u16, u64, u32, u32, u16, u16, u32, u32, u32);
+    const _: () = require::<PackageTarget>();
+    assert_no_padding!(ServiceBootstrapPage; u16, u16, u16, u16, u64, ServiceHandle, CapabilityHandle, CapabilityHandle, CapabilityHandle, u64, u32, u32);
+    assert_no_padding!(ProgramBootstrapPage; u16, u16, u16, u16, u32, [u8; 4], ServiceHandle, CapabilityHandle, CapabilityHandle, CapabilityHandle, CapabilityHandle, CapabilityHandle);
+    assert_no_padding!(EventResponse; u16, EventStatus, u8, u32, EventHandle, EventSetHandle, [u8; 8]);
+    assert_no_padding!(DirectoryRecord; DirectoryRecordKind, u8, u16, [u8; 4], u64, ServiceHandle, u16, u16, u16, [u8; 2], EventHandle, u8, [u8; 1], [u8; MAX_SERVICE_NAME_BYTES], [u8; 6]);
+    assert_no_padding!(DirectoryResponse; u16, DirectoryOperation, DirectoryStatus, u32, u64, u8, u8, [u8; 2], [u8; 4], [DirectoryRecord; DIRECTORY_RECORDS_PER_PAGE], [u8; 8]);
+    const _: () = require::<DirectoryRecord>();
+    assert_no_padding!(DeviceRecord; u8, DeviceKind, DeviceState, u8, u32, u64, [u8; MAX_DEVICE_NAME_BYTES]);
+    assert_no_padding!(DeviceResponse; u16, DeviceOperation, DeviceStatus, u32, u16, u16, [u8; 4], u64, u8, [u8; 7], [DeviceRecord; MAX_DEVICES]);
+    const _: () = require::<DeviceRecord>();
+    assert_no_padding!(ServiceManagerRecord; ServiceHandle, ManagerState, u8, u8, u8, u16, [u8; 2], u8, [u8; 3], u32, [u8; MAX_PACKAGE_NAME_BYTES]);
+    assert_no_padding!(ManagerResponse; u16, ManagerOperation, ManagerStatus, u32, u64, ServiceManagerRecord);
+    const _: () = require::<ServiceManagerRecord>();
+}
+
+/// Making the padding explicit must not move any field: size and offsets are the
+/// layout shipped before the padding became explicit.
+mod layout_proofs {
+    #![allow(clippy::wildcard_imports)]
+    use crate::*;
+    use core::mem::{offset_of, size_of};
+
+    const _: () = {
+        assert!(size_of::<FramebufferConfig>() == 24);
+        assert!(offset_of!(FramebufferConfig, bytes) == 0);
+        assert!(offset_of!(FramebufferConfig, width) == 8);
+        assert!(offset_of!(FramebufferConfig, height) == 12);
+        assert!(offset_of!(FramebufferConfig, stride) == 16);
+        assert!(offset_of!(FramebufferConfig, format) == 20);
+    };
+    const _: () = {
+        assert!(size_of::<StorageResponse>() == 32);
+        assert!(offset_of!(StorageResponse, request_id) == 0);
+        assert!(offset_of!(StorageResponse, status) == 4);
+        assert!(offset_of!(StorageResponse, reserved) == 5);
+        assert!(offset_of!(StorageResponse, generation) == 6);
+        assert!(offset_of!(StorageResponse, blocks_completed) == 8);
+        assert!(offset_of!(StorageResponse, payload_bytes) == 10);
+        assert!(offset_of!(StorageResponse, transaction_id) == 16);
+        assert!(offset_of!(StorageResponse, block_count) == 24);
+    };
+    const _: () = {
+        assert!(size_of::<StorageMapRequest>() == 48);
+        assert!(offset_of!(StorageMapRequest, operation) == 0);
+        assert!(offset_of!(StorageMapRequest, flags) == 1);
+        assert!(offset_of!(StorageMapRequest, reserved) == 2);
+        assert!(offset_of!(StorageMapRequest, request_id) == 4);
+        assert!(offset_of!(StorageMapRequest, generation) == 8);
+        assert!(offset_of!(StorageMapRequest, client) == 16);
+        assert!(offset_of!(StorageMapRequest, pages) == 18);
+        assert!(offset_of!(StorageMapRequest, source_page) == 24);
+        assert!(offset_of!(StorageMapRequest, target_page) == 32);
+        assert!(offset_of!(StorageMapRequest, window_generation) == 40);
+        assert!(offset_of!(StorageMapRequest, reserved_tail) == 44);
+    };
+    const _: () = {
+        assert!(size_of::<StorageMapResponse>() == 40);
+        assert!(offset_of!(StorageMapResponse, request_id) == 0);
+        assert!(offset_of!(StorageMapResponse, status) == 4);
+        assert!(offset_of!(StorageMapResponse, reserved) == 5);
+        assert!(offset_of!(StorageMapResponse, generation) == 8);
+        assert!(offset_of!(StorageMapResponse, target_page) == 16);
+        assert!(offset_of!(StorageMapResponse, pages) == 24);
+        assert!(offset_of!(StorageMapResponse, reserved_tail) == 25);
+        assert!(offset_of!(StorageMapResponse, window_generation) == 32);
+        assert!(offset_of!(StorageMapResponse, reserved_end) == 36);
+    };
+    const _: () = {
+        assert!(size_of::<NetworkConfig>() == 32);
+        assert!(offset_of!(NetworkConfig, abi_version) == 0);
+        assert!(offset_of!(NetworkConfig, profile) == 2);
+        assert!(offset_of!(NetworkConfig, reserved) == 3);
+        assert!(offset_of!(NetworkConfig, address) == 4);
+        assert!(offset_of!(NetworkConfig, netmask) == 8);
+        assert!(offset_of!(NetworkConfig, gateway) == 12);
+        assert!(offset_of!(NetworkConfig, gateway_deadline_ticks) == 16);
+        assert!(offset_of!(NetworkConfig, dhcp_deadline_ticks) == 20);
+        assert!(offset_of!(NetworkConfig, service_epoch) == 24);
+    };
+    const _: () = {
+        assert!(size_of::<NetworkPacketDescriptor>() == 48);
+        assert!(offset_of!(NetworkPacketDescriptor, abi_version) == 0);
+        assert!(offset_of!(NetworkPacketDescriptor, operation) == 2);
+        assert!(offset_of!(NetworkPacketDescriptor, result) == 3);
+        assert!(offset_of!(NetworkPacketDescriptor, page) == 4);
+        assert!(offset_of!(NetworkPacketDescriptor, length) == 6);
+        assert!(offset_of!(NetworkPacketDescriptor, generation) == 8);
+        assert!(offset_of!(NetworkPacketDescriptor, reserved) == 10);
+        assert!(offset_of!(NetworkPacketDescriptor, service_epoch) == 16);
+        assert!(offset_of!(NetworkPacketDescriptor, sequence) == 24);
+        assert!(offset_of!(NetworkPacketDescriptor, mac) == 28);
+        assert!(offset_of!(NetworkPacketDescriptor, reserved_tail) == 34);
+    };
+    const _: () = {
+        assert!(size_of::<NetworkResponse>() == 248);
+        assert!(offset_of!(NetworkResponse, abi_version) == 0);
+        assert!(offset_of!(NetworkResponse, operation) == 2);
+        assert!(offset_of!(NetworkResponse, result) == 3);
+        assert!(offset_of!(NetworkResponse, state) == 4);
+        assert!(offset_of!(NetworkResponse, request_id) == 8);
+        assert!(offset_of!(NetworkResponse, handle) == 12);
+        assert!(offset_of!(NetworkResponse, generation) == 16);
+        assert!(offset_of!(NetworkResponse, reserved) == 18);
+        assert!(offset_of!(NetworkResponse, service_epoch) == 24);
+        assert!(offset_of!(NetworkResponse, payload_len) == 32);
+        assert!(offset_of!(NetworkResponse, detail) == 34);
+        assert!(offset_of!(NetworkResponse, payload) == 50);
+    };
+    const _: () = {
+        assert!(size_of::<PackageTarget>() == 36);
+        assert!(offset_of!(PackageTarget, kind) == 0);
+        assert!(offset_of!(PackageTarget, service) == 1);
+        assert!(offset_of!(PackageTarget, name_len) == 2);
+        assert!(offset_of!(PackageTarget, reserved) == 3);
+        assert!(offset_of!(PackageTarget, name) == 4);
+    };
+    const _: () = {
+        assert!(size_of::<PackageRequest>() == 80);
+        assert!(offset_of!(PackageRequest, operation) == 0);
+        assert!(offset_of!(PackageRequest, flags) == 1);
+        assert!(offset_of!(PackageRequest, target) == 2);
+        assert!(offset_of!(PackageRequest, request_id) == 40);
+        assert!(offset_of!(PackageRequest, generation) == 44);
+        assert!(offset_of!(PackageRequest, capability) == 48);
+        assert!(offset_of!(PackageRequest, service_epoch) == 56);
+        assert!(offset_of!(PackageRequest, package_generation) == 64);
+        assert!(offset_of!(PackageRequest, offset) == 68);
+        assert!(offset_of!(PackageRequest, length) == 72);
+        assert!(offset_of!(PackageRequest, reserved2) == 74);
+    };
+    const _: () = {
+        assert!(size_of::<PackageResponse>() == 80);
+        assert!(offset_of!(PackageResponse, operation) == 0);
+        assert!(offset_of!(PackageResponse, status) == 1);
+        assert!(offset_of!(PackageResponse, target) == 2);
+        assert!(offset_of!(PackageResponse, request_id) == 40);
+        assert!(offset_of!(PackageResponse, generation) == 44);
+        assert!(offset_of!(PackageResponse, reserved2) == 46);
+        assert!(offset_of!(PackageResponse, service_epoch) == 48);
+        assert!(offset_of!(PackageResponse, package_generation) == 56);
+        assert!(offset_of!(PackageResponse, offset) == 60);
+        assert!(offset_of!(PackageResponse, bytes) == 64);
+        assert!(offset_of!(PackageResponse, reserved3) == 66);
+        assert!(offset_of!(PackageResponse, package_bytes) == 68);
+        assert!(offset_of!(PackageResponse, package_version) == 72);
+        assert!(offset_of!(PackageResponse, payload_crc32c) == 76);
+    };
+    const _: () = {
+        assert!(size_of::<ServiceBootstrapPage>() == 64);
+        assert!(offset_of!(ServiceBootstrapPage, abi_version) == 0);
+        assert!(offset_of!(ServiceBootstrapPage, flags) == 2);
+        assert!(offset_of!(ServiceBootstrapPage, ipc_generation) == 4);
+        assert!(offset_of!(ServiceBootstrapPage, reserved) == 6);
+        assert!(offset_of!(ServiceBootstrapPage, service_epoch) == 8);
+        assert!(offset_of!(ServiceBootstrapPage, service) == 16);
+        assert!(offset_of!(ServiceBootstrapPage, control) == 24);
+        assert!(offset_of!(ServiceBootstrapPage, directory) == 32);
+        assert!(offset_of!(ServiceBootstrapPage, heap) == 40);
+        assert!(offset_of!(ServiceBootstrapPage, heap_base) == 48);
+        assert!(offset_of!(ServiceBootstrapPage, heap_pages) == 56);
+        assert!(offset_of!(ServiceBootstrapPage, heap_quota_pages) == 60);
+    };
+    const _: () = {
+        assert!(size_of::<ProgramBootstrapPage>() == 64);
+        assert!(offset_of!(ProgramBootstrapPage, abi_version) == 0);
+        assert!(offset_of!(ProgramBootstrapPage, flags) == 2);
+        assert!(offset_of!(ProgramBootstrapPage, ipc_generation) == 4);
+        assert!(offset_of!(ProgramBootstrapPage, reserved) == 6);
+        assert!(offset_of!(ProgramBootstrapPage, program_generation) == 8);
+        assert!(offset_of!(ProgramBootstrapPage, client) == 16);
+        assert!(offset_of!(ProgramBootstrapPage, surface_request) == 24);
+        assert!(offset_of!(ProgramBootstrapPage, surface_response) == 32);
+        assert!(offset_of!(ProgramBootstrapPage, surface_input) == 40);
+        assert!(offset_of!(ProgramBootstrapPage, surface_render) == 48);
+        assert!(offset_of!(ProgramBootstrapPage, surface_draw) == 56);
+    };
+    const _: () = {
+        assert!(size_of::<EventResponse>() == 32);
+        assert!(offset_of!(EventResponse, abi_version) == 0);
+        assert!(offset_of!(EventResponse, status) == 2);
+        assert!(offset_of!(EventResponse, reserved) == 3);
+        assert!(offset_of!(EventResponse, request_id) == 4);
+        assert!(offset_of!(EventResponse, event) == 8);
+        assert!(offset_of!(EventResponse, event_set) == 16);
+    };
+    const _: () = {
+        assert!(size_of::<DirectoryRecord>() == 64);
+        assert!(offset_of!(DirectoryRecord, kind) == 0);
+        assert!(offset_of!(DirectoryRecord, rights) == 1);
+        assert!(offset_of!(DirectoryRecord, flags) == 2);
+        assert!(offset_of!(DirectoryRecord, handle) == 8);
+        assert!(offset_of!(DirectoryRecord, peer) == 16);
+        assert!(offset_of!(DirectoryRecord, contract_id) == 24);
+        assert!(offset_of!(DirectoryRecord, message_bytes) == 26);
+        assert!(offset_of!(DirectoryRecord, queue_capacity) == 28);
+        assert!(offset_of!(DirectoryRecord, event) == 32);
+        assert!(offset_of!(DirectoryRecord, name_len) == 40);
+        assert!(offset_of!(DirectoryRecord, reserved) == 41);
+        assert!(offset_of!(DirectoryRecord, name) == 42);
+    };
+    const _: () = {
+        assert!(size_of::<DirectoryResponse>() == 2080);
+        assert!(offset_of!(DirectoryResponse, abi_version) == 0);
+        assert!(offset_of!(DirectoryResponse, operation) == 2);
+        assert!(offset_of!(DirectoryResponse, status) == 3);
+        assert!(offset_of!(DirectoryResponse, request_id) == 4);
+        assert!(offset_of!(DirectoryResponse, cursor) == 8);
+        assert!(offset_of!(DirectoryResponse, count) == 16);
+        assert!(offset_of!(DirectoryResponse, flags) == 17);
+        assert!(offset_of!(DirectoryResponse, reserved) == 18);
+        assert!(offset_of!(DirectoryResponse, records) == 24);
+    };
+    const _: () = {
+        assert!(size_of::<DeviceRecord>() == 32);
+        assert!(offset_of!(DeviceRecord, id) == 0);
+        assert!(offset_of!(DeviceRecord, kind) == 1);
+        assert!(offset_of!(DeviceRecord, state) == 2);
+        assert!(offset_of!(DeviceRecord, flags) == 3);
+        assert!(offset_of!(DeviceRecord, block_size) == 4);
+        assert!(offset_of!(DeviceRecord, block_count) == 8);
+        assert!(offset_of!(DeviceRecord, name) == 16);
+    };
+    const _: () = {
+        assert!(size_of::<DeviceResponse>() == 288);
+        assert!(offset_of!(DeviceResponse, abi_version) == 0);
+        assert!(offset_of!(DeviceResponse, operation) == 2);
+        assert!(offset_of!(DeviceResponse, status) == 3);
+        assert!(offset_of!(DeviceResponse, request_id) == 4);
+        assert!(offset_of!(DeviceResponse, generation) == 8);
+        assert!(offset_of!(DeviceResponse, reserved) == 10);
+        assert!(offset_of!(DeviceResponse, service_epoch) == 16);
+        assert!(offset_of!(DeviceResponse, count) == 24);
+        assert!(offset_of!(DeviceResponse, reserved_tail) == 25);
+        assert!(offset_of!(DeviceResponse, records) == 32);
+    };
+    const _: () = {
+        assert!(size_of::<ServiceManagerRecord>() == 56);
+        assert!(offset_of!(ServiceManagerRecord, service) == 0);
+        assert!(offset_of!(ServiceManagerRecord, state) == 8);
+        assert!(offset_of!(ServiceManagerRecord, restarts) == 9);
+        assert!(offset_of!(ServiceManagerRecord, name_len) == 10);
+        assert!(offset_of!(ServiceManagerRecord, dependencies) == 12);
+        assert!(offset_of!(ServiceManagerRecord, reserved) == 14);
+        assert!(offset_of!(ServiceManagerRecord, program_slot) == 16);
+        assert!(offset_of!(ServiceManagerRecord, reserved_program) == 17);
+        assert!(offset_of!(ServiceManagerRecord, program_generation) == 20);
+        assert!(offset_of!(ServiceManagerRecord, name) == 24);
+    };
+    const _: () = {
+        assert!(size_of::<ManagerResponse>() == 72);
+        assert!(offset_of!(ManagerResponse, abi_version) == 0);
+        assert!(offset_of!(ManagerResponse, operation) == 2);
+        assert!(offset_of!(ManagerResponse, status) == 3);
+        assert!(offset_of!(ManagerResponse, request_id) == 4);
+        assert!(offset_of!(ManagerResponse, cursor) == 8);
+        assert!(offset_of!(ManagerResponse, record) == 16);
+    };
+}
 
 #[cfg(test)]
 mod tests {
@@ -253,6 +555,7 @@ mod tests {
             generation: 8,
             client: 1,
             pages: 2,
+            reserved_align: [0; 4],
             source_page: 3,
             target_page: 4,
             window_generation: 5,

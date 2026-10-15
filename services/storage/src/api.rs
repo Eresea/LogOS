@@ -142,6 +142,7 @@ impl<B: BlockStore, V: NamespaceVolume> StorageApi<B, V> {
             generation,
             client: client as u16,
             pages: response.data[8] as u16,
+            reserved_align: [0; 4],
             source_page: u64::from_le_bytes(response.data[..8].try_into().ok()?),
             target_page: 0,
             window_generation: 0,

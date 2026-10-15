@@ -270,15 +270,18 @@ impl RuntimeEventRegistry {
                 kind: DirectoryRecordKind::Event,
                 rights: 0,
                 flags: event.directory_flags,
+                reserved_flags: [0; 4],
                 handle: handle.raw(),
                 peer: event.owner,
                 contract_id: 0,
                 message_bytes: 0,
                 queue_capacity: 0,
+                reserved_capacity: [0; 2],
                 event: EventHandle::EMPTY,
                 name_len: 0,
                 reserved: [0; 1],
                 name: [0; logos_abi::MAX_SERVICE_NAME_BYTES],
+                reserved_end: [0; 6],
             };
             written += 1;
             seen += 1;

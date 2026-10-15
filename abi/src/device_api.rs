@@ -178,6 +178,8 @@ pub struct DeviceResponse {
     pub request_id: u32,
     pub generation: u16,
     pub reserved: u16,
+    /// Explicit padding before `service_epoch`; always zero.
+    pub reserved_align: [u8; 4],
     pub service_epoch: u64,
     pub count: u8,
     pub reserved_tail: [u8; 7],
@@ -198,6 +200,7 @@ impl DeviceResponse {
             request_id: request.request_id,
             generation,
             reserved: 0,
+            reserved_align: [0; 4],
             service_epoch,
             count: 0,
             reserved_tail: [0; 7],

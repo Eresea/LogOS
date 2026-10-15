@@ -230,6 +230,7 @@ fn unmap_request(
             Client::User => logos_abi::ServiceId::User as u16,
         },
         pages: 0,
+        reserved_align: [0; 4],
         source_page: 0,
         target_page: mapping.target_page,
         window_generation: mapping.window_generation,

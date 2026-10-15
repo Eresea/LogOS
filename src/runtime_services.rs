@@ -925,6 +925,7 @@ impl RuntimeServiceRegistry {
             },
             restarts: service.restarts,
             name_len: name_len as u8,
+            reserved_name: 0,
             dependencies: service.dependencies.len().min(u16::MAX as usize) as u16,
             reserved: [0; 2],
             program_slot: u8::MAX,

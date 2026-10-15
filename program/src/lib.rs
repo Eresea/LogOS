@@ -400,6 +400,7 @@ mod tests {
             ipc_generation: 1,
             reserved: 0,
             program_generation: 1,
+            reserved_generation: [0; 4],
             client: logos_abi::ServiceHandle::new(1, 1).unwrap(),
             surface_request: cap(1),
             surface_response: cap(2),

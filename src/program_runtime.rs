@@ -272,6 +272,7 @@ impl ProgramRuntime {
             ipc_generation,
             reserved: 0,
             program_generation: generation,
+            reserved_generation: [0; 4],
             client,
             surface_request: capabilities.request,
             surface_response: capabilities.response,

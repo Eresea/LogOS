@@ -47,6 +47,7 @@ impl ProgramSlot {
             state: self.state,
             restarts: 0,
             name_len: self.name_len,
+            reserved_name: 0,
             dependencies: 0,
             reserved: [0; 2],
             program_slot: slot as u8,
