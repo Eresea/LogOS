@@ -22,6 +22,7 @@ impl FrameBytes {
     /// Core frames are identity-mapped, page-sized and exclusively owned by the
     /// Core while it holds the `FrameAddress`; a null address yields an empty
     /// view so that no access can dereference it.
+    #[cfg_attr(not(target_os = "uefi"), allow(dead_code))]
     pub(crate) fn from_frame(frame: FrameAddress) -> Self {
         let base = frame.raw() as usize as *mut u8;
         let capacity = if base.is_null() { 0 } else { crate::loader::PAGE_SIZE };
