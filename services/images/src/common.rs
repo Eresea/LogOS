@@ -2,6 +2,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
+#[cfg(target_os = "none")]
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -10,6 +11,30 @@ use core::{mem, ptr};
 use logos_abi::IpcStatus;
 
 const SERVICE_PAGE_BYTES: usize = 4096;
+
+/// The one target-specific line of the service facade: `int 49` on bare
+/// metal, the hosted Core's pipe transport everywhere else (ADR-0096).
+#[inline(always)]
+fn trap(number: usize, rdi: usize, rsi: usize) -> usize {
+    #[cfg(target_os = "none")]
+    {
+        let mut raw = number;
+        unsafe {
+            asm!(
+                "int 49",
+                inout("rax") raw,
+                in("rdi") rdi,
+                in("rsi") rsi,
+                options(preserves_flags),
+            );
+        }
+        raw
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host::syscall(number, rdi, rsi)
+    }
+}
 const HEAP_GROWTH_PAGES: usize = 64;
 const ALLOCATION_MAGIC: u64 = 0x4c4f_474f_5348_4541;
 
@@ -580,7 +605,6 @@ fn merge_discovered_capability(
 fn discover_event_for_capability(
     capability: logos_abi::CapabilityHandle,
 ) -> Result<logos_abi::EventHandle, logos_abi::DirectoryStatus> {
-    #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
         if !bootstrap.is_valid() || !capability.is_valid() {
@@ -620,18 +644,12 @@ fn discover_event_for_capability(
             request.cursor = response.cursor;
         }
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = capability;
-        Err(logos_abi::DirectoryStatus::NotFound)
-    }
 }
 
 #[allow(dead_code)]
 fn discover_hardware_event(
     flags: u16,
 ) -> Result<logos_abi::EventHandle, logos_abi::DirectoryStatus> {
-    #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
         if !bootstrap.is_valid() || flags == 0 {
@@ -674,11 +692,6 @@ fn discover_hardware_event(
             request.cursor = response.cursor;
         }
         found.ok_or(logos_abi::DirectoryStatus::NotFound)
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = flags;
-        Err(logos_abi::DirectoryStatus::NotFound)
     }
 }
 
@@ -733,7 +746,6 @@ pub fn discover_capabilities_contract(
 ) -> Result<Vec<(logos_abi::ServiceHandle, logos_abi::CapabilityHandle)>, logos_abi::DirectoryStatus>
 {
     const MAX_RESULTS: usize = 16;
-    #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
         if !bootstrap.is_valid() || contract_id == 0 || message_bytes == 0 {
@@ -781,11 +793,6 @@ pub fn discover_capabilities_contract(
         }
         Ok(found)
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = (rights, contract_id, message_bytes);
-        Ok(Vec::new())
-    }
 }
 
 #[allow(dead_code)]
@@ -799,7 +806,6 @@ enum PeerSelector {
 fn discover_service_name(
     name: &[u8],
 ) -> Result<logos_abi::ServiceHandle, logos_abi::DirectoryStatus> {
-    #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
         if !bootstrap.is_valid()
@@ -859,11 +865,6 @@ fn discover_service_name(
         }
         found.ok_or(logos_abi::DirectoryStatus::NotFound)
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = name;
-        Err(logos_abi::DirectoryStatus::NotFound)
-    }
 }
 
 fn discover_capability_contract_selector(
@@ -872,7 +873,6 @@ fn discover_capability_contract_selector(
     contract_id: u16,
     message_bytes: usize,
 ) -> Result<logos_abi::CapabilityHandle, logos_abi::DirectoryStatus> {
-    #[cfg(target_os = "none")]
     {
         let bootstrap = bootstrap_page();
         let peer_selector = match peer_selector {
@@ -948,59 +948,26 @@ fn discover_capability_contract_selector(
         }
         found.ok_or(logos_abi::DirectoryStatus::NotFound)
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = (peer_selector, rights, contract_id, message_bytes);
-        Err(logos_abi::DirectoryStatus::NotFound)
-    }
 }
 
 fn request_heap_growth(capability: logos_abi::CapabilityHandle) -> bool {
-    #[cfg(target_os = "none")]
-    {
-        let mut raw = logos_abi::SERVICE_HEAP_GROW_SYSCALL;
-        unsafe {
-            asm!(
-                "int 49",
-                inout("rax") raw,
-                in("rdi") capability.raw() as usize,
-                in("rsi") HEAP_GROWTH_PAGES,
-                options(preserves_flags),
-            );
-        }
-        raw == logos_abi::IpcStatus::Ok as usize
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = capability;
-        false
-    }
+    trap(logos_abi::SERVICE_HEAP_GROW_SYSCALL, capability.raw() as usize, HEAP_GROWTH_PAGES)
+        == logos_abi::IpcStatus::Ok as usize
 }
 
 fn request_heap_shrink(capability: logos_abi::CapabilityHandle) -> bool {
-    #[cfg(target_os = "none")]
-    {
-        let mut raw = logos_abi::SERVICE_HEAP_SHRINK_SYSCALL;
-        unsafe {
-            asm!(
-                "int 49",
-                inout("rax") raw,
-                in("rdi") capability.raw() as usize,
-                in("rsi") 1usize,
-                options(preserves_flags),
-            );
-        }
-        raw == logos_abi::IpcStatus::Ok as usize
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = capability;
-        false
-    }
+    trap(logos_abi::SERVICE_HEAP_SHRINK_SYSCALL, capability.raw() as usize, 1)
+        == logos_abi::IpcStatus::Ok as usize
 }
 
 pub fn idle() -> ! {
     loop {
+        #[cfg(not(target_os = "none"))]
+        {
+            // Keep one quiet syscall flowing so the Core's death ends this process too.
+            let _ = trap(1, 0, 0);
+            std::thread::sleep(core::time::Duration::from_millis(50));
+        }
         core::hint::spin_loop();
     }
 }
@@ -1084,66 +1051,19 @@ static mut SERVICE_DIRECTORY: Option<Vec<logos_abi::DirectoryRecord>> = None;
 static NEXT_EVENT_REQUEST: AtomicU32 = AtomicU32::new(0x4000);
 
 pub fn current_ticks() -> u64 {
-    #[cfg(target_os = "none")]
-    {
-        let mut raw = logos_abi::CURRENT_TICKS_SYSCALL;
-        unsafe {
-            asm!(
-                "int 49",
-                inout("rax") raw,
-                options(preserves_flags),
-            );
-        }
-        raw as u64
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        0
-    }
+    trap(logos_abi::CURRENT_TICKS_SYSCALL, 0, 0) as u64
 }
 
-/// Current wall-clock reading (ADR-0086), through `WALL_TIME_SYSCALL`. Host
-/// builds return a fixed epoch since there is no RTC to read.
+/// Current wall-clock reading (ADR-0086), through `WALL_TIME_SYSCALL`.
 #[allow(dead_code)]
 pub fn wall_time() -> logos_abi::WallTime {
-    #[cfg(target_os = "none")]
-    {
-        let mut raw = logos_abi::WALL_TIME_SYSCALL;
-        unsafe {
-            asm!(
-                "int 49",
-                inout("rax") raw,
-                options(preserves_flags),
-            );
-        }
-        logos_abi::WallTime::unpack(raw as u64)
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        logos_abi::WallTime { year: 2026, month: 1, day: 1, hour: 0, minute: 0, second: 0 }
-    }
+    logos_abi::WallTime::unpack(trap(logos_abi::WALL_TIME_SYSCALL, 0, 0) as u64)
 }
 
-/// System-info reading (ADR-0093), through `SYSTEM_INFO_SYSCALL`. Host builds
-/// return an empty reading.
+/// System-info reading (ADR-0093), through `SYSTEM_INFO_SYSCALL`.
 #[allow(dead_code)]
 pub fn system_info() -> logos_abi::SystemInfo {
-    #[cfg(target_os = "none")]
-    {
-        let mut raw = logos_abi::SYSTEM_INFO_SYSCALL;
-        unsafe {
-            asm!(
-                "int 49",
-                inout("rax") raw,
-                options(preserves_flags),
-            );
-        }
-        logos_abi::SystemInfo::unpack(raw as u64)
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        logos_abi::SystemInfo { cpus: 1, mem_total_mib: 0, mem_used_mib: 0 }
-    }
+    logos_abi::SystemInfo::unpack(trap(logos_abi::SYSTEM_INFO_SYSCALL, 0, 0) as u64)
 }
 
 #[allow(dead_code)]
@@ -1158,7 +1078,6 @@ pub fn wait_on_capability_or_input(capability: logos_abi::CapabilityHandle) {
 
 #[allow(dead_code)]
 pub fn wait_on_capabilities_or_input(capabilities: &[logos_abi::CapabilityHandle]) {
-    #[cfg(target_os = "none")]
     {
         let mut events = [logos_abi::EventHandle::EMPTY; 5];
         let mut count = 0;
@@ -1193,7 +1112,6 @@ pub fn wait_on_capabilities(capabilities: &[logos_abi::CapabilityHandle]) {
 pub fn wait_on_capabilities_ready(
     capabilities: &[logos_abi::CapabilityHandle],
 ) -> Option<logos_abi::CapabilityHandle> {
-    #[cfg(target_os = "none")]
     {
         if capabilities.is_empty() {
             heartbeat();
@@ -1222,17 +1140,10 @@ pub fn wait_on_capabilities_ready(
                 .and_then(|index| capabilities.get(index).copied())
         })
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = capabilities;
-        heartbeat();
-        None
-    }
 }
 
 #[allow(dead_code)]
 fn wait_on_event_handles(events: &[logos_abi::EventHandle]) -> Option<logos_abi::EventHandle> {
-    #[cfg(target_os = "none")]
     {
         let cached = unsafe { &*EVENT_SET_CACHE.0.get() };
         let same = cached.set.is_valid() && cached.events.as_slice() == events;
@@ -1318,12 +1229,6 @@ fn wait_on_event_handles(events: &[logos_abi::EventHandle]) -> Option<logos_abi:
         heartbeat();
         ready
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = events;
-        heartbeat();
-        None
-    }
 }
 
 #[allow(dead_code)]
@@ -1333,7 +1238,6 @@ pub fn sleep() {
 
 #[allow(dead_code)]
 pub fn sleep_on_input() {
-    #[cfg(target_os = "none")]
     {
         let mut events = [logos_abi::EventHandle::EMPTY; 2];
         let mut count = 0;
@@ -1356,7 +1260,6 @@ pub fn sleep_on_input() {
 
 #[allow(dead_code)]
 fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHandle, IpcStatus> {
-    #[cfg(target_os = "none")]
     {
         let message_bytes = usize::from(spec.message_bytes);
         if message_bytes == 0 {
@@ -1380,11 +1283,6 @@ fn discovered_capability(spec: CapabilitySpec) -> Result<logos_abi::CapabilityHa
             _ => IpcStatus::Disconnected,
         })
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = spec;
-        Err(IpcStatus::Unauthorized)
-    }
 }
 
 #[allow(dead_code)]
@@ -1398,15 +1296,7 @@ pub fn heartbeat() {
     if !service.is_valid() {
         return;
     }
-    unsafe {
-        asm!(
-            "mov eax, 10",
-            "int 49",
-            in("rdi") service.raw() as usize,
-            lateout("rax") _,
-            options(preserves_flags),
-        );
-    }
+    let _ = trap(10, service.raw() as usize, 0);
 }
 
 pub fn heartbeat_tick(ticks: &mut u16) {
@@ -1431,14 +1321,7 @@ pub fn proof_line(message: &[u8]) {
             message.len(),
         );
     }
-    unsafe {
-        asm!(
-            "int 49",
-            in("rax") logos_abi::DEBUG_LINE_SYSCALL,
-            in("rdi") message.len(),
-            options(preserves_flags),
-        );
-    }
+    let _ = trap(logos_abi::DEBUG_LINE_SYSCALL, message.len(), 0);
 }
 
 #[inline(always)]
@@ -1465,16 +1348,7 @@ pub fn event_call(
     unsafe {
         ptr::write_unaligned(logos_abi::IPC_STAGING_BASE as *mut logos_abi::EventRequest, *request);
     }
-    let mut raw = logos_abi::EVENT_SYSCALL;
-    unsafe {
-        asm!(
-            "int 49",
-            inout("rax") raw,
-            in("rdi") 0usize,
-            in("rsi") mem::size_of::<logos_abi::EventRequest>(),
-            options(preserves_flags),
-        );
-    }
+    let raw = trap(logos_abi::EVENT_SYSCALL, 0, mem::size_of::<logos_abi::EventRequest>());
     let status = logos_abi::EventStatus::from_raw(raw).unwrap_or(logos_abi::EventStatus::Malformed);
     if status != logos_abi::EventStatus::Malformed {
         let received = unsafe {
@@ -1516,16 +1390,7 @@ fn ipc_receive_raw<T: Copy>(capability: logos_abi::CapabilityHandle, message: &m
 #[inline(always)]
 #[allow(dead_code)]
 pub fn power(action: usize) -> usize {
-    let mut raw = logos_abi::POWER_SYSCALL;
-    unsafe {
-        asm!(
-            "int 49",
-            inout("rax") raw,
-            in("rdi") action,
-            options(preserves_flags),
-        );
-    }
-    raw
+    trap(logos_abi::POWER_SYSCALL, action, 0)
 }
 
 #[inline(always)]
@@ -1577,16 +1442,11 @@ pub fn directory_call(
             );
         }
         core::sync::atomic::fence(Ordering::Release);
-        let mut raw = logos_abi::SERVICE_DIRECTORY_SYSCALL;
-        unsafe {
-            asm!(
-                "int 49",
-                inout("rax") raw,
-                in("rdi") capability.raw() as usize,
-                in("rsi") mem::size_of::<logos_abi::DirectoryRequest>(),
-                options(preserves_flags),
-            );
-        }
+        let raw = trap(
+            logos_abi::SERVICE_DIRECTORY_SYSCALL,
+            capability.raw() as usize,
+            mem::size_of::<logos_abi::DirectoryRequest>(),
+        );
         let status = logos_abi::DirectoryStatus::from_raw(raw)
             .unwrap_or(logos_abi::DirectoryStatus::Malformed);
         if status != logos_abi::DirectoryStatus::Ok {
@@ -1616,32 +1476,73 @@ pub fn ipc_probe(number: usize, capability_raw: u64, length: usize) -> IpcStatus
 
 #[inline(always)]
 fn ipc_syscall_raw(number: usize, capability_raw: u64, length: usize) -> IpcStatus {
-    let mut raw = number;
-    unsafe {
-        asm!(
-            "int 49",
-            inout("rax") raw,
-            in("rdi") capability_raw as usize,
-            in("rsi") length,
-            options(preserves_flags),
-        );
-    }
-    IpcStatus::from_raw(raw).unwrap_or(IpcStatus::Malformed)
+    IpcStatus::from_raw(trap(number, capability_raw as usize, length))
+        .unwrap_or(IpcStatus::Malformed)
 }
 
 #[inline(always)]
 fn manager_syscall(number: usize, capability_raw: u64, length: usize) -> IpcStatus {
-    let mut raw = number;
-    unsafe {
-        asm!(
-            "int 49",
-            inout("rax") raw,
-            in("rdi") capability_raw as usize,
-            in("rsi") length,
-            options(preserves_flags),
-        );
+    IpcStatus::from_raw(trap(number, capability_raw as usize, length))
+        .unwrap_or(IpcStatus::Malformed)
+}
+
+#[cfg(not(target_os = "none"))]
+pub mod host {
+    //! Host transport for the service facade (ADR-0096): `int 49` becomes a
+    //! 24-byte request on stdout and an 8-byte reply on stdin, and the fixed
+    //! ABI windows are shared memory mapped at their bare-metal addresses
+    //! before `_start` runs.
+    use std::io::{Read, Write};
+
+    pub fn syscall(number: usize, rdi: usize, rsi: usize) -> usize {
+        let mut frame = [0u8; 24];
+        frame[..8].copy_from_slice(&(number as u64).to_le_bytes());
+        frame[8..16].copy_from_slice(&(rdi as u64).to_le_bytes());
+        frame[16..].copy_from_slice(&(rsi as u64).to_le_bytes());
+        let mut reply = [0u8; 8];
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        if out.write_all(&frame).and_then(|_| out.flush()).is_err()
+            || std::io::stdin().lock().read_exact(&mut reply).is_err()
+        {
+            // The Core is gone; a service has no life of its own.
+            std::process::exit(0);
+        }
+        u64::from_le_bytes(reply) as usize
     }
-    IpcStatus::from_raw(raw).unwrap_or(IpcStatus::Malformed)
+
+    fn attach() {
+        if std::env::var_os(logos_host_shm::env_name("bootstrap")).is_none() {
+            eprintln!("logos service images run under logos-host, not directly");
+            std::process::exit(2);
+        }
+        for region in logos_host_shm::REGIONS {
+            let Ok(token) = std::env::var(logos_host_shm::env_name(region.name)) else {
+                continue;
+            };
+            match logos_host_shm::open_at(&token, region.base, region.bytes) {
+                // The window lives as long as the process, like a kernel mapping.
+                Ok(mapping) => core::mem::forget(mapping),
+                Err(error) => {
+                    eprintln!("cannot map {} at {:#x}: {error}", region.name, region.base);
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+
+    /// Host `main` for an image with a bare-metal entry point.
+    pub fn run(start: extern "C" fn() -> !) -> ! {
+        attach();
+        start()
+    }
+
+    /// Host `main` for an image whose entry point is still bare-metal only.
+    #[allow(dead_code)]
+    pub fn run_idle() -> ! {
+        attach();
+        super::idle()
+    }
 }
 
 #[cfg(test)]

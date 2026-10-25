@@ -1,5 +1,19 @@
 # Boot process
 
+## Hosted boot (v3)
+
+1. **`logos-host` starts.** It creates the shared Display, Input and per-service `bootstrap`/`ipc`
+   windows, fills the framebuffer config and present page, and zeroes the input rings.
+2. **Core spawns each service image** in boot order with the window tokens in its environment and
+   its stdin/stdout as the syscall link.
+3. **The child maps its windows** at the fixed ABI addresses and enters the unchanged `_start`.
+4. **Core serves syscalls** per service on a dedicated thread; the main thread presents the
+   framebuffer whenever the present sequence changes.
+5. **The service graph** (discovery, IPC, events, heartbeat, restart) is the active milestone; until
+   it lands the services idle after their first directory lookup.
+
+## Bare-metal boot (v2, frozen)
+
 Boot has three owners in one direction: **UEFI → Core → Runtime**. Ownership never moves backward.
 
 1. **UEFI enters Core on the bootstrap CPU.**

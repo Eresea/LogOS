@@ -2852,7 +2852,10 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 #[cfg(not(target_os = "none"))]
-fn main() {}
+#[cfg(not(target_os = "none"))]
+fn main() {
+    common::host::run(_start)
+}
 
 #[cfg(test)]
 mod terminal_scene_tests {

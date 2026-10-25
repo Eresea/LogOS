@@ -8,6 +8,8 @@ license = "MIT"
 [workspace]
 members = [
     "abi",
+    "host",
+    "host/shm",
     "package",
     "network",
     "storage",
