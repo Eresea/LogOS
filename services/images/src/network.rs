@@ -953,4 +953,7 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 #[cfg(not(target_os = "none"))]
-fn main() {}
+#[cfg(not(target_os = "none"))]
+fn main() {
+    common::host::run_idle()
+}

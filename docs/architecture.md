@@ -1,4 +1,22 @@
-# LogOS vNext Core architecture
+# LogOS architecture
+
+## Hosted Core (v3)
+
+LogOS v3 runs the service graph on a host operating system (ADR-0096). `host/` owns the Core's
+machine layer; the service contracts below are unchanged and still describe who owns what.
+
+| Boundary | Owner | Invariant / proof |
+| --- | --- | --- |
+| Service process | `logos-host` (`host/src/main.rs`) | each of the fourteen images is one OS child process entered through its unchanged `_start`; stdin/stdout are the syscall link; stderr is inherited for panics |
+| Fixed ABI windows | `logos-host-shm` (`host/shm`) | `bootstrap`, `ipc` (staging, storage data/cache, capability, network pages), `display`, `display_config`, `input` are shared memory created by Core and mapped by the child at the bare-metal addresses before `_start`; the window table is unit-tested for 64 KiB alignment and disjointness |
+| Syscall transport | `common::trap` + `common::host` + `logos-host::serve` | one 24-byte `(rax, rdi, rsi)` request and one 8-byte `rax` reply per `int 49`; the staging page carries payloads exactly as on v2; a closed link ends the service |
+| Time and system info | `logos-host` | `CURRENT_TICKS` from a monotonic clock at 100 Hz, `WALL_TIME` from UTC, `SYSTEM_INFO` from the host CPU count |
+| Presentation | `logos-host` + `minifb` | the Display framebuffer (1280×800 BGRx) is blitted to a native window whenever the present sequence changes; closing the window kills every service |
+| Service graph | pending | directory, capability, endpoint, queue, event-set, heartbeat and restart syscalls return `NotFound`/`Capacity`/`Disconnected` until the hosted graph lands; services idle on a quiet yield loop |
+
+The v2 kernel below is frozen; its policy modules are reused by the hosted Core as the graph lands and its machine modules are retired afterwards.
+
+## v2 Core (frozen)
 
 The package has two targets: the UEFI binary in `src/main.rs` calls `boot()` in `src/lib.rs`,
 while independent `x86_64-unknown-none` service images run in isolated roots. ABI v6 owns one

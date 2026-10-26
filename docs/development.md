@@ -1,5 +1,27 @@
 # Development checks
 
+## Hosted Core
+
+Build the service images and the hosted Core, then open the LogOS window:
+
+```text
+.\scripts\host.ps1
+```
+
+`logos-host` finds the `logos-<service>` binaries beside its own executable, so both must be built
+with the same profile (`-Release` for both). Core logs `[core] <service>: started pid ...`, each
+service's first syscall, and every `DEBUG_LINE` as `[<service>] ...`. A service that exits or loses
+its link logs `link closed`. Closing the window stops every service.
+
+The service images must also keep building for bare metal:
+
+```text
+cargo build --target x86_64-unknown-none -p logos-service-images --bins
+cargo clippy --target x86_64-unknown-none -p logos-service-images --bins -- -D warnings
+```
+
+## v2 kernel checks (frozen)
+
 Host checks:
 
 ```text

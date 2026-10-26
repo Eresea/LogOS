@@ -1,8 +1,22 @@
-# vNext Core test status
+# Test status
 
-Status: active preemptive SMP Core milestone.
+Status: v3 hosted Core, first slice (ADR-0096). The v2 evidence below is retained for the frozen
+kernel on the `v2` branch.
 
-## Verified in this tree
+## Hosted Core, verified in this tree
+
+- `cargo test -p logos-host-shm` proves the fixed window table is 64 KiB aligned and disjoint and
+  that a window created by one mapping is visible through another; `cargo test -p logos-host`
+  checks the UTC civil-date conversion against known dates.
+- `logos-host` on Windows 11 spawns all fourteen service images, every child maps its windows at
+  the bare-metal addresses (a failed mapping exits the child with code 2 before any syscall), each
+  child's first syscall arrives over the pipe link, the window opens, and closing the Core ends
+  every child within one yield.
+- Not yet verified: the Linux `memfd` mapping path, local wall-time offsets, memory totals, and
+  everything behind the service graph (directory, IPC, events, input, storage, network, restart),
+  which is the active milestone.
+
+## v2 kernel, verified on the `v2` branch
 
 - `cargo test --lib`: scheduler transitions, publication-before-claim ordering, wake-pending,
   event wait/signal races, timeout cleanup, stale generations, bounded capacity, completion/reuse,

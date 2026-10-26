@@ -1,0 +1,17 @@
+[package]
+name = "logos-host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[[bin]]
+name = "logos-host"
+path = "src/main.rs"
+test = true
+bench = false
+
+[dependencies]
+logos-abi = { path = "../abi" }
+logos-host-shm = { path = "shm" }
+minifb = "0.29"

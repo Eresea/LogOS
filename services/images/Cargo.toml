@@ -34,6 +34,9 @@ logos-ui-graphics = { path = "../../ui-graphics" }
 logos-lockscreen = { path = "../lockscreen" }
 logos-atrium = { path = "../atrium" }
 
+[target.'cfg(not(target_os = "none"))'.dependencies]
+logos-host-shm = { path = "../../host/shm" }
+
 [build-dependencies]
 logos-ui-compiler = { path = "../../ui-compiler" }
 
